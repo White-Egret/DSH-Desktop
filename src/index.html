@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="style.css" />
+  <title>DSH Launcher</title>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <span>DSH Launcher</span>
+    </div>
+    <button id="btn-open-dsh" class="btn small ghost" title="打开 / 聚焦 DSH Web 窗口">打开 DSH</button>
+  </header>
+
+  <!-- 状态卡片 -->
+  <section class="card">
+    <div class="status-row">
+      <span id="status-dot" class="dot gray"></span>
+      <span id="status-text">正在初始化…</span>
+      <span id="spinner" class="spinner hidden"></span>
+      <span id="pid-chip" class="chip hidden">PID —</span>
+    </div>
+    <div class="meta-row">
+      <span>端口 <b id="port-val">—</b></span>
+      <span>本地版本 <b id="local-ver">未知</b></span>
+      <span>最新版本 <b id="latest-ver">未知</b></span>
+    </div>
+    <div id="status-msg" class="status-msg hidden"></div>
+    <div id="port-busy-panel" class="port-busy hidden">
+      <div class="port-busy-text">
+        端口 <b id="busy-port">—</b> 已被其他进程占用（可能是已在运行的 DSH，也可能是其他程序）。本程序不会强制结束未知进程。
+      </div>
+      <div class="row gap">
+        <button id="btn-connect" class="btn small">连接现有服务</button>
+        <button id="btn-change-port" class="btn small ghost">修改端口</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 操作按钮 -->
+  <section class="card actions">
+    <button id="btn-start" class="btn primary">启动</button>
+    <button id="btn-stop" class="btn danger">停止</button>
+    <button id="btn-restart" class="btn">重启</button>
+    <button id="btn-check-update" class="btn">检查版本</button>
+    <button id="btn-update" class="btn warn">更新 DSH</button>
+    <button id="btn-settings" class="btn ghost">设置</button>
+  </section>
+
+  <!-- 日志 -->
+  <section class="card log-card">
+    <div class="log-head">
+      <span>日志（DSH stdout / stderr 实时输出）</span>
+      <div class="log-tools">
+        <label class="autoscroll"><input type="checkbox" id="chk-autoscroll" checked /> 自动滚动</label>
+        <button id="btn-clear-log" class="btn tiny ghost">清空</button>
+      </div>
+    </div>
+    <div id="log" class="log-body"></div>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- 设置模态框 -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-title">设置</div>
+      <div class="form">
+        <label class="field">
+          <span>npm.cmd 路径 <em id="npm-exists-flag" class="flag"></em></span>
+          <div class="row">
+            <input id="set-npm-path" type="text" spellcheck="false" />
+            <button class="btn small ghost" data-pick="exec" data-kind="npm" data-target="set-npm-path">浏览</button>
+          </div>
+        </label>
+        <label class="field">
+          <span>dsh.cmd 路径 <em id="dsh-exists-flag" class="flag"></em></span>
+          <div class="row">
+            <input id="set-dsh-path" type="text" spellcheck="false" />
+            <button class="btn small ghost" data-pick="exec" data-kind="dsh" data-target="set-dsh-path">浏览</button>
+          </div>
+        </label>
+        <label class="field">
+          <span>DSH 家目录 / 工作目录 <em id="home-exists-flag" class="flag"></em></span>
+          <div class="row">
+            <input id="set-home-dir" type="text" spellcheck="false" />
+            <button class="btn small ghost" data-pick="folder" data-kind="home" data-target="set-home-dir">浏览</button>
+          </div>
+        </label>
+        <div class="row two">
+          <label class="field">
+            <span>端口</span>
+            <input id="set-port" type="number" min="1" max="65535" />
+          </label>
+          <label class="field">
+            <span>就绪超时（秒）</span>
+            <input id="set-timeout" type="number" min="5" max="300" />
+          </label>
+        </div>
+        <label class="field">
+          <span>附加启动参数（追加在 dsh web --port 之后，可留空）</span>
+          <input id="set-extra-args" type="text" spellcheck="false" placeholder="例如: --host 127.0.0.1" />
+        </label>
+        <label class="field">
+          <span>DSH 的 npm 包名（用于查询最新版本）</span>
+          <input id="set-package-name" type="text" spellcheck="false" />
+        </label>
+        <label class="field">
+          <span>更新参数（拼在 cmd /C npm.cmd 之后）</span>
+          <input id="set-update-args" type="text" spellcheck="false" />
+        </label>
+        <div class="hint">
+          配置保存于：<span id="set-config-path"></span>。<br />
+          端口、参数等修改在<b>下次启动 DSH</b> 时生效。本程序不会读取或修改 DSH 用户配置目录（如 ~/.dsh）。
+        </div>
+        <div class="row gap">
+          <button id="btn-detect-package" class="btn small ghost">检测全局包名</button>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-cancel-settings" class="btn ghost">取消</button>
+        <button id="btn-save-settings" class="btn primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 更新确认模态框 -->
+  <div id="update-modal" class="modal hidden">
+    <div class="modal-box narrow">
+      <div class="modal-title">更新 DSH</div>
+      <div class="update-desc">
+        将执行：<code id="update-cmd-preview"></code><br /><br />
+        更新前会<b>停止当前 DSH 服务</b>；更新成功后会自动重新启动。<br />
+        如担心大版本不兼容，建议先备份 DSH 配置目录（如 <code>~/.dsh</code>）。
+      </div>
+      <div class="modal-actions">
+        <button id="btn-cancel-update" class="btn ghost">取消</button>
+        <button id="btn-confirm-update" class="btn warn">开始更新</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+[package]
+name = "dsh-launcher"
+version = "1.0.0"
+description = "DSH Launcher - 启动并管理本机全局安装的 DSH Web 服务"
+authors = ["DSH Launcher"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "dsh_launcher_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+encoding_rs = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_Foundation",
+    "Win32_Security",
+] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

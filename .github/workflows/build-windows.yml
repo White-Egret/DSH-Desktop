@@ -1,0 +1,57 @@
+name: Build Windows
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 安装 Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust 构建缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri'
+
+      - name: 安装前端依赖（@tauri-apps/cli）
+        run: npm ci
+
+      - name: 执行 Tauri 构建（NSIS + MSI）
+        run: npm run tauri build
+
+      - name: 上传 NSIS 安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSH-Launcher-windows-nsis
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      - name: 上传 MSI 安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSH-Launcher-windows-msi
+          path: src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: warn
+
+      - name: 上传独立可执行文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSH-Launcher-windows-portable-exe
+          path: src-tauri/target/release/*.exe
+          if-no-files-found: warn

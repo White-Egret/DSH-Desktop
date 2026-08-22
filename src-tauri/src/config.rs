@@ -10,17 +10,18 @@ pub struct Config {
     pub npm_path: String,
     /// dsh.cmd 完整路径（用于启动 DSH）
     pub dsh_path: String,
-    /// DSH 家目录 / 工作目录（进程 current_dir，DSH 依赖它查找用户配置）
-    pub home_dir: String,
+    /// DSH 家目录：DSH 摆放配置文件的地方（通过 DSH_HOME 环境变量传给 DSH）
+    /// 启动进程的工作目录自动取其上一级目录；DSH 的工作区在网页内随意指定
+    pub dsh_home_dir: String,
     /// DSH Web 服务端口
     pub port: u16,
-    /// 附加启动参数（空格分隔，追加在 `dsh web --port <port>` 之后）
+    /// 附加启动参数（空格分隔，追加在 `dsh web --port <port> --no-open` 之后）
     pub extra_args: String,
     /// DSH 的 npm 包名（用于 `npm view <name> version` 与提示）
     pub package_name: String,
     /// 更新参数（拼在 `cmd /C <npm_path>` 之后）
     pub update_args: String,
-    /// 等待 DSH 就绪的超时时间（秒）
+    /// 等待 DSH 就绪的超时时间（秒）；0 = 一直等待（只要 DSH 进程还活着）
     pub health_timeout_secs: u64,
 }
 
@@ -29,20 +30,36 @@ impl Default for Config {
         Self {
             npm_path: r"D:\Programs\nodejs\npm.cmd".to_string(),
             dsh_path: r"C:\Users\admin\AppData\Roaming\npm\dsh.cmd".to_string(),
-            home_dir: default_home_dir(),
+            dsh_home_dir: default_dsh_home_dir(),
             port: 3000,
             extra_args: String::new(),
             package_name: "@deepseek-ai/dsh".to_string(),
             update_args: "install -g @deepseek-ai/dsh@latest".to_string(),
-            health_timeout_secs: 30,
+            // DSH 冷启动（尤其重启电脑后首次）可能需要 1~2 分钟以上，默认给足 5 分钟
+            health_timeout_secs: 300,
         }
     }
 }
 
-fn default_home_dir() -> String {
-    std::env::var("USERPROFILE")
+fn default_dsh_home_dir() -> String {
+    let base = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| r"C:\Users\admin".to_string())
+        .unwrap_or_else(|_| r"C:\Users\admin".to_string());
+    PathBuf::from(base)
+        .join(".dsh")
+        .to_string_lossy()
+        .to_string()
+}
+
+/// DSH 进程的工作目录：家目录的上一级（如 C:\Users\admin\.dsh -> C:\Users\admin）
+pub fn workspace_cwd(cfg: &Config) -> String {
+    PathBuf::from(&cfg.dsh_home_dir)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            std::env::var("USERPROFILE").unwrap_or_else(|_| r"C:\Users\admin".to_string())
+        })
 }
 
 pub fn config_dir(app: &AppHandle) -> PathBuf {

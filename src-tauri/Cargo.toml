@@ -14,7 +14,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# "unstable" feature：启用多 Webview API（Window::add_child / Manager::get_webview），
+# Tauri v2 官方 multiwebview 示例同样要求此 feature，属于官方支持的用法
+tauri = { version = "2", features = ["unstable"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }

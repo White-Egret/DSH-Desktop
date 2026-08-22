@@ -12,9 +12,6 @@ pub fn run() {
                 let _ = w.unminimize();
                 let _ = w.set_focus();
             }
-            if let Some(w) = app.get_webview_window("dsh") {
-                let _ = w.set_focus();
-            }
         }))
         .plugin(tauri_plugin_dialog::init())
         .manage(process::AppState::new())
@@ -26,31 +23,23 @@ pub fn run() {
             process::stop_dsh,
             process::restart_dsh,
             process::connect_existing,
-            process::open_dsh_window,
+            process::set_dsh_webview_visible,
             process::check_versions,
             process::update_dsh,
             process::detect_npm_package,
             process::pick_exec_path,
             process::pick_folder,
         ])
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed = event {
-                let app = window.app_handle();
-                match window.label() {
-                    // 关闭主窗口（控制台）= 退出整个程序：停止 DSH + 关闭 DSH 窗口
-                    "main" => {
-                        process::cleanup_sync(app);
-                        if let Some(w) = app.get_webview_window("dsh") {
-                            let _ = w.destroy();
-                        }
-                    }
-                    // 关闭 DSH 窗口 = 停止 DSH 服务，控制台保留（可重新启动）
-                    "dsh" => {
-                        process::cleanup_sync(app);
-                    }
-                    _ => {}
-                }
+        .on_window_event(|window, event| match event {
+            // 窗口尺寸变化时同步内嵌 DSH Webview 的大小（工具栏 48px 之下填满）
+            WindowEvent::Resized(_) if window.label() == "main" => {
+                process::sync_dsh_webview_size(window.app_handle());
             }
+            // 关闭主窗口 = 退出整个程序：停止 DSH（内嵌 webview 随窗口一起销毁）
+            WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed if window.label() == "main" => {
+                process::cleanup_sync(window.app_handle());
+            }
+            _ => {}
         })
         .build(tauri::generate_context!())
         .expect("failed to build tauri application")

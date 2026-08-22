@@ -12,6 +12,9 @@ use tauri::{AppHandle, Emitter, Manager};
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// 主窗口顶部工具栏高度（逻辑像素），必须与前端 CSS 中 header 的 height 保持一致
+pub const TOOLBAR_H: f64 = 48.0;
+
 /// Windows Job Object：程序退出（含崩溃）时由内核结束整个 DSH 进程树，兜底防残留。
 #[cfg(windows)]
 mod win {
@@ -73,6 +76,8 @@ pub struct AppState {
     pid: Mutex<Option<u32>>,
     status: Mutex<String>,
     pub updating: AtomicBool,
+    /// DSH 崩溃前最后一条 stderr 输出（用于在状态区显示单行错误原因）
+    last_stderr: Mutex<Option<String>>,
     #[cfg(windows)]
     job: Mutex<Option<win::JobHandle>>,
     #[cfg(windows)]
@@ -86,6 +91,7 @@ impl AppState {
             pid: Mutex::new(None),
             status: Mutex::new("idle".to_string()),
             updating: AtomicBool::new(false),
+            last_stderr: Mutex::new(None),
             #[cfg(windows)]
             job: Mutex::new(None),
             #[cfg(windows)]
@@ -117,6 +123,14 @@ impl AppState {
         {
             let _ = self;
         }
+    }
+
+    fn set_last_stderr(&self, line: &str) {
+        *self.last_stderr.lock().unwrap() = Some(line.to_string());
+    }
+
+    fn take_last_stderr(&self) -> Option<String> {
+        self.last_stderr.lock().unwrap().take()
     }
 }
 
@@ -254,14 +268,24 @@ fn apply_no_window(cmd: &mut Command) {
 fn apply_no_window(_cmd: &mut Command) {}
 
 /// 子进程输出逐行读取并转发到前端日志面板（绝不吞掉 stdout/stderr）
-fn spawn_log_reader(app: AppHandle, out: impl Read + Send + 'static, stream: &'static str, event: &'static str) {
+fn spawn_log_reader(
+    app: AppHandle,
+    out: impl Read + Send + 'static,
+    stream: &'static str,
+    event: &'static str,
+    track_stderr: bool,
+) {
     std::thread::spawn(move || {
+        let state = app.state::<AppState>();
         let reader = BufReader::new(out);
         for line in reader.lines() {
             match line {
                 Ok(l) => {
                     if l.trim().is_empty() {
                         continue;
+                    }
+                    if track_stderr && stream == "stderr" {
+                        state.set_last_stderr(&l);
                     }
                     let _ = app.emit(event, LogEvent { stream: stream.to_string(), line: l });
                 }
@@ -329,6 +353,81 @@ fn run_cmd_capture(
     }
 }
 
+// ---------- DSH Webview（内嵌在主窗口工具栏下方） ----------
+
+/// 主窗口内容区的逻辑尺寸（宽, 高-工具栏）
+fn main_content_size(app: &AppHandle) -> (f64, f64) {
+    if let Some(win) = app.get_webview_window("main") {
+        if let (Ok(scale), Ok(size)) = (win.scale_factor(), win.inner_size()) {
+            let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
+            return (logical.width, (logical.height - TOOLBAR_H).max(0.0));
+        }
+    }
+    (1024.0, 640.0)
+}
+
+/// 在主窗口内创建（或刷新）内嵌的 DSH Webview
+fn open_dsh_webview(app: &AppHandle, port: u16) {
+    let url = format!("http://127.0.0.1:{}", port);
+
+    // 已存在：直接刷新到当前 URL（端口可能已变更）
+    if let Some(wv) = app.get_webview("dsh") {
+        sync_dsh_webview_size(app);
+        let _ = wv.show();
+        let _ = wv.eval(&format!("window.location.replace('{}')", url));
+        return;
+    }
+
+    // add_child 是 Window 的方法：取主窗口的 Window 句柄（unstable API）
+    let Some(win) = app.get_window("main") else {
+        emit_log(app, "launcher", "[launcher] 找不到主窗口，无法内嵌 DSH 页面。".to_string());
+        return;
+    };
+    let (w, h) = main_content_size(app);
+    let parsed: tauri::Url = url.parse().expect("valid url");
+    let result = win.add_child(
+        tauri::WebviewBuilder::new(
+            "dsh",
+            tauri::WebviewUrl::External(parsed),
+        ),
+        tauri::LogicalPosition::new(0.0, TOOLBAR_H),
+        tauri::LogicalSize::new(w, h),
+    );
+    if let Err(e) = result {
+        emit_log(app, "launcher", format!("[launcher] 内嵌 DSH 页面失败: {}", e));
+    }
+}
+
+/// 窗口尺寸变化时同步内嵌 webview 大小（由主窗口 Resized 事件调用）
+pub fn sync_dsh_webview_size(app: &AppHandle) {
+    let Some(wv) = app.get_webview("dsh") else { return };
+    let Some(win) = app.get_webview_window("main") else { return };
+    let Ok(scale) = win.scale_factor() else { return };
+    if let Ok(size) = win.inner_size() {
+        let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
+        let _ = wv.set_size(tauri::LogicalSize::new(
+            logical.width,
+            (logical.height - TOOLBAR_H).max(0.0),
+        ));
+    }
+}
+
+/// 销毁内嵌的 DSH Webview（服务停止后露出状态区）
+fn destroy_dsh_webview(app: &AppHandle) {
+    if let Some(wv) = app.get_webview("dsh") {
+        let _ = wv.close();
+    }
+}
+
+/// 模态框（设置/日志等）打开时隐藏内嵌 webview，避免被遮挡
+#[tauri::command]
+pub fn set_dsh_webview_visible(app: AppHandle, visible: bool) -> Result<(), String> {
+    if let Some(wv) = app.get_webview("dsh") {
+        let _ = if visible { wv.show() } else { wv.hide() };
+    }
+    Ok(())
+}
+
 // ---------- 启动 / 停止核心 ----------
 
 fn start_internal(app: &AppHandle) -> Result<(), String> {
@@ -350,10 +449,11 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         set_status(app, "error", Some(msg.clone()));
         return Err(msg);
     }
-    if !Path::new(&cfg.home_dir).is_dir() {
+    let cwd = config::workspace_cwd(&cfg);
+    if !Path::new(&cwd).is_dir() {
         let msg = format!(
-            "DSH 工作目录不存在：{}\n请在「设置」中修改家目录 / 工作目录。",
-            cfg.home_dir
+            "DSH 工作目录不存在：{}（由家目录 {} 推导），请检查「设置」中的 DSH 家目录。",
+            cwd, cfg.dsh_home_dir
         );
         set_status(app, "error", Some(msg.clone()));
         return Err(msg);
@@ -362,41 +462,45 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
     // 端口占用检查：绝不强杀未知进程，交给用户决策
     if port_in_use(cfg.port) {
         let msg = format!(
-            "端口 {} 已被其他进程占用（可能是已在运行的 DSH，也可能是其他程序）。\n可选择「连接现有服务」，或到「设置」中修改端口。",
+            "端口 {} 已被其他进程占用（可能是已在运行的 DSH，也可能是其他程序）。本程序不会强制结束未知进程。",
             cfg.port
         );
         set_status(app, "port-busy", Some(msg.clone()));
         return Err(msg);
     }
 
-    // 启动命令等价于：cmd /C "<dsh_path>" web --port <port> [extra_args]
+    // 启动命令等价于：cmd /C "<dsh_path>" web --port <port> --no-open [extra_args]
+    // --no-open：DSH 官方参数，禁止其自动打开默认浏览器（Edge）
     let mut cmd = Command::new("cmd");
     cmd.arg("/C")
         .arg(&cfg.dsh_path)
         .arg("web")
         .arg("--port")
-        .arg(cfg.port.to_string());
+        .arg(cfg.port.to_string())
+        .arg("--no-open");
     for a in cfg.extra_args.split_whitespace() {
         cmd.arg(a);
     }
-    // 关键：DSH 依赖工作目录查找配置，必须设置 current_dir
-    cmd.current_dir(&cfg.home_dir);
+    // 工作目录：DSH 家目录的上一级；DSH_HOME 指向家目录（DSH 在此读取配置）
+    cmd.current_dir(&cwd);
+    cmd.env("DSH_HOME", &cfg.dsh_home_dir);
     apply_no_window(&mut cmd);
     // stdin 不需要输入；stdout/stderr 必须 piped 转发到日志，绝不吞掉
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    let _ = state.take_last_stderr();
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("启动 DSH 失败: {}（路径: {}）", e, cfg.dsh_path))?;
     let pid = child.id();
 
     if let Some(so) = child.stdout.take() {
-        spawn_log_reader(app.clone(), so, "stdout", "dsh-log");
+        spawn_log_reader(app.clone(), so, "stdout", "dsh-log", false);
     }
     if let Some(se) = child.stderr.take() {
-        spawn_log_reader(app.clone(), se, "stderr", "dsh-log");
+        spawn_log_reader(app.clone(), se, "stderr", "dsh-log", true);
     }
 
     // Job Object 兜底：即使本程序异常退出，Windows 内核也会结束 DSH 进程树
@@ -415,7 +519,7 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         app,
         "launcher",
         format!(
-            "[launcher] 启动命令: cmd /C \"{}\" web --port {}{}（工作目录: {}，PID: {}）",
+            "[launcher] 启动命令: cmd /C \"{}\" web --port {} --no-open{}（工作目录: {}，DSH_HOME: {}，PID: {}）",
             cfg.dsh_path,
             cfg.port,
             if cfg.extra_args.trim().is_empty() {
@@ -423,22 +527,29 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
             } else {
                 format!(" {}", cfg.extra_args)
             },
-            cfg.home_dir,
+            cwd,
+            cfg.dsh_home_dir,
             pid
         ),
     );
 
     let app2 = app.clone();
     let port = cfg.port;
-    let timeout = Duration::from_secs(cfg.health_timeout_secs.clamp(5, 300));
+    // 0 = 一直等待（只要 DSH 进程还活着）；否则限制在 5 秒 ~ 1 小时之间
+    let timeout_secs = cfg.health_timeout_secs;
+    let timeout = if timeout_secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(timeout_secs.clamp(5, 3600)))
+    };
     std::thread::spawn(move || {
-        wait_ready_and_open(&app2, port, timeout);
+        wait_ready_and_embed(&app2, port, timeout);
     });
     Ok(())
 }
 
-/// 等待 DSH 就绪：同时监控子进程存活 + 轮询 HTTP；就绪后才打开 DSH 窗口（绝不提前加载网页）
-fn wait_ready_and_open(app: &AppHandle, port: u16, timeout: Duration) {
+/// 等待 DSH 就绪：同时监控子进程存活 + 轮询 HTTP；就绪后才把 DSH 页面内嵌进主窗口
+fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
     let state = app.state::<AppState>();
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
     let started = Instant::now();
@@ -446,13 +557,16 @@ fn wait_ready_and_open(app: &AppHandle, port: u16, timeout: Duration) {
         app,
         "launcher",
         format!(
-            "[launcher] 正在等待 DSH 就绪（http://127.0.0.1:{}，超时 {} 秒）...",
+            "[launcher] 正在等待 DSH 就绪（http://127.0.0.1:{}{}）...",
             port,
-            timeout.as_secs()
+            match timeout {
+                Some(t) => format!("，超时 {} 秒", t.as_secs()),
+                None => "，无超时限制（DSH 进程存活期间持续等待）".to_string(),
+            }
         ),
     );
     loop {
-        // 1) 监控子进程存活：DSH 若在端口就绪前闪退，立即终止等待并高亮报错
+        // 1) 监控子进程存活：DSH 若在端口就绪前闪退，立即终止等待并显示错误
         {
             let mut guard = state.child.lock().unwrap();
             if let Some(child) = guard.as_mut() {
@@ -462,19 +576,24 @@ fn wait_ready_and_open(app: &AppHandle, port: u16, timeout: Duration) {
                         drop(guard);
                         *state.pid.lock().unwrap() = None;
                         state.close_jobs();
+                        let last_err = state.take_last_stderr();
                         emit_log(
                             app,
                             "launcher",
                             format!(
-                                "[launcher] DSH 进程在服务就绪前已退出（退出码 {:?}），启动失败！请检查上方 DSH 的原始输出。",
+                                "[launcher] DSH 进程在服务就绪前已退出（退出码 {:?}），启动失败！请打开日志查看 DSH 的原始输出。",
                                 status.code()
                             ),
                         );
-                        set_status(
-                            app,
-                            "error",
-                            Some("DSH 启动失败：进程在端口就绪前退出，详见日志".to_string()),
+                        let mut msg = format!(
+                            "DSH 启动失败：进程在端口就绪前退出（退出码 {:?}）",
+                            status.code()
                         );
+                        if let Some(e) = last_err {
+                            msg.push_str("：");
+                            msg.push_str(&e);
+                        }
+                        set_status(app, "error", Some(msg));
                         return;
                     }
                     Ok(None) => {}
@@ -490,39 +609,48 @@ fn wait_ready_and_open(app: &AppHandle, port: u16, timeout: Duration) {
 
         // 2) HTTP 就绪检查
         if http_ready(&addr) {
-            emit_log(app, "launcher", "[launcher] DSH 服务已就绪。".to_string());
+            emit_log(
+                app,
+                "launcher",
+                format!(
+                    "[launcher] DSH 服务已就绪（共等待 {:.0} 秒），正在内嵌页面…",
+                    started.elapsed().as_secs_f64()
+                ),
+            );
             set_status(app, "running", None);
             open_dsh_webview(app, port);
             return;
         }
 
-        // 3) 超时
-        if started.elapsed() >= timeout {
-            emit_log(
-                app,
-                "launcher",
-                format!(
-                    "[launcher] 等待 DSH 就绪超时（{} 秒），正在停止进程树...",
-                    timeout.as_secs()
-                ),
-            );
-            let _ = stop_internal(app);
-            set_status(
-                app,
-                "error",
-                Some(format!(
-                    "DSH 启动超时：服务在 {} 秒内未就绪，已停止进程。请查看日志。",
-                    timeout.as_secs()
-                )),
-            );
-            return;
+        // 3) 超时（仅当配置了超时时间；0 表示无限等待）
+        if let Some(t) = timeout {
+            if started.elapsed() >= t {
+                emit_log(
+                    app,
+                    "launcher",
+                    format!(
+                        "[launcher] 等待 DSH 就绪超时（{} 秒），正在停止进程树。若 DSH 冷启动确实很慢，可在设置中调大超时或设为 0（一直等待）。",
+                        t.as_secs()
+                    ),
+                );
+                let _ = stop_internal(app);
+                set_status(
+                    app,
+                    "error",
+                    Some(format!(
+                        "启动超时：DSH 在 {} 秒内未就绪，进程已停止。可在设置中调大超时时间，或设为 0 表示一直等待。",
+                        t.as_secs()
+                    )),
+                );
+                return;
+            }
         }
 
         std::thread::sleep(Duration::from_millis(500));
     }
 }
 
-/// 停止本次启动的 DSH 进程树（幂等；对“外部进程”模式只重置状态，绝不碰别人的进程）
+/// 停止本次启动的 DSH 进程树（幂等；对"外部进程"模式只重置状态，绝不碰别人的进程）
 fn stop_internal(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let pid = state.pid.lock().unwrap().take();
@@ -569,37 +697,11 @@ fn stop_internal(app: &AppHandle) -> Result<(), String> {
     }
 
     state.close_jobs();
+    // 服务停止后销毁内嵌页面，露出状态区
+    destroy_dsh_webview(app);
     set_status(app, "idle", None);
     emit_log(app, "launcher", "[launcher] DSH 已停止。".to_string());
     Ok(())
-}
-
-/// 打开（或复用）DSH Web 窗口
-fn open_dsh_webview(app: &AppHandle, port: u16) {
-    let url = format!("http://127.0.0.1:{}", port);
-    match app.get_webview_window("dsh") {
-        Some(win) => {
-            let _ = win.show();
-            let _ = win.unminimize();
-            let _ = win.set_focus();
-            let _ = win.eval(&format!("window.location.replace('{}')", url));
-        }
-        None => {
-            let parsed: tauri::Url = url.parse().expect("valid url");
-            let result = tauri::WebviewWindowBuilder::new(
-                app,
-                "dsh",
-                tauri::WebviewUrl::External(parsed),
-            )
-            .title("DSH")
-            .inner_size(1280.0, 860.0)
-            .min_inner_size(760.0, 520.0)
-            .build();
-            if let Err(e) = result {
-                emit_log(app, "launcher", format!("[launcher] 打开 DSH 窗口失败: {}", e));
-            }
-        }
-    }
 }
 
 // ---------- Tauri Commands ----------
@@ -610,7 +712,7 @@ pub fn get_config(app: AppHandle) -> ConfigReport {
     ConfigReport {
         dsh_exists: Path::new(&cfg.dsh_path).is_file(),
         npm_exists: Path::new(&cfg.npm_path).is_file(),
-        home_exists: Path::new(&cfg.home_dir).is_dir(),
+        home_exists: Path::new(&cfg.dsh_home_dir).is_dir(),
         config_path: config::config_path(&app).to_string_lossy().to_string(),
         config: cfg,
     }
@@ -657,7 +759,8 @@ pub async fn start_dsh(app: AppHandle) -> Result<(), String> {
 pub async fn stop_dsh(app: AppHandle) -> Result<(), String> {
     let st = current_status(&app);
     if st == "running-external" {
-        // 外部进程不由本程序管理，只解除连接状态
+        // 外部进程不由本程序管理，只解除连接状态并收起页面
+        destroy_dsh_webview(&app);
         set_status(&app, "idle", None);
         emit_log(&app, "launcher", "[launcher] 已断开与外部服务的连接（该服务不是本程序启动的，仍在运行）。".to_string());
         return Ok(());
@@ -672,6 +775,7 @@ pub async fn restart_dsh(app: AppHandle) -> Result<(), String> {
         return Err("DSH 当前未在运行，无法重启".to_string());
     }
     if st == "running-external" {
+        destroy_dsh_webview(&app);
         set_status(&app, "idle", None);
     } else {
         stop_internal(&app)?;
@@ -700,17 +804,11 @@ pub async fn connect_existing(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub async fn open_dsh_window(app: AppHandle) -> Result<(), String> {
-    let cfg = config::load(&app);
-    open_dsh_webview(&app, cfg.port);
-    Ok(())
-}
-
 /// 版本检测：本地依次尝试 --version / -v / -V；最新版本用 npm view <pkg> version
 #[tauri::command]
 pub async fn check_versions(app: AppHandle) -> Result<VersionInfo, String> {
     let cfg = config::load(&app);
+    let cwd = config::workspace_cwd(&cfg);
     let mut info = VersionInfo { local: None, latest: None, error: None };
 
     if Path::new(&cfg.dsh_path).is_file() {
@@ -718,7 +816,7 @@ pub async fn check_versions(app: AppHandle) -> Result<VersionInfo, String> {
             match run_cmd_capture(
                 &cfg.dsh_path,
                 &[flag.to_string()],
-                &cfg.home_dir,
+                &cwd,
                 Duration::from_secs(20),
             ) {
                 Ok((true, out)) => {
@@ -750,7 +848,7 @@ pub async fn check_versions(app: AppHandle) -> Result<VersionInfo, String> {
                 cfg.package_name.clone(),
                 "version".to_string(),
             ],
-            &cfg.home_dir,
+            &cwd,
             Duration::from_secs(60),
         ) {
             Ok((true, out)) => {
@@ -792,10 +890,11 @@ pub async fn detect_npm_package(app: AppHandle) -> Result<String, String> {
     if !Path::new(&cfg.npm_path).is_file() {
         return Err(format!("找不到 npm: {}，请先在设置中配置 npm 路径", cfg.npm_path));
     }
+    let cwd = config::workspace_cwd(&cfg);
     let (ok, out) = run_cmd_capture(
         &cfg.npm_path,
         &["list".to_string(), "-g".to_string(), "--depth=0".to_string()],
-        &cfg.home_dir,
+        &cwd,
         Duration::from_secs(60),
     )?;
     let text = out.trim().to_string();
@@ -838,10 +937,12 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
     if st == "running" || st == "starting" {
         let _ = stop_internal(&app);
     } else if st == "running-external" {
+        destroy_dsh_webview(&app);
         set_status(&app, "idle", None);
     }
 
     set_status(&app, "updating", None);
+    let cwd = config::workspace_cwd(&cfg);
     let args: Vec<String> = cfg
         .update_args
         .split_whitespace()
@@ -856,7 +957,7 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
             for a in &args {
                 cmd.arg(a);
             }
-            cmd.current_dir(&cfg.home_dir);
+            cmd.current_dir(&cwd);
             apply_no_window(&mut cmd);
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -881,15 +982,15 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
                 "update",
                 format!(
                     "[update] 执行: cmd /C \"{}\" {}（工作目录: {}，PID: {}）",
-                    cfg.npm_path, cfg.update_args, cfg.home_dir, pid
+                    cfg.npm_path, cfg.update_args, cwd, pid
                 ),
             );
 
             if let Some(so) = child.stdout.take() {
-                spawn_log_reader(app2.clone(), so, "update", "update-log");
+                spawn_log_reader(app2.clone(), so, "update", "update-log", false);
             }
             if let Some(se) = child.stderr.take() {
-                spawn_log_reader(app2.clone(), se, "update", "update-log");
+                spawn_log_reader(app2.clone(), se, "update", "update-log", false);
             }
 
             child
@@ -912,7 +1013,7 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
                 emit_log(
                     &app2,
                     "update",
-                    format!("[update] npm 更新失败（退出码 {}），不会自动启动 DSH。请查看上方日志。", code),
+                    format!("[update] npm 更新失败（退出码 {}），不会自动启动 DSH。请查看日志。", code),
                 );
                 let _ = app2.emit(
                     "update-finished",

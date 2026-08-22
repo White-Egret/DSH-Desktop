@@ -1,23 +1,25 @@
-// DSH Launcher 前端控制台（通过 window.__TAURI__ 全局 API 与 Rust 后端通信）
+// DSH Launcher 前端（通过 window.__TAURI__ 全局 API 与 Rust 后端通信）
+// 布局：48px 工具栏（按钮居左 / 状态一行居右）；工具栏下方在「等待/错误」提示
+// 与内嵌 DSH 页面（native webview，盖在本页面之上）之间切换。
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
 
 const $ = (id) => document.getElementById(id);
 
-let config = null;       // ConfigReport（含 exists 标志）
-let status = 'idle';     // idle|starting|running|running-external|stopping|error|port-busy|updating
+let config = null;        // ConfigReport（含 exists 标志 + 展平的 config 字段）
+let status = 'idle';      // idle|starting|running|running-external|stopping|error|port-busy|updating
 let updating = false;
 let checkingVersion = false;
 
 const STATUS_MAP = {
-  'idle':             { text: '未运行',             dot: 'gray' },
-  'starting':         { text: '正在启动 DSH…',       dot: 'yellow' },
-  'running':          { text: '运行中',              dot: 'green' },
-  'running-external': { text: '运行中（外部进程）',   dot: 'blue' },
-  'stopping':         { text: '正在停止…',           dot: 'yellow' },
-  'error':            { text: '错误',                dot: 'red' },
-  'port-busy':        { text: '端口被占用',          dot: 'orange' },
-  'updating':         { text: '正在更新 DSH…',        dot: 'purple' },
+  'idle':             { text: '未运行',           dot: 'gray' },
+  'starting':         { text: '正在启动',          dot: 'yellow' },
+  'running':          { text: '运行中',            dot: 'green' },
+  'running-external': { text: '运行中（外部）',     dot: 'blue' },
+  'stopping':         { text: '正在停止',          dot: 'yellow' },
+  'error':            { text: '启动失败',          dot: 'red' },
+  'port-busy':        { text: '端口被占用',        dot: 'orange' },
+  'updating':         { text: '正在更新',          dot: 'purple' },
 };
 
 // ---------- 日志 ----------
@@ -47,6 +49,54 @@ function toast(msg, isError = false) {
   toastTimer = setTimeout(() => el.classList.add('hidden'), isError ? 6000 : 3500);
 }
 
+// ---------- 模态框（打开时隐藏内嵌 DSH webview，避免其盖住弹窗） ----------
+
+const MODALS = ['settings-modal', 'log-modal', 'update-modal'];
+
+function anyModalOpen() {
+  return MODALS.some((m) => !$(m).classList.contains('hidden'));
+}
+
+function syncWebviewVisibility() {
+  // 无 webview 时 Rust 端为 no-op，可安全调用
+  invoke('set_dsh_webview_visible', { visible: !anyModalOpen() }).catch(() => {});
+}
+
+function showModal(id) {
+  $(id).classList.remove('hidden');
+  syncWebviewVisibility();
+}
+
+function hideModal(id) {
+  $(id).classList.add('hidden');
+  syncWebviewVisibility();
+}
+
+// ---------- 等待秒表（starting 期间显示已等待秒数） ----------
+
+let waitTimer = null;
+let waitStart = 0;
+
+function startWaitTimer() {
+  stopWaitTimer();
+  waitStart = Date.now();
+  renderWaitLine(0);
+  waitTimer = setInterval(() => {
+    renderWaitLine(Math.floor((Date.now() - waitStart) / 1000));
+  }, 1000);
+}
+
+function renderWaitLine(secs) {
+  const timeout = config ? config.health_timeout_secs : 0;
+  const tail = timeout > 0 ? `（最长等待 ${timeout} 秒）` : '（一直等待直到就绪）';
+  $('stage-line').textContent = `正在启动 DSH，已等待 ${secs} 秒…${tail}`;
+}
+
+function stopWaitTimer() {
+  if (waitTimer) clearInterval(waitTimer);
+  waitTimer = null;
+}
+
 // ---------- 状态 UI ----------
 
 function onStatus(p) {
@@ -54,22 +104,55 @@ function onStatus(p) {
   const map = STATUS_MAP[p.status] || { text: p.status, dot: 'gray' };
   $('status-dot').className = 'dot ' + map.dot;
   $('status-text').textContent = map.text;
-  $('spinner').classList.toggle('hidden', !['starting', 'stopping', 'updating'].includes(p.status));
-  $('pid-chip').classList.toggle('hidden', !p.pid);
-  if (p.pid) $('pid-chip').textContent = 'PID ' + p.pid;
   $('port-val').textContent = p.port;
 
-  const msg = $('status-msg');
-  if (p.message) {
-    msg.textContent = p.message;
-    msg.classList.remove('hidden');
-  } else {
-    msg.classList.add('hidden');
+  const line = $('stage-line');
+  const hint = $('stage-hint');
+  const busyPanel = $('port-busy-panel');
+  const showSpinner = ['starting', 'stopping', 'updating'].includes(p.status);
+
+  $('spinner').classList.toggle('hidden', !showSpinner);
+  line.classList.remove('error');
+  hint.classList.add('hidden');
+  busyPanel.classList.add('hidden');
+
+  switch (p.status) {
+    case 'idle':
+      line.textContent = 'DSH 未运行 — 点击左上角「启动」开始';
+      break;
+    case 'starting':
+      startWaitTimer(); // 内部会渲染等待行
+      hint.textContent = 'DSH 冷启动（尤其重启电脑后首次）可能需要一两分钟，请耐心等待；点击「日志」可查看实时输出';
+      hint.classList.remove('hidden');
+      break;
+    case 'running':
+      line.textContent = 'DSH 已就绪，页面显示在下方';
+      break;
+    case 'running-external':
+      line.textContent = '已连接到现有服务（非本程序启动，关闭本程序不会停止它）';
+      break;
+    case 'stopping':
+      line.textContent = '正在停止 DSH…';
+      break;
+    case 'updating':
+      line.textContent = '正在更新 DSH，请勿关闭程序…';
+      hint.textContent = '更新输出会实时写入「日志」（来源标记为 update）';
+      hint.classList.remove('hidden');
+      break;
+    case 'error':
+      line.textContent = p.message || '启动失败，详见日志';
+      line.classList.add('error');
+      hint.textContent = '点击「日志」查看 DSH 的完整输出；也可点击「启动」重试';
+      hint.classList.remove('hidden');
+      break;
+    case 'port-busy':
+      line.textContent = `端口 ${p.port} 已被占用`;
+      busyPanel.classList.remove('hidden');
+      $('busy-port').textContent = p.port;
+      break;
   }
 
-  $('port-busy-panel').classList.toggle('hidden', p.status !== 'port-busy');
-  if (p.status === 'port-busy') $('busy-port').textContent = p.port;
-
+  if (p.status !== 'starting') stopWaitTimer();
   refreshButtons();
 }
 
@@ -81,11 +164,10 @@ function refreshButtons() {
   $('btn-update').disabled = busy || !config || !config.npm_exists;
   $('btn-check-update').disabled = updating || checkingVersion;
   $('btn-settings').disabled = updating;
-  $('btn-open-dsh').disabled = !['running', 'running-external'].includes(status);
   $('btn-connect').disabled = updating;
 }
 
-// ---------- 事件监听 ----------
+// ---------- 事件监听 + 初始化 ----------
 
 async function init() {
   await listen('dsh-log', (e) => appendLog(e.payload.stream, e.payload.line));
@@ -100,18 +182,17 @@ async function init() {
 
   bindUI();
 
-  // 自动启动：DSH 路径有效时，程序启动即拉起服务
+  // 自动启动：DSH 路径有效时，程序启动即拉起服务（含上次超时失败的 error 状态）
   if (config && config.dsh_exists && ['idle', 'error'].includes(status)) {
     appendLog('launcher', '[launcher] 程序已启动，正在自动启动 DSH 服务…');
     try {
       await invoke('start_dsh');
     } catch (err) {
-      // 错误已通过状态事件展示，这里补一条日志
       appendLog('launcher', '[launcher] 自动启动失败: ' + err);
     }
   } else if (config && !config.dsh_exists) {
-    appendLog('launcher', '[launcher] 未找到 dsh.cmd（' + config.dsh_path + '），请点击「设置」手动选择路径。');
-    openSettings();
+    appendLog('launcher', '[launcher] 未找到 dsh.cmd（' + config.dsh_path + '），请在设置中手动选择路径。');
+    showModal('settings-modal');
   }
 }
 
@@ -126,7 +207,7 @@ function openSettings() {
   if (!config) return;
   $('set-npm-path').value = config.npm_path;
   $('set-dsh-path').value = config.dsh_path;
-  $('set-home-dir').value = config.home_dir;
+  $('set-home-dir').value = config.dsh_home_dir;
   $('set-port').value = config.port;
   $('set-timeout').value = config.health_timeout_secs;
   $('set-extra-args').value = config.extra_args;
@@ -136,7 +217,7 @@ function openSettings() {
   markFlag('npm-exists-flag', config.npm_exists);
   markFlag('dsh-exists-flag', config.dsh_exists);
   markFlag('home-exists-flag', config.home_exists);
-  $('settings-modal').classList.remove('hidden');
+  showModal('settings-modal');
 }
 
 function markFlag(id, ok) {
@@ -146,12 +227,15 @@ function markFlag(id, ok) {
 }
 
 async function saveSettings() {
+  const port = parseInt($('set-port').value, 10);
+  const timeout = parseInt($('set-timeout').value, 10);
   const cfg = {
     npm_path: $('set-npm-path').value.trim(),
     dsh_path: $('set-dsh-path').value.trim(),
-    home_dir: $('set-home-dir').value.trim(),
-    port: parseInt($('set-port').value, 10) || 3000,
-    health_timeout_secs: parseInt($('set-timeout').value, 10) || 30,
+    dsh_home_dir: $('set-home-dir').value.trim(),
+    port: Number.isFinite(port) && port > 0 ? port : 3000,
+    // 0 = 一直等待，是合法值，不能用 || 兜底
+    health_timeout_secs: Number.isFinite(timeout) && timeout >= 0 ? timeout : 300,
     extra_args: $('set-extra-args').value.trim(),
     package_name: $('set-package-name').value.trim() || '@deepseek-ai/dsh',
     update_args: $('set-update-args').value.trim() || 'install -g @deepseek-ai/dsh@latest',
@@ -165,7 +249,7 @@ async function saveSettings() {
     $('port-val').textContent = config.port;
     toast('配置已保存');
     refreshButtons();
-    $('settings-modal').classList.add('hidden');
+    hideModal('settings-modal');
     const st = await invoke('get_status');
     onStatus(st);
   } catch (err) {
@@ -182,37 +266,43 @@ function onPathPicked(p) {
   }
 }
 
-// ---------- 版本 ----------
+// ---------- 版本（显示在工具栏右侧：本地 → 最新） ----------
+
+function renderVersion(local, latest) {
+  const el = $('ver-val');
+  if (local && latest) {
+    el.textContent = local.trim() === latest.trim() ? `${local}（最新）` : `${local} → ${latest}`;
+  } else if (local) {
+    el.textContent = local;
+  } else if (latest) {
+    el.textContent = `最新 ${latest}`;
+  } else {
+    el.textContent = '未知';
+  }
+}
 
 async function checkVersions() {
   if (checkingVersion) return;
   checkingVersion = true;
   refreshButtons();
-  $('local-ver').textContent = '查询中…';
-  $('latest-ver').textContent = '查询中…';
+  $('ver-val').textContent = '查询中…';
   appendLog('launcher', '[launcher] 正在查询 DSH 版本（本地 --version，远程 npm view）…');
   try {
     const info = await invoke('check_versions');
-    if (info.local) {
-      $('local-ver').textContent = info.local;
-      appendLog('launcher', '[launcher] 本地 DSH 版本: ' + info.local);
-    } else {
-      $('local-ver').textContent = '未知';
-    }
+    if (info.local) appendLog('launcher', '[launcher] 本地 DSH 版本: ' + info.local);
     if (info.latest) {
-      $('latest-ver').textContent = info.latest;
       appendLog('launcher', '[launcher] 最新 DSH 版本: ' + info.latest);
       if (info.local && info.local.trim() !== info.latest.trim()) {
         appendLog('launcher', '[launcher] 有可用更新: ' + info.local.trim() + ' → ' + info.latest.trim());
       }
-    } else {
-      $('latest-ver').textContent = '未知';
     }
     if (info.error) appendLog('launcher', '[launcher] 版本检测提示: ' + info.error);
+    renderVersion(info.local, info.latest);
+    if (info.error && !info.local && !info.latest) toast(info.error, true);
   } catch (err) {
-    $('local-ver').textContent = '未知';
-    $('latest-ver').textContent = '未知';
+    renderVersion(null, null);
     appendLog('launcher', '[launcher] 版本查询失败: ' + err);
+    toast('版本查询失败: ' + err, true);
   } finally {
     checkingVersion = false;
     refreshButtons();
@@ -224,11 +314,11 @@ async function checkVersions() {
 function confirmUpdate() {
   if (!config) return;
   $('update-cmd-preview').textContent = `cmd /C "${config.npm_path}" ${config.update_args}`;
-  $('update-modal').classList.remove('hidden');
+  showModal('update-modal');
 }
 
 async function doUpdate() {
-  $('update-modal').classList.add('hidden');
+  hideModal('update-modal');
   if (updating) return;
   updating = true;
   refreshButtons();
@@ -251,9 +341,9 @@ async function onUpdateFinished(p) {
     toast('DSH 更新成功，正在重新启动…');
     try {
       await invoke('start_dsh');
-      await invoke('check_versions');
+      await checkVersions();
     } catch (err) {
-      appendLog('launcher', '[launcher] 重启 DSH 失败: ' + err);
+      appendLog('launcher', '[launcher] 重新启动 DSH 失败: ' + err);
     }
   } else {
     toast('更新失败: ' + p.message + '（详见日志，未启动 DSH）', true);
@@ -268,29 +358,38 @@ function bindUI() {
   $('btn-restart').onclick = () => invoke('restart_dsh').catch((e) => toast(String(e), true));
   $('btn-check-update').onclick = checkVersions;
   $('btn-update').onclick = confirmUpdate;
-  $('btn-open-dsh').onclick = () => invoke('open_dsh_window').catch((e) => toast(String(e), true));
+  $('btn-log').onclick = () => {
+    showModal('log-modal');
+    if ($('chk-autoscroll').checked) logBody.scrollTop = logBody.scrollHeight;
+  };
   $('btn-connect').onclick = () => invoke('connect_existing').catch((e) => toast(String(e), true));
   $('btn-change-port').onclick = openSettings;
 
   $('btn-settings').onclick = openSettings;
-  $('btn-cancel-settings').onclick = () => $('settings-modal').classList.add('hidden');
+  $('btn-cancel-settings').onclick = () => hideModal('settings-modal');
   $('btn-save-settings').onclick = saveSettings;
 
-  $('btn-cancel-update').onclick = () => $('update-modal').classList.add('hidden');
+  $('btn-cancel-update').onclick = () => hideModal('update-modal');
   $('btn-confirm-update').onclick = doUpdate;
 
   $('btn-clear-log').onclick = () => { logBody.innerHTML = ''; };
+  $('btn-close-log').onclick = () => hideModal('log-modal');
+  $('chk-autoscroll').onchange = () => {
+    if ($('chk-autoscroll').checked) logBody.scrollTop = logBody.scrollHeight;
+  };
   $('btn-detect-package').onclick = async () => {
     appendLog('launcher', '[launcher] 正在执行 npm list -g --depth=0 …');
     try {
       const text = await invoke('detect_npm_package');
       text.split('\n').forEach((l) => appendLog('launcher', l));
+      toast('检测结果已写入日志');
     } catch (err) {
       appendLog('launcher', '[launcher] 检测失败: ' + err);
+      toast('检测失败: ' + err, true);
     }
   };
 
-  // 浏览按钮（文件/文件夹选择由 Rust 端 dialog 插件完成）
+  // 浏览按钮（文件/文件夹选择由 Rust 端 dialog 插件完成，结果经 path-picked 事件回填）
   document.querySelectorAll('[data-pick]').forEach((btn) => {
     btn.onclick = () => {
       const kind = btn.dataset.kind;
@@ -298,10 +397,18 @@ function bindUI() {
       invoke(cmd, { kind }).catch((e) => toast(String(e), true));
     };
   });
+
+  // 点击遮罩关闭模态框（误点弹窗外区域可直接关掉）
+  MODALS.forEach((m) => {
+    $(m).addEventListener('mousedown', (ev) => {
+      if (ev.target === $(m)) hideModal(m);
+    });
+  });
 }
 
 window.addEventListener('DOMContentLoaded', () => {
   init().catch((e) => {
     appendLog('launcher', '[launcher] 初始化失败: ' + e);
+    toast('初始化失败: ' + e, true);
   });
 });

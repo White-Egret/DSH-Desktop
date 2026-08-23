@@ -85,15 +85,9 @@ pub fn run(launched_by_autostart: bool) {
                 autostart_item: autostart_item.clone(),
             });
 
-            // ---- 3. 创建托盘图标（优先内嵌鲸鱼图标；解码失败时退回默认窗口图标，也已是鲸鱼） ----
-            let whale_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/128x128.png"))
-                .unwrap_or_else(|_| {
-                    app.default_window_icon()
-                        .expect("missing default window icon")
-                        .clone()
-                });
+            // ---- 3. 创建托盘图标（使用打包进二进制的默认窗口图标，已是替换后的鲸鱼图标） ----
             let _tray = TrayIconBuilder::new()
-                .icon(whale_icon)
+                .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("DSH Launcher")
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false)
@@ -185,7 +179,10 @@ pub fn run(launched_by_autostart: bool) {
             // 拦截主窗口关闭：阻止销毁，改为隐藏到托盘（X 不再退出程序）
             WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
                 api.prevent_close();
-                let _ = window.hide();
+                // 隐藏而非销毁：通过 webview window 句柄 hide，禁止 close/destroy
+                if let Some(main) = window.app_handle().get_webview_window("main") {
+                    let _ = main.hide();
+                }
             }
             // 窗口尺寸变化时同步内嵌 DSH Webview 的大小（工具栏 43.2px 之下填满）
             WindowEvent::Resized(_) if window.label() == "main" => {

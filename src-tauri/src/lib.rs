@@ -208,19 +208,29 @@ struct TrayMenuItems {
 }
 
 fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-        let _ = w.unminimize();
-        let _ = w.set_focus();
+    // 关键：托盘菜单/图标事件回调运行在后台线程，必须切回主线程才能操作窗口，
+    // 否则 show()/set_focus() 会静默失败，表现为“点了托盘无法打开窗口”。
+    let app = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.show();
+            let _ = w.unminimize();
+            let _ = w.set_focus();
 
-        // Windows WebView2 在 hide() 后再 show() 偶尔白屏/假死：
-        // 用宽度 +1/-1 的微小 resize 强制触发 WebView 重绘。
-        if let Ok(size) = w.inner_size() {
-            let _ = w.set_size(tauri::PhysicalSize::new(size.width + 1, size.height));
-            std::thread::sleep(Duration::from_millis(10));
-            let _ = w.set_size(size);
+            // Windows WebView2 在 hide() 后再 show() 偶尔白屏/假死：
+            // 用宽度 +1/-1 的微小 resize 强制触发 WebView 重绘。
+            if let Ok(size) = w.inner_size() {
+                let _ = w.set_size(tauri::PhysicalSize::new(size.width + 1, size.height));
+                std::thread::sleep(Duration::from_millis(10));
+                let _ = w.set_size(size);
+            }
+            // 尺寸抖动后再次确认焦点（Windows 焦点抢占需要最后再执行一次）
+            let _ = w.set_focus();
+        } else if let Some(win) = app.get_window("main") {
+            // 兜底：webview window 查找失败时直接操作原生窗口
+            let _ = win.show();
+            let _ = win.unminimize();
+            let _ = win.set_focus();
         }
-        // 尺寸抖动后再次确认焦点（Windows 焦点抢占需要最后再执行一次）
-        let _ = w.set_focus();
-    }
+    });
 }

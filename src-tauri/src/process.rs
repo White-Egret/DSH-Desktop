@@ -495,7 +495,7 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
     let cwd = config::workspace_cwd(&cfg);
     if !Path::new(&cwd).is_dir() {
         let msg = format!(
-            "DSH 工作目录不存在：{}（由家目录 {} 推导），请检查「设置」中的 DSH 家目录。",
+            "启动进程工作目录不存在：{}（由家目录 {} 推导），请检查「设置」中的 DSH 家目录。",
             cwd, cfg.dsh_home_dir
         );
         set_status(app, "error", Some(msg.clone()));
@@ -562,7 +562,7 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         app,
         "launcher",
         format!(
-            "[launcher] 启动命令: cmd /C \"{}\" web --port {} --no-open{}（工作目录: {}，DSH_HOME: {}，PID: {}）",
+            "[launcher] 启动命令: cmd /C \"{}\" web --port {} --no-open{}（进程工作目录: {}，DSH_HOME: {}，PID: {}；DSH 工作区由你在网页内指定，与此目录无关）",
             cfg.dsh_path,
             cfg.port,
             if cfg.extra_args.trim().is_empty() {
@@ -1024,7 +1024,7 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
                 &app2,
                 "update",
                 format!(
-                    "[update] 执行: cmd /C \"{}\" {}（工作目录: {}，PID: {}）",
+                    "[update] 执行: cmd /C \"{}\" {}（进程工作目录: {}，PID: {}；DSH 工作区与此目录无关）",
                     cfg.npm_path, cfg.update_args, cwd, pid
                 ),
             );

@@ -211,7 +211,8 @@ fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     // 关键：托盘菜单/图标事件回调运行在后台线程，必须切回主线程才能操作窗口，
     // 否则 show()/set_focus() 会静默失败，表现为“点了托盘无法打开窗口”。
     let app = app.clone();
-    let _ = app.run_on_main_thread(move || {
+    // 克隆一份作为 run_on_main_thread 的接收者，闭包内移动的是另一份
+    let _ = app.clone().run_on_main_thread(move || {
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.show();
             let _ = w.unminimize();

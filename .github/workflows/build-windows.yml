@@ -29,6 +29,10 @@ jobs:
         with:
           workspaces: 'src-tauri'
 
+      - name: 清理本应用构建产物（确保新的 icon.ico 重新嵌入 exe）
+        run: cargo clean -p dsh-launcher
+        working-directory: src-tauri
+
       - name: 安装前端依赖（@tauri-apps/cli）
         run: npm ci
 

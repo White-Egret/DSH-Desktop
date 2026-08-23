@@ -179,10 +179,8 @@ pub fn run(launched_by_autostart: bool) {
             // 拦截主窗口关闭：阻止销毁，改为隐藏到托盘（X 不再退出程序）
             WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
                 api.prevent_close();
-                // 隐藏而非销毁：通过 webview window 句柄 hide，禁止 close/destroy
-                if let Some(main) = window.app_handle().get_webview_window("main") {
-                    let _ = main.hide();
-                }
+                // 直接用事件中的窗口句柄隐藏，避免窗口查找失败导致点 X 无反应
+                let _ = window.hide();
             }
             // 窗口尺寸变化时同步内嵌 DSH Webview 的大小（工具栏 43.2px 之下填满）
             WindowEvent::Resized(_) if window.label() == "main" => {

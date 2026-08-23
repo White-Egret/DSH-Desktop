@@ -1,5 +1,5 @@
 /* DSH Launcher —— 浅色主题
-   注意：#toolbar 的 height 必须精确等于 48px，
+   注意：#toolbar 的 height 必须精确等于 43.2px，
    Rust 端 TOOLBAR_H 常量（逻辑像素）依赖此值来定位内嵌的 DSH Webview。 */
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -35,11 +35,11 @@ body {
   user-select: none;
 }
 
-/* ---------- 顶部工具栏（48px，所有功能 + 一行状态） ---------- */
+/* ---------- 顶部工具栏（43.2px，所有功能 + 一行状态） ---------- */
 
 #toolbar {
-  height: 48px;               /* 精确 48px，勿改 */
-  min-height: 48px;
+  height: 43.2px;             /* 精确 43.2px，勿改 */
+  min-height: 43.2px;
   flex: none;
   background: var(--toolbar-bg);
   border-bottom: 1px solid var(--toolbar-border);
@@ -214,7 +214,7 @@ body {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
   width: 640px;
   max-width: 100%;
-  max-height: calc(100vh - 48px);
+  max-height: calc(100vh - 43.2px);
   display: flex;
   flex-direction: column;
   overflow: hidden;

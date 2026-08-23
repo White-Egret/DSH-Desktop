@@ -1,5 +1,5 @@
 // DSH Launcher 前端（通过 window.__TAURI__ 全局 API 与 Rust 后端通信）
-// 布局：48px 工具栏（按钮居左 / 状态一行居右）；工具栏下方在「等待/错误」提示
+// 布局：43.2px 工具栏（按钮居左 / 状态一行居右）；工具栏下方在「等待/错误」提示
 // 与内嵌 DSH 页面（native webview，盖在本页面之上）之间切换。
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
@@ -198,6 +198,15 @@ async function init() {
   if (launchedByAutostart) {
     appendLog('launcher', '[launcher] 本次由开机自启触发：窗口保持隐藏，DSH 将延迟 12 秒启动（错开系统冷启动高峰）。点击托盘图标可显示窗口。');
   }
+
+  // 从托盘恢复窗口时刷新状态，并确保内嵌 DSH Webview 重新显示
+  // （WebView2 在 hide→show 后偶发白屏，这里再触发一次重绘兜底）
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      syncWebviewVisibility();
+      invoke('get_status').then(onStatus).catch(() => {});
+    }
+  });
 
   // 自动启动：DSH 路径有效时，程序启动即拉起服务（含上次超时失败的 error 状态）；
   // 若为开机自启，Rust 端 start_internal 会先延迟 12 秒

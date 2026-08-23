@@ -1,6 +1,7 @@
 mod config;
 mod process;
 
+use std::time::Duration;
 use tauri::{
     menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -16,11 +17,8 @@ pub fn run(launched_by_autostart: bool) {
     tauri::Builder::default()
         // 单实例锁必须最先注册：第二次启动时聚焦已有窗口，而不是再启动一个 DSH
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-            }
+            // 单例二次唤醒：隐藏的最小化窗口同样要 show + unminimize + set_focus
+            show_main_window(app);
         }))
         .plugin(tauri_plugin_dialog::init())
         // 官方开机自启插件：注册时传 `--autostart` 参数，启动时由 main.rs 检测
@@ -50,16 +48,9 @@ pub fn run(launched_by_autostart: bool) {
             process::was_launched_by_autostart,
         ])
         .setup(move |app| {
-            // ---- 1. 拦截主窗口关闭 → 最小化到托盘（X 不再直接退出） ----
+            // ---- 1. 主窗口只在手动启动（非开机自启）时立即显示并聚焦。
+            //        关闭拦截统一放在下方 Builder::on_window_event 中处理（hide 而非销毁）。 ----
             if let Some(main) = app.get_webview_window("main") {
-                let main_clone = main.clone();
-                main.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = main_clone.hide();
-                    }
-                });
-                // 用户手动启动（非开机自启）：正常显示主窗口并聚焦
                 if !launched_by_autostart {
                     let _ = main.show();
                     let _ = main.set_focus();
@@ -94,9 +85,15 @@ pub fn run(launched_by_autostart: bool) {
                 autostart_item: autostart_item.clone(),
             });
 
-            // ---- 3. 创建托盘图标 ----
+            // ---- 3. 创建托盘图标（优先内嵌鲸鱼图标；解码失败时退回默认窗口图标，也已是鲸鱼） ----
+            let whale_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/128x128.png"))
+                .unwrap_or_else(|_| {
+                    app.default_window_icon()
+                        .expect("missing default window icon")
+                        .clone()
+                });
             let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(whale_icon)
                 .tooltip("DSH Launcher")
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false)
@@ -185,7 +182,12 @@ pub fn run(launched_by_autostart: bool) {
             Ok(())
         })
         .on_window_event(|window, event| match event {
-            // 窗口尺寸变化时同步内嵌 DSH Webview 的大小（工具栏 48px 之下填满）
+            // 拦截主窗口关闭：阻止销毁，改为隐藏到托盘（X 不再退出程序）
+            WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+            // 窗口尺寸变化时同步内嵌 DSH Webview 的大小（工具栏 43.2px 之下填满）
             WindowEvent::Resized(_) if window.label() == "main" => {
                 process::sync_dsh_webview_size(window.app_handle());
             }
@@ -214,6 +216,16 @@ fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
+        let _ = w.set_focus();
+
+        // Windows WebView2 在 hide() 后再 show() 偶尔白屏/假死：
+        // 用宽度 +1/-1 的微小 resize 强制触发 WebView 重绘。
+        if let Ok(size) = w.inner_size() {
+            let _ = w.set_size(tauri::PhysicalSize::new(size.width + 1, size.height));
+            std::thread::sleep(Duration::from_millis(10));
+            let _ = w.set_size(size);
+        }
+        // 尺寸抖动后再次确认焦点（Windows 焦点抢占需要最后再执行一次）
         let _ = w.set_focus();
     }
 }

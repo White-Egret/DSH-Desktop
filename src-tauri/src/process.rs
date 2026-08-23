@@ -13,7 +13,7 @@ use tauri::{AppHandle, Emitter, Manager};
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 主窗口顶部工具栏高度（逻辑像素），必须与前端 CSS 中 header 的 height 保持一致
-pub const TOOLBAR_H: f64 = 48.0;
+pub const TOOLBAR_H: f64 = 43.2;
 
 /// Windows Job Object：程序退出（含崩溃）时由内核结束整个 DSH 进程树，兜底防残留。
 #[cfg(windows)]

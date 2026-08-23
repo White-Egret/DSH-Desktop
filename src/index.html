@@ -82,6 +82,10 @@
             <input id="set-timeout" type="number" min="0" max="3600" />
           </label>
         </div>
+        <label class="field field-switch">
+          <span>开机自动启动（系统登录后静默拉起，可在托盘恢复窗口；首启先延迟 12 秒错开冷启动高峰）</span>
+          <input type="checkbox" id="set-autostart" />
+        </label>
         <label class="field">
           <span>附加启动参数（追加在 dsh web --port N --no-open 之后，可留空）</span>
           <input id="set-extra-args" type="text" spellcheck="false" placeholder="例如: --trusted-host example.com" />

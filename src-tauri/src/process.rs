@@ -78,6 +78,9 @@ pub struct AppState {
     pub updating: AtomicBool,
     /// DSH 崩溃前最后一条 stderr 输出（用于在状态区显示单行错误原因）
     last_stderr: Mutex<Option<String>>,
+    /// 当前进程是否由「开机自启」触发（main.rs 检测 --autostart 参数后置 true）。
+    /// start_internal 消费此标志后置回 false，避免重复延迟。
+    pub launched_by_autostart: AtomicBool,
     #[cfg(windows)]
     job: Mutex<Option<win::JobHandle>>,
     #[cfg(windows)]
@@ -86,12 +89,17 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        Self::with_autostart(false)
+    }
+
+    pub fn with_autostart(launched_by_autostart: bool) -> Self {
         Self {
             child: Mutex::new(None),
             pid: Mutex::new(None),
             status: Mutex::new("idle".to_string()),
             updating: AtomicBool::new(false),
             last_stderr: Mutex::new(None),
+            launched_by_autostart: AtomicBool::new(launched_by_autostart),
             #[cfg(windows)]
             job: Mutex::new(None),
             #[cfg(windows)]
@@ -438,6 +446,41 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         "starting" | "running" | "running-external" | "stopping" | "updating"
     ) {
         return Err(format!("当前 DSH 状态为「{}」，无法重复启动", st));
+    }
+
+    // 开机自启触发：先延迟 12 秒错开系统冷启动高峰（IO 拥堵、Node/网络未就绪极易超时）
+    if state.launched_by_autostart.swap(false, Ordering::SeqCst) {
+        const AUTOSTART_DELAY_SECS: u64 = 12;
+        emit_log(
+            app,
+            "launcher",
+            format!(
+                "[launcher] 检测到开机自启触发，先等待 {} 秒错开系统冷启动高峰...",
+                AUTOSTART_DELAY_SECS
+            ),
+        );
+        set_status(
+            app,
+            "starting",
+            Some(format!(
+                "开机自启：等待 {} 秒后启动 DSH（错开系统冷启动高峰，可点「停止」取消）",
+                AUTOSTART_DELAY_SECS
+            )),
+        );
+        // 分段 sleep，期间允许用户点击「停止」取消延迟
+        let total = Duration::from_secs(AUTOSTART_DELAY_SECS);
+        let step = Duration::from_millis(500);
+        let mut elapsed = Duration::ZERO;
+        while elapsed < total {
+            std::thread::sleep(step);
+            elapsed += step;
+            let cur = current_status(app);
+            if cur != "starting" {
+                emit_log(app, "launcher", "[launcher] 开机自启延迟被取消。".to_string());
+                return Ok(());
+            }
+        }
+        emit_log(app, "launcher", "[launcher] 延迟结束，开始启动 DSH。".to_string());
     }
 
     let cfg = config::load(app);
@@ -1079,4 +1122,50 @@ pub fn pick_folder(app: AppHandle, kind: String) {
 /// 退出 / 关窗时的兜底清理（幂等，可安全重复调用）
 pub fn cleanup_sync(app: &AppHandle) {
     let _ = stop_internal(app);
+}
+
+// ---------- 开机自启 ----------
+
+/// 查询操作系统层面是否已注册开机自启
+#[tauri::command]
+pub fn is_autostart_enabled(app: AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+/// 注册 / 取消开机自启；写入位置由官方插件自动选择（Windows: HKCU\...\Run）
+#[tauri::command]
+pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let mgr = app.autolaunch();
+    if enabled {
+        mgr.enable().map_err(|e| format!("启用开机自启失败：{}", e))?;
+        emit_log(&app, "launcher", "[launcher] 已开启开机自动启动。".to_string());
+    } else {
+        mgr.disable().map_err(|e| format!("取消开机自启失败：{}", e))?;
+        emit_log(&app, "launcher", "[launcher] 已关闭开机自动启动。".to_string());
+    }
+    // 同步托盘菜单勾选（通过查找 managed state；lib.rs 定义）
+    sync_tray_autostart_checked(&app, enabled);
+    Ok(())
+}
+
+/// 通知前端托盘菜单勾选变化（前端据此刷新设置开关）
+fn sync_tray_autostart_checked(app: &AppHandle, enabled: bool) {
+    // 通过 emit 通知前端刷新 UI 开关。结构仅取 stream 字段（line 为空）即可。
+    let _ = app.emit(
+        "autostart-changed",
+        LogEvent {
+            stream: "launcher".to_string(),
+            line: if enabled { "on".to_string() } else { "off".to_string() },
+        },
+    );
+}
+
+/// 当前进程是否由「开机自启」触发（前端据此判断是否需要显示延迟提示）
+#[tauri::command]
+pub fn was_launched_by_autostart(app: AppHandle) -> bool {
+    app.state::<AppState>()
+        .launched_by_autostart
+        .load(Ordering::SeqCst)
 }

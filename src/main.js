@@ -10,6 +10,8 @@ let config = null;        // ConfigReport（含 exists 标志 + 展平的 config
 let status = 'idle';      // idle|starting|running|running-external|stopping|error|port-busy|updating
 let updating = false;
 let checkingVersion = false;
+let launchedByAutostart = false; // 本次进程是否由「开机自启」触发（决定静默+延迟策略）
+let statusMessage = null;        // 最近一次状态事件携带的附加消息（如开机自启延迟提示）
 
 const STATUS_MAP = {
   'idle':             { text: '未运行',           dot: 'gray' },
@@ -89,7 +91,8 @@ function startWaitTimer() {
 function renderWaitLine(secs) {
   const timeout = config ? config.health_timeout_secs : 0;
   const tail = timeout > 0 ? `（最长等待 ${timeout} 秒）` : '（一直等待直到就绪）';
-  $('stage-line').textContent = `正在启动 DSH，已等待 ${secs} 秒…${tail}`;
+  const prefix = statusMessage ? `${statusMessage} — ` : '';
+  $('stage-line').textContent = `${prefix}已等待 ${secs} 秒…${tail}`;
 }
 
 function stopWaitTimer() {
@@ -101,6 +104,7 @@ function stopWaitTimer() {
 
 function onStatus(p) {
   status = p.status;
+  statusMessage = p.message || null; // 供 renderWaitLine 显示开机自启延迟等提示
   const map = STATUS_MAP[p.status] || { text: p.status, dot: 'gray' };
   $('status-dot').className = 'dot ' + map.dot;
   $('status-text').textContent = map.text;
@@ -126,7 +130,7 @@ function onStatus(p) {
       hint.classList.remove('hidden');
       break;
     case 'running':
-      line.textContent = 'DSH 已就绪，页面显示在下方';
+      line.textContent = 'DSH 已就绪，页面即将显示';
       break;
     case 'running-external':
       line.textContent = '已连接到现有服务（非本程序启动，关闭本程序不会停止它）';
@@ -175,14 +179,28 @@ async function init() {
   await listen('dsh-status', (e) => onStatus(e.payload));
   await listen('update-finished', (e) => onUpdateFinished(e.payload));
   await listen('path-picked', (e) => onPathPicked(e.payload));
+  await listen('autostart-changed', (e) => {
+    // 托盘菜单或设置开关切换了开机自启后同步 UI（line: "on" | "off"）
+    $('set-autostart').checked = e.payload.line === 'on';
+  });
 
   await refreshConfig();
   const st = await invoke('get_status');
   onStatus(st);
 
   bindUI();
+  await refreshAutostartToggle();
 
-  // 自动启动：DSH 路径有效时，程序启动即拉起服务（含上次超时失败的 error 状态）
+  // 本次是否由「开机自启」触发（决定静默窗口 + 12 秒延迟启动）
+  try {
+    launchedByAutostart = await invoke('was_launched_by_autostart');
+  } catch (_) { /* 保持 false */ }
+  if (launchedByAutostart) {
+    appendLog('launcher', '[launcher] 本次由开机自启触发：窗口保持隐藏，DSH 将延迟 12 秒启动（错开系统冷启动高峰）。点击托盘图标可显示窗口。');
+  }
+
+  // 自动启动：DSH 路径有效时，程序启动即拉起服务（含上次超时失败的 error 状态）；
+  // 若为开机自启，Rust 端 start_internal 会先延迟 12 秒
   if (config && config.dsh_exists && ['idle', 'error'].includes(status)) {
     appendLog('launcher', '[launcher] 程序已启动，正在自动启动 DSH 服务…');
     try {
@@ -194,6 +212,13 @@ async function init() {
     appendLog('launcher', '[launcher] 未找到 dsh.cmd（' + config.dsh_path + '），请在设置中手动选择路径。');
     showModal('settings-modal');
   }
+}
+
+// 拉取系统层面的开机自启注册状态并同步到设置开关
+async function refreshAutostartToggle() {
+  try {
+    $('set-autostart').checked = await invoke('is_autostart_enabled');
+  } catch (_) { /* 查询失败保持原样 */ }
 }
 
 async function refreshConfig() {
@@ -365,9 +390,21 @@ function bindUI() {
   $('btn-connect').onclick = () => invoke('connect_existing').catch((e) => toast(String(e), true));
   $('btn-change-port').onclick = openSettings;
 
-  $('btn-settings').onclick = openSettings;
+  $('btn-settings').onclick = () => { openSettings(); refreshAutostartToggle(); };
   $('btn-cancel-settings').onclick = () => hideModal('settings-modal');
   $('btn-save-settings').onclick = saveSettings;
+
+  // 开机自启开关：即时生效（写入系统注册表），不随「保存」按钮
+  $('set-autostart').onchange = async (e) => {
+    const target = e.target.checked;
+    try {
+      await invoke('set_autostart', { enabled: target });
+      toast(target ? '已开启开机自动启动' : '已关闭开机自动启动');
+    } catch (err) {
+      toast('修改开机自启失败: ' + err, true);
+      e.target.checked = !target; // 回滚
+    }
+  };
 
   $('btn-cancel-update').onclick = () => hideModal('update-modal');
   $('btn-confirm-update').onclick = doUpdate;

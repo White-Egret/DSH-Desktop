@@ -291,6 +291,27 @@ body {
 .flag.ok   { color: var(--ok); }
 .flag.bad  { color: var(--danger); }
 
+/* 开机自启开关（即时生效型设置，独立于「保存」按钮） */
+.field-switch {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  background: #f6f8fa;
+  border: 1px solid var(--toolbar-border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.field-switch:hover { border-color: var(--accent); }
+.field-switch input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex: none;
+  margin: 0;
+}
+
 .hint {
   font-size: 11.5px;
   color: var(--text-dim);

@@ -42,20 +42,20 @@ jobs:
       - name: 上传 NSIS 安装包
         uses: actions/upload-artifact@v4
         with:
-          name: DSH-Launcher-windows-nsis
+          name: DSH-Desktop-windows-nsis
           path: src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
       - name: 上传 MSI 安装包
         uses: actions/upload-artifact@v4
         with:
-          name: DSH-Launcher-windows-msi
+          name: DSH-Desktop-windows-msi
           path: src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: warn
 
       - name: 上传独立可执行文件
         uses: actions/upload-artifact@v4
         with:
-          name: DSH-Launcher-windows-portable-exe
+          name: DSH-Desktop-windows-portable-exe
           path: src-tauri/target/release/*.exe
           if-no-files-found: warn

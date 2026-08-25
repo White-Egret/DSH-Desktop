@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "DSH Launcher 主窗口（控制台）默认权限：事件监听与自定义命令调用",
+  "description": "DSH Desktop 主窗口（控制台）默认权限：事件监听与自定义命令调用",
   "windows": ["main"],
   "permissions": [
     "core:default",

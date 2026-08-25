@@ -231,7 +231,7 @@ fn http_ready(addr: &SocketAddr) -> bool {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let req = format!(
-        "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUser-Agent: DSH-Launcher/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUser-Agent: DSH-Desktop/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
     );
     if stream.write_all(req.as_bytes()).is_err() {
         return false;
@@ -433,6 +433,30 @@ pub fn set_dsh_webview_visible(app: AppHandle, visible: bool) -> Result<(), Stri
     if let Some(wv) = app.get_webview("dsh") {
         let _ = if visible { wv.show() } else { wv.hide() };
     }
+    Ok(())
+}
+
+/// 只刷新内嵌的 DSH 页面，不停止/重启 DSH 服务。
+/// 保留当前地址（http://127.0.0.1:<配置端口>），不会重新走启动流程。
+#[tauri::command]
+pub fn refresh_dsh_page(app: AppHandle) -> Result<(), String> {
+    let st = current_status(&app);
+    if st != "running" && st != "running-external" {
+        return Err("DSH service is not running.".to_string());
+    }
+
+    if let Some(wv) = app.get_webview("dsh") {
+        // 优先走 WebView 的 reload：window.location.reload() 保留当前 URL
+        wv.eval("window.location.reload()")
+            .map_err(|e| format!("Failed to reload DSH page: {}", e))?;
+        emit_log(&app, "launcher", "[launcher] 已刷新 DSH 页面（DSH 服务未重启）。".to_string());
+        return Ok(());
+    }
+
+    // 服务在运行但页面不存在（例如之前被销毁）：按当前配置端口重新打开页面（不重启服务）
+    let cfg = config::load(&app);
+    open_dsh_webview(&app, cfg.port);
+    emit_log(&app, "launcher", "[launcher] 已重新打开 DSH 页面（DSH 服务未重启）。".to_string());
     Ok(())
 }
 

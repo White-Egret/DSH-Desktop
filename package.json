@@ -2,7 +2,7 @@
   "name": "dsh-launcher",
   "version": "1.0.1",
   "private": true,
-  "description": "DSH Launcher - 启动并管理本机全局安装的 DSH Web 服务",
+  "description": "DSH Desktop - 启动并管理本机全局安装的 DSH Web 服务",
   "scripts": {
     "tauri": "tauri"
   },

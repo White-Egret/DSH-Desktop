@@ -1,4 +1,4 @@
-// DSH Launcher 前端（通过 window.__TAURI__ 全局 API 与 Rust 后端通信）
+// DSH Desktop 前端（通过 window.__TAURI__ 全局 API 与 Rust 后端通信）
 // 布局：43.2px 工具栏（按钮居左 / 状态一行居右）；工具栏下方在「等待/错误」提示
 // 与内嵌 DSH 页面（native webview，盖在本页面之上）之间切换。
 const invoke = window.__TAURI__.core.invoke;
@@ -50,6 +50,51 @@ function toast(msg, isError = false) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.add('hidden'), isError ? 6000 : 3500);
 }
+
+// ---------- 刷新页面（只刷新内嵌 DSH 页面，不重启服务） ----------
+
+let refreshTimer = null; // 刷新提示层的隐藏定时器
+
+function refreshPage() {
+  if (!['running', 'running-external'].includes(status)) {
+    toast('DSH service is not running.', true);
+    return;
+  }
+  const ov = $('refresh-overlay');
+  ov.classList.remove('hidden');
+  clearTimeout(refreshTimer);
+
+  // 内嵌的 DSH 页面是盖在本页面之上的原生 webview，
+  // 刷新期间先把它隐藏，才能让本页面的“正在刷新...”提示显示出来。
+  invoke('set_dsh_webview_visible', { visible: false }).catch(() => {});
+
+  // 新页面出现后（重新显示 DSH webview）即收起提示层；
+  // 这里先按 1.6 秒兜底，避免长时间无响应。
+  refreshTimer = setTimeout(() => {
+    ov.classList.add('hidden');
+    if (!anyModalOpen()) invoke('set_dsh_webview_visible', { visible: true }).catch(() => {});
+  }, 1600);
+
+  invoke('refresh_dsh_page')
+    .then(() => {
+      // 页面正在重新加载；提示层由上面的定时器收起
+    })
+    .catch((err) => {
+      clearTimeout(refreshTimer);
+      ov.classList.add('hidden');
+      if (!anyModalOpen()) invoke('set_dsh_webview_visible', { visible: true }).catch(() => {});
+      toast(String(err), true);
+    });
+}
+
+// F5 / Ctrl+R 快捷键：焦点在 Launcher 界面时触发刷新；
+// DSH 页面内部 WebView2 自带 F5/Ctrl+R 刷新行为，两者效果一致。
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && (e.key === 'r' || e.key === 'R'))) {
+    e.preventDefault();
+    refreshPage();
+  }
+});
 
 // ---------- 模态框（打开时隐藏内嵌 DSH webview，避免其盖住弹窗） ----------
 
@@ -267,7 +312,7 @@ async function saveSettings() {
     npm_path: $('set-npm-path').value.trim(),
     dsh_path: $('set-dsh-path').value.trim(),
     dsh_home_dir: $('set-home-dir').value.trim(),
-    port: Number.isFinite(port) && port > 0 ? port : 3000,
+    port: Number.isFinite(port) && port > 0 ? port : 3080,
     // 0 = 一直等待，是合法值，不能用 || 兜底
     health_timeout_secs: Number.isFinite(timeout) && timeout >= 0 ? timeout : 300,
     extra_args: $('set-extra-args').value.trim(),
@@ -390,6 +435,7 @@ function bindUI() {
   $('btn-start').onclick = () => invoke('start_dsh').catch((e) => toast(String(e), true));
   $('btn-stop').onclick = () => invoke('stop_dsh').catch((e) => toast(String(e), true));
   $('btn-restart').onclick = () => invoke('restart_dsh').catch((e) => toast(String(e), true));
+  $('btn-refresh').onclick = refreshPage;
   $('btn-check-update').onclick = checkVersions;
   $('btn-update').onclick = confirmUpdate;
   $('btn-log').onclick = () => {

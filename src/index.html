@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="style.css" />
-  <title>DSH Launcher</title>
+  <title>DSH Desktop</title>
 </head>
 <body>
   <!-- 顶部工具栏（高度 43.2px，与 Rust 端 TOOLBAR_H 常量一致，DSH 页面内嵌在此栏下方） -->
@@ -13,6 +13,7 @@
       <button id="btn-start" class="btn primary">▶ 启动</button>
       <button id="btn-stop" class="btn danger">■ 停止</button>
       <button id="btn-restart" class="btn">⟳ 重启</button>
+      <button id="btn-refresh" class="btn">↻ 刷新页面</button>
       <button id="btn-update" class="btn">⤓ 更新 DSH</button>
       <button id="btn-check-update" class="btn">检查版本</button>
       <button id="btn-log" class="btn">日志</button>
@@ -45,6 +46,12 @@
   </main>
 
   <div id="toast" class="toast hidden"></div>
+
+  <!-- 刷新页面时的提示层（覆盖内嵌 DSH 页面区域，直到新页面出现） -->
+  <div id="refresh-overlay" class="refresh-overlay hidden">
+    <div class="spinner"></div>
+    <div class="refresh-text">正在刷新...</div>
+  </div>
 
   <!-- 设置模态框 -->
   <div id="settings-modal" class="modal hidden">

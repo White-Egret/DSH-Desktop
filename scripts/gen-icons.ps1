@@ -1,4 +1,4 @@
-# Regenerate all DSH-Launcher icons from the root whale PNG.
+# Regenerate all DSH Desktop icons from the root whale PNG.
 # The source is the whale icon-128x128.png directly under D:\DSH.
 # Usage: powershell -ExecutionPolicy Bypass -File scripts\gen-icons.ps1
 $ErrorActionPreference = 'Stop'

@@ -25,7 +25,7 @@ pub fn run(launched_by_autostart: bool) {
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .args(["--autostart"])
-                .app_name("DSH Launcher")
+                .app_name("DSH Desktop")
                 .build(),
         )
         .manage(process::AppState::with_autostart(launched_by_autostart))
@@ -38,6 +38,7 @@ pub fn run(launched_by_autostart: bool) {
             process::restart_dsh,
             process::connect_existing,
             process::set_dsh_webview_visible,
+            process::refresh_dsh_page,
             process::check_versions,
             process::update_dsh,
             process::detect_npm_package,
@@ -70,7 +71,7 @@ pub fn run(launched_by_autostart: bool) {
                 let enabled = app.autolaunch().is_enabled().unwrap_or(false);
                 let _ = autostart_item.set_checked(enabled);
             }
-            let quit_item = MenuItemBuilder::new("退出 Launcher")
+            let quit_item = MenuItemBuilder::new("退出")
                 .id("quit_app")
                 .build(app)?;
             let tray_menu = MenuBuilder::new(app)
@@ -88,7 +89,7 @@ pub fn run(launched_by_autostart: bool) {
             // ---- 3. 创建托盘图标（使用打包进二进制的默认窗口图标，已是替换后的鲸鱼图标） ----
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("DSH Launcher")
+                .tooltip("DSH Desktop")
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|tray, event| {

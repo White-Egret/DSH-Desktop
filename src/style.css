@@ -1,4 +1,4 @@
-/* DSH Launcher —— 浅色主题
+/* DSH Desktop —— 浅色主题
    注意：#toolbar 的 height 必须精确等于 43.2px，
    Rust 端 TOOLBAR_H 常量（逻辑像素）依赖此值来定位内嵌的 DSH Webview。 */
 
@@ -185,6 +185,27 @@ body {
   animation: spin 0.9s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* 刷新页面提示层（覆盖内嵌 DSH 页面区域，位于模态框 z-index 之下） */
+.refresh-overlay {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  top: 43.2px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.86);
+  z-index: 50;
+  pointer-events: none;
+}
+.refresh-text {
+  font-size: 14px;
+  color: var(--text);
+}
 
 /* ---------- 通用布局小工具 ---------- */
 

@@ -31,7 +31,7 @@ impl Default for Config {
             npm_path: r"D:\Programs\nodejs\npm.cmd".to_string(),
             dsh_path: r"C:\Users\admin\AppData\Roaming\npm\dsh.cmd".to_string(),
             dsh_home_dir: default_dsh_home_dir(),
-            port: 3000,
+            port: 3080,
             extra_args: String::new(),
             package_name: "@deepseek-ai/dsh".to_string(),
             update_args: "install -g @deepseek-ai/dsh@latest".to_string(),

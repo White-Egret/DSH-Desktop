@@ -65,11 +65,17 @@ pub fn workspace_cwd(cfg: &Config) -> String {
 pub fn config_dir(app: &AppHandle) -> PathBuf {
     app.path()
         .app_config_dir()
-        .unwrap_or_else(|_| PathBuf::from(".dsh-launcher"))
+        .unwrap_or_else(|_| PathBuf::from(".dsh-desktop"))
 }
 
 pub fn config_path(app: &AppHandle) -> PathBuf {
     config_dir(app).join("config.json")
+}
+
+/// 旧版本（identifier 为 com.dsh.launcher）遗留的配置文件路径，仅用于一次性迁移
+fn legacy_config_path() -> Option<PathBuf> {
+    let base = std::env::var("APPDATA").ok()?;
+    Some(PathBuf::from(base).join("com.dsh.launcher").join("config.json"))
 }
 
 pub fn load(app: &AppHandle) -> Config {
@@ -77,6 +83,17 @@ pub fn load(app: &AppHandle) -> Config {
     if let Ok(s) = std::fs::read_to_string(&path) {
         if let Ok(cfg) = serde_json::from_str::<Config>(&s) {
             return cfg;
+        }
+    }
+    // 自动迁移旧目录 com.dsh.launcher → com.dsh.desktop，避免升级后配置丢失
+    if let Some(old) = legacy_config_path() {
+        if old != path {
+            if let Ok(s) = std::fs::read_to_string(&old) {
+                if let Ok(cfg) = serde_json::from_str::<Config>(&s) {
+                    let _ = save(app, &cfg);
+                    return cfg;
+                }
+            }
         }
     }
     Config::default()

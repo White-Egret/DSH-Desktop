@@ -117,7 +117,7 @@ Windows 10 轻装桌面端（Tauri v2），用于启动、设置、运行、更�
 | 4 | 就绪前等待提示，就绪后加载 | Rust 端 TCP+HTTP 轮询，就绪才创建内嵌 Webview；默认等 300 秒，可设 0 无限等 |
 | 5 | 崩溃立报错 | 轮询同时 `try_wait` 监控进程，退出即停并显示最后一条报错 |
 | 6/7 | 关窗无残留 | `taskkill /PID <pid> /T /F` + Job Object(KILL_ON_JOB_CLOSE) 双保险 |
-| 8 | 重开正常 | 配置持久化于 `%APPDATA%\com.dsh.launcher\config.json` |
+| 8 | 重开正常 | 配置持久化于 `%APPDATA%\com.dsh.desktop\config.json` |
 | 9/10 | 更新与重启 | 见"更新 DSH" |
 | 11 | 不内置运行时 | 仅调用本机 npm/dsh |
 | 12 | 免本地构建 | GitHub Actions windows-latest 全自动 |

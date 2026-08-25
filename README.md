@@ -117,7 +117,7 @@ Click "Update DSH" in the toolbar → confirm (the exact command is shown) → t
 | 4 | Wait before ready, load after ready | Rust TCP+HTTP polling; the embedded Webview is only created once ready; default 300 s, 0 = infinite |
 | 5 | Crash reports immediately | polling also watches `try_wait`; exit stops and shows the last error line |
 | 6/7 | No orphan processes on close | `taskkill /PID <pid> /T /F` + Job Object (KILL_ON_JOB_CLOSE) |
-| 8 | Reopen works | config persisted at `%APPDATA%\com.dsh.launcher\config.json` |
+| 8 | Reopen works | config persisted at `%APPDATA%\com.dsh.desktop\config.json` |
 | 9/10 | Update & restart | see "Updating DSH" |
 | 11 | No bundled runtime | only uses local npm/dsh |
 | 12 | No local build needed | GitHub Actions windows-latest fully automated |

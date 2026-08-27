@@ -1,8 +1,12 @@
-// DSH Desktop 前端（通过 window.__TAURI__ 全局 API 与 Rust 后端通信）
+// DSH Desktop 前端（通过 window.__TAURI__.core.invoke 与 Rust 后端通信）
 // 布局：43.2px 工具栏（按钮居左 / 状态一行居右）；工具栏下方在「等待/错误」提示
 // 与内嵌 DSH 页面（native webview，盖在本页面之上）之间切换。
+// 多语言：静态文案走 data-i18n（见 index.html + i18n.js），动态文案走 I18N.t(key, ...)；
+// 界面语言由配置 config.language 决定，保存设置后即时切换；Rust 端日志同样本地化。
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
+const I18N = window.I18N;
+const t = (...args) => I18N.t(...args);
 
 const $ = (id) => document.getElementById(id);
 
@@ -11,18 +15,19 @@ let status = 'idle';      // idle|starting|running|running-external|stopping|err
 let updating = false;
 let checkingVersion = false;
 let launchedByAutostart = false; // 本次进程是否由「开机自启」触发（决定静默+延迟策略）
-let statusMessage = null;        // 最近一次状态事件携带的附加消息（如开机自启延迟提示）
+let statusMessage = null;        // 最近一次状态事件携带的附加消息（Rust 端已本地化）
 let lastErrorText = '';          // 最近一次错误文本（「复制错误信息」使用）
 
-const STATUS_MAP = {
-  'idle':             { text: '未运行',           dot: 'gray' },
-  'starting':         { text: '正在启动',          dot: 'yellow' },
-  'running':          { text: '运行中',            dot: 'green' },
-  'running-external': { text: '运行中（外部）',     dot: 'blue' },
-  'stopping':         { text: '正在停止',          dot: 'yellow' },
-  'error':            { text: '启动失败',          dot: 'red' },
-  'port-busy':        { text: '端口被占用',        dot: 'orange' },
-  'updating':         { text: '正在更新',          dot: 'purple' },
+// 状态键 → 词典 key / 圆点颜色（文案经 t() 取，随语言切换）
+const STATUS_META = {
+  'idle':             { key: 'st_idle',        dot: 'gray' },
+  'starting':         { key: 'st_starting',    dot: 'yellow' },
+  'running':          { key: 'st_running',     dot: 'green' },
+  'running-external': { key: 'st_running_ext', dot: 'blue' },
+  'stopping':         { key: 'st_stopping',    dot: 'yellow' },
+  'error':            { key: 'st_error',       dot: 'red' },
+  'port-busy':        { key: 'st_port_busy',   dot: 'orange' },
+  'updating':         { key: 'st_updating',    dot: 'purple' },
 };
 
 // ---------- 日志 ----------
@@ -87,7 +92,7 @@ let refreshTimer = null; // 刷新提示层的隐藏定时器
 
 function refreshPage() {
   if (!['running', 'running-external'].includes(status)) {
-    toast('DSH service is not running.', true);
+    toast(t('err_not_running'), true);
     return;
   }
   const ov = $('refresh-overlay');
@@ -95,7 +100,7 @@ function refreshPage() {
   clearTimeout(refreshTimer);
 
   // 内嵌的 DSH 页面是盖在本页面之上的原生 webview，
-  // 刷新期间先把它隐藏，才能让本页面的“正在刷新...”提示显示出来。
+  // 刷新期间先把它隐藏，才能让本页面的"正在刷新..."提示显示出来。
   invoke('set_dsh_webview_visible', { visible: false }).catch(() => {});
 
   // 新页面出现后（重新显示 DSH webview）即收起提示层；
@@ -165,9 +170,9 @@ function startWaitTimer() {
 
 function renderWaitLine(secs) {
   const timeout = config ? config.health_timeout_secs : 0;
-  const tail = timeout > 0 ? `（最长等待 ${timeout} 秒）` : '（一直等待直到就绪）';
-  const prefix = statusMessage ? `${statusMessage} — ` : '';
-  $('stage-line').textContent = `${prefix}已等待 ${secs} 秒…${tail}`;
+  const tail = timeout > 0 ? t('wait_tail_timeout', timeout) : t('wait_tail_infinite');
+  const prefix = statusMessage ? `${statusMessage} — ` : t('wait_prefix');
+  $('stage-line').textContent = t('wait_line', prefix, secs, tail);
 }
 
 function stopWaitTimer() {
@@ -179,10 +184,10 @@ function stopWaitTimer() {
 
 function onStatus(p) {
   status = p.status;
-  statusMessage = p.message || null; // 供 renderWaitLine 显示开机自启延迟等提示
-  const map = STATUS_MAP[p.status] || { text: p.status, dot: 'gray' };
+  statusMessage = p.message || null; // 供 renderWaitLine 显示开机自启延迟等提示（Rust 端已本地化）
+  const map = STATUS_META[p.status] || { key: null, dot: 'gray' };
   $('status-dot').className = 'dot ' + map.dot;
-  $('status-text').textContent = map.text;
+  $('status-text').textContent = map.key ? t(map.key) : p.status;
   $('port-val').textContent = p.port;
 
   const line = $('stage-line');
@@ -198,40 +203,40 @@ function onStatus(p) {
 
   switch (p.status) {
     case 'idle':
-      line.textContent = 'DSH 未运行 — 点击左上角「启动」开始';
+      line.textContent = t('stage_idle');
       break;
     case 'starting':
       startWaitTimer(); // 内部会渲染等待行
-      hint.textContent = 'DSH 冷启动（尤其重启电脑后首次）可能需要一两分钟，请耐心等待；点击「日志」可查看实时输出';
+      hint.textContent = t('hint_starting');
       hint.classList.remove('hidden');
       break;
     case 'running':
-      line.textContent = 'DSH 已就绪，页面即将显示';
+      line.textContent = t('stage_running');
       break;
     case 'running-external':
-      line.textContent = '已连接到现有服务（非本程序启动，关闭本程序不会停止它）';
+      line.textContent = t('stage_running_ext');
       break;
     case 'stopping':
-      line.textContent = '正在停止 DSH…';
+      line.textContent = t('stage_stopping');
       break;
     case 'updating':
-      line.textContent = '正在更新 DSH，请勿关闭程序…';
-      hint.textContent = '更新输出会实时写入「日志」（来源标记为 update）';
+      line.textContent = t('stage_updating');
+      hint.textContent = t('hint_updating');
       hint.classList.remove('hidden');
       break;
     case 'error':
-      line.textContent = p.message || '启动失败，详见日志';
+      line.textContent = p.message || t('stage_error_default');
       line.classList.add('error');
-      hint.textContent = '点击「日志」查看 DSH 的完整输出；也可点击「启动」重试';
+      hint.textContent = t('hint_error');
       hint.classList.remove('hidden');
       lastErrorText = line.textContent;
       $('btn-copy-error').classList.remove('hidden');
       break;
     case 'port-busy':
-      line.textContent = `端口 ${p.port} 已被占用`;
+      line.textContent = t('stage_port_busy', p.port);
       busyPanel.classList.remove('hidden');
       $('busy-port').textContent = p.port;
-      lastErrorText = (p.message || line.textContent);
+      lastErrorText = p.message || line.textContent;
       $('btn-copy-error').classList.remove('hidden');
       break;
   }
@@ -267,6 +272,10 @@ async function init() {
   await listen('setup-result', (e) => onSetupResult(e.payload));
 
   await refreshConfig();
+  // 应用界面语言（中英文），随后渲染的静态文案全部走词典
+  I18N.setLang(config && config.language);
+  I18N.applyDom();
+
   const st = await invoke('get_status');
   onStatus(st);
 
@@ -299,20 +308,24 @@ async function postInit() {
     launchedByAutostart = await invoke('was_launched_by_autostart');
   } catch (_) { /* 保持 false */ }
   if (launchedByAutostart) {
-    appendLog('launcher', '[launcher] 本次由开机自启触发：窗口保持隐藏，DSH 将延迟 12 秒启动（错开系统冷启动高峰）。点击托盘图标可显示窗口。');
+    appendLog('launcher', t('log_autostart_silent'));
   }
 
   // 自动启动：DSH 路径有效时，程序启动即拉起服务（含上次超时失败的 error 状态）；
   // 若为开机自启，Rust 端 start_internal 会先延迟 12 秒
   if (config && config.dsh_exists && ['idle', 'error'].includes(status)) {
-    appendLog('launcher', '[launcher] 程序已启动，正在自动启动 DSH 服务…');
+    appendLog('launcher', t('log_prog_started'));
     try {
       await invoke('start_dsh');
     } catch (err) {
-      appendLog('launcher', '[launcher] 自动启动失败: ' + err);
+      appendLog('launcher', t('log_auto_start_fail', err));
     }
   } else if (config && !config.dsh_exists) {
-    appendLog('launcher', '[launcher] 未找到 DSH（' + (config.dsh_path || '自动检测失败') + '）。请先安装：npm install -g ' + (config.package_name || '@deepseek-ai/dsh') + ' ，或在设置中手动选择路径。');
+    appendLog(
+      'launcher',
+      t('log_dsh_missing', config.dsh_path || t('wiz_notfound'),
+        t('msg_install_dsh', config.package_name || '@deepseek-ai/dsh')),
+    );
     showModal('settings-modal');
   }
 }
@@ -329,6 +342,16 @@ async function refreshConfig() {
   $('port-val').textContent = config.port;
 }
 
+// ---------- 语言切换（保存后立即应用；重启 Desktop 同样生效） ----------
+
+function applyLanguage(lang) {
+  I18N.setLang(lang);
+  I18N.applyDom();
+  // 重新渲染依赖语言的动态区域
+  invoke('get_status').then(onStatus).catch(() => {});
+  if (wiz.active) renderWiz();
+}
+
 // ---------- 设置 ----------
 
 function openSettings() {
@@ -339,6 +362,7 @@ function openSettings() {
   $('set-port').value = config.port;
   $('set-timeout').value = config.health_timeout_secs;
   $('set-close-action').value = config.close_action === 'quit' ? 'quit' : 'tray';
+  $('set-language').value = config.language === 'en' ? 'en' : 'zh';
   $('set-extra-args').value = config.extra_args;
   $('set-package-name').value = config.package_name;
   $('set-update-args').value = config.update_args;
@@ -351,7 +375,7 @@ function openSettings() {
 
 function markFlag(id, ok) {
   const el = $(id);
-  el.textContent = ok ? '✔ 存在' : '✘ 未找到';
+  el.textContent = ok ? t('flag_exists') : t('flag_missing');
   el.className = 'flag ' + (ok ? 'ok' : 'bad');
 }
 
@@ -359,7 +383,7 @@ async function saveSettings() {
   // 端口校验：必须是 1~65535 的数字（要求一.5）
   const port = parseInt($('set-port').value, 10);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    toast('端口无效：必须是 1 到 65535 之间的数字', true);
+    toast(t('toast_port_invalid'), true);
     return;
   }
   const timeout = parseInt($('set-timeout').value, 10);
@@ -369,26 +393,36 @@ async function saveSettings() {
     dsh_home_dir: $('set-home-dir').value.trim(),
     port,
     close_action: $('set-close-action').value === 'quit' ? 'quit' : 'tray',
+    language: $('set-language').value === 'en' ? 'en' : 'zh',
     // 0 = 一直等待，是合法值，不能用 || 兜底
     health_timeout_secs: Number.isFinite(timeout) && timeout >= 0 ? timeout : 300,
     extra_args: $('set-extra-args').value.trim(),
     package_name: $('set-package-name').value.trim() || '@deepseek-ai/dsh',
     update_args: $('set-update-args').value.trim() || 'install -g @deepseek-ai/dsh@latest',
   };
+  const langChanged = cfg.language !== I18N.lang;
   try {
     config = await invoke('save_config', { config: cfg });
+    if (langChanged) {
+      // 先切语言再刷新弹窗内文案（词典 + 静态标签）
+      applyLanguage(cfg.language);
+    }
     markFlag('npm-exists-flag', config.npm_exists);
     markFlag('dsh-exists-flag', config.dsh_exists);
     markFlag('home-exists-flag', config.home_exists);
     $('set-config-path').textContent = config.config_path;
     $('port-val').textContent = config.port;
-    toast('配置已保存');
+    toast(t('toast_saved'));
     refreshButtons();
     hideModal('settings-modal');
     const st = await invoke('get_status');
     onStatus(st);
+    // DSH 界面语言联动提示：settings.yaml 已由后端写入，DSH 重启后生效
+    if (langChanged && ['running', 'running-external'].includes(status)) {
+      appendLog('launcher', t('log_locale_synced'));
+    }
   } catch (err) {
-    toast('保存失败: ' + err, true);
+    toast(t('toast_save_fail', err), true);
   }
 }
 
@@ -406,13 +440,15 @@ function onPathPicked(p) {
 function renderVersion(local, latest) {
   const el = $('ver-val');
   if (local && latest) {
-    el.textContent = local.trim() === latest.trim() ? `${local}（最新）` : `${local} → ${latest}`;
+    el.textContent = local.trim() === latest.trim()
+      ? t('ver_latest_suffix', local)
+      : t('ver_arrow', local, latest);
   } else if (local) {
     el.textContent = local;
   } else if (latest) {
-    el.textContent = `最新 ${latest}`;
+    el.textContent = t('ver_latest_only', latest);
   } else {
-    el.textContent = '未知';
+    el.textContent = t('ver_unknown2');
   }
 }
 
@@ -420,24 +456,24 @@ async function checkVersions() {
   if (checkingVersion) return;
   checkingVersion = true;
   refreshButtons();
-  $('ver-val').textContent = '查询中…';
-  appendLog('launcher', '[launcher] 正在查询 DSH 版本（本地 --version，远程 npm view）…');
+  $('ver-val').textContent = t('ver_querying');
+  appendLog('launcher', t('log_ver_querying'));
   try {
     const info = await invoke('check_versions');
-    if (info.local) appendLog('launcher', '[launcher] 本地 DSH 版本: ' + info.local);
+    if (info.local) appendLog('launcher', t('log_ver_local', info.local));
     if (info.latest) {
-      appendLog('launcher', '[launcher] 最新 DSH 版本: ' + info.latest);
+      appendLog('launcher', t('log_ver_latest', info.latest));
       if (info.local && info.local.trim() !== info.latest.trim()) {
-        appendLog('launcher', '[launcher] 有可用更新: ' + info.local.trim() + ' → ' + info.latest.trim());
+        appendLog('launcher', t('log_ver_update_avail', info.local.trim(), info.latest.trim()));
       }
     }
-    if (info.error) appendLog('launcher', '[launcher] 版本检测提示: ' + info.error);
+    if (info.error) appendLog('launcher', t('log_ver_error', info.error));
     renderVersion(info.local, info.latest);
     if (info.error && !info.local && !info.latest) toast(info.error, true);
   } catch (err) {
     renderVersion(null, null);
-    appendLog('launcher', '[launcher] 版本查询失败: ' + err);
-    toast('版本查询失败: ' + err, true);
+    appendLog('launcher', t('log_ver_fail', err));
+    toast(t('toast_ver_fail', err), true);
   } finally {
     checkingVersion = false;
     refreshButtons();
@@ -457,14 +493,14 @@ async function doUpdate() {
   if (updating) return;
   updating = true;
   refreshButtons();
-  appendLog('update', '[update] 开始更新 DSH（更新前已停止当前服务）…');
+  appendLog('update', t('log_update_begin'));
   try {
     await invoke('update_dsh');
   } catch (err) {
     updating = false;
     refreshButtons();
-    toast('更新启动失败: ' + err, true);
-    appendLog('update', '[update] 更新启动失败: ' + err);
+    toast(t('toast_update_fail_start', err), true);
+    appendLog('update', t('log_update_start_fail', err));
   }
 }
 
@@ -472,16 +508,16 @@ async function onUpdateFinished(p) {
   updating = false;
   refreshButtons();
   if (p.success) {
-    appendLog('update', '[update] 更新完成，正在自动重新启动 DSH…');
-    toast('DSH 更新成功，正在重新启动…');
+    appendLog('update', t('log_update_done_restart'));
+    toast(t('toast_update_restarting'));
     try {
       await invoke('start_dsh');
       await checkVersions();
     } catch (err) {
-      appendLog('launcher', '[launcher] 重新启动 DSH 失败: ' + err);
+      appendLog('launcher', t('log_restart_fail', err));
     }
   } else {
-    toast('更新失败: ' + p.message + '（详见日志，未启动 DSH）', true);
+    toast(t('toast_update_failed_detail', p.message), true);
   }
 }
 
@@ -499,16 +535,16 @@ async function runSetupWizard() {
   $('wiz-log').classList.add('hidden');
   $('wiz-log').textContent = '';
   $('wiz-progress').classList.add('hidden');
-  appendLog('launcher', '[launcher] 首次运行：开始环境检测（Node.js / npm / DSH）…');
+  appendLog('launcher', t('wiz_first_run_log'));
   await wizDetect();
 }
 
 async function wizDetect() {
-  setWizProgress(true, '正在检测本机环境（Node.js / npm / DSH）…');
+  setWizProgress(true, t('wiz_detect_env_progress'));
   try {
     wiz.detection = await invoke('detect_environment');
   } catch (e) {
-    toast('环境检测失败: ' + e, true);
+    toast(t('wiz_env_fail', e), true);
     wiz.detection = null;
   }
   setWizProgress(false);
@@ -517,13 +553,8 @@ async function wizDetect() {
 
 function setWizFlag(flagId, pathId, found, detail) {
   const f = $(flagId);
-  if (found) {
-    f.textContent = '✔ 已安装';
-    f.className = 'flag ok';
-  } else {
-    f.textContent = '✘ 未找到';
-    f.className = 'flag bad';
-  }
+  f.textContent = found ? t('wiz_installed') : t('wiz_notfound');
+  f.className = 'flag ' + (found ? 'ok' : 'bad');
   $(pathId).textContent = detail || '';
 }
 
@@ -543,14 +574,16 @@ function renderWiz() {
   // DSH 步骤：node+npm 就绪但缺 DSH 时显示
   $('wiz-step-dsh').classList.toggle('hidden', wiz.busy || !d.node_found || !d.npm_found || d.dsh_found);
 
-  // 引导信息
-  $('wiz-node-url').textContent = d.node_msi_url || 'https://nodejs.org/en/download';
-  $('wiz-dsh-cmd').textContent = '"' + (d.npm_path || 'npm') + '" install -g @deepseek-ai/dsh';
+  // 引导信息（wiz-node-url / wiz-dsh-cmd 可能在 applyDom 后被重建，这里重新赋值即可）
+  const urlEl = $('wiz-node-url');
+  if (urlEl) urlEl.textContent = d.node_msi_url || 'https://nodejs.org/en/download';
+  const cmdEl = $('wiz-dsh-cmd');
+  if (cmdEl) cmdEl.textContent = '"' + (d.npm_path || 'npm') + '" install -g @deepseek-ai/dsh';
 
   // 完成按钮：全部就绪 → 直接进入；有缺失 → 等同「跳过」
   const finishBtn = $('wiz-btn-finish');
   finishBtn.disabled = false;
-  finishBtn.textContent = allOK ? '完成，进入主界面' : '跳过缺失项，进入主界面';
+  finishBtn.textContent = allOK ? t('wiz_all_ready') : t('wiz_skip_go');
   finishBtn.classList.remove('hidden');
 
   // 安装进行中禁用相关按钮
@@ -568,7 +601,7 @@ function setWizProgress(show, text) {
 function onSetupStatus(p) {
   if (!wiz.active) return;
   if (p.phase === 'download' || p.phase === 'install' || p.phase === 'verify') {
-    setWizProgress(true, p.message);
+    setWizProgress(true, p.message); // 文案由 Rust 端按当前语言生成
     $('wiz-log').classList.remove('hidden');
   }
 }
@@ -579,12 +612,12 @@ function onSetupResult(p) {
   renderWiz();
   if (p.success) {
     setWizProgress(true, p.message);
-    toast(p.message || '安装成功');
+    toast(p.message || t('wiz_installed'));
     setTimeout(() => wizDetect(), 600); // 成功后自动重新检测并进入下一步
   } else {
     setWizProgress(false);
     $('wiz-log').classList.remove('hidden');
-    toast(p.message || '引导安装失败', true);
+    toast(p.message || t('wiz_node_start_fail'), true);
   }
 }
 
@@ -593,12 +626,14 @@ function wizFinish() {
     .then(async (report) => {
       config = report;
       $('port-val').textContent = config.port;
+      I18N.setLang(config.language);
+      I18N.applyDom();
     })
-    .catch((e) => toast('保存初始配置失败: ' + e, true));
+    .catch((e) => toast(t('toast_setup_save_fail', e), true));
   $('setup-wizard').classList.add('hidden');
   wiz.active = false;
-  appendLog('launcher', '[launcher] 初始化完成。可随时通过工具栏「设置」修改端口与路径。');
-  postInit().catch((e) => appendLog('launcher', '[launcher] 初始化失败: ' + e));
+  appendLog('launcher', t('wiz_done_log'));
+  postInit().catch((e) => appendLog('launcher', t('init_fail', e)));
 }
 
 // ---------- 绑定 ----------
@@ -610,10 +645,14 @@ function bindUI() {
   $('btn-refresh').onclick = refreshPage;
   $('btn-check-update').onclick = checkVersions;
   $('btn-update').onclick = confirmUpdate;
-  $('btn-log').onclick = () => {
-    showModal('log-modal');
-    if ($('chk-autoscroll').checked) logBody.scrollTop = logBody.scrollHeight;
-  };
+  $('btn-log').onclick = () => showModal('log-modal');
+  $('btn-settings').onclick = openSettings;
+  $('btn-cancel-settings').onclick = () => hideModal('settings-modal');
+  $('btn-save-settings').onclick = saveSettings;
+  $('btn-close-log').onclick = () => hideModal('log-modal');
+  $('btn-clear-log').onclick = () => { logBody.innerHTML = ''; };
+  $('btn-cancel-update').onclick = () => hideModal('update-modal');
+  $('btn-confirm-update').onclick = doUpdate;
   $('btn-connect').onclick = () => invoke('connect_existing').catch((e) => toast(String(e), true));
   $('btn-change-port').onclick = openSettings;
 
@@ -622,19 +661,19 @@ function bindUI() {
     try {
       const r = await invoke('check_port');
       if (!r.in_use) {
-        toast('端口 ' + r.port + ' 现在可用，请点击「启动」');
+        toast(t('toast_port_free', r.port));
       } else {
-        toast('端口 ' + r.port + ' 仍被占用：可修改端口、连接现有服务，或在任务管理器中自行处理');
+        toast(t('toast_port_busy', r.port));
       }
     } catch (e) {
-      toast('检测失败: ' + e, true);
+      toast(t('toast_recheck_fail', e), true);
     }
   };
 
   // 复制错误信息
   $('btn-copy-error').onclick = async () => {
     const ok = await copyText(lastErrorText || $('stage-line').textContent || '');
-    toast(ok ? '错误信息已复制到剪贴板' : '复制失败', !ok);
+    toast(ok ? t('toast_copied_err') : t('toast_copy_fail'), !ok);
   };
 
   // 日志面板：打开日志目录 / 复制日志文本
@@ -644,63 +683,50 @@ function bindUI() {
       .map((el) => el.textContent)
       .join('\n');
     const ok = await copyText(text);
-    toast(ok ? '日志已复制' : '复制失败', !ok);
+    toast(ok ? t('toast_copied_log') : t('toast_copy_fail'), !ok);
   };
 
   // 设置页：自动检测 Node/npm/DSH 路径并回填输入框
   $('btn-autodetect').onclick = async () => {
-    appendLog('launcher', '[launcher] 正在自动检测本机环境（node / npm / dsh）…');
+    appendLog('launcher', t('log_detect_start'));
     try {
       const d = await invoke('detect_environment');
       if (d.npm_path) $('set-npm-path').value = d.npm_path;
       if (d.dsh_path) $('set-dsh-path').value = d.dsh_path;
       markFlag('npm-exists-flag', d.npm_found);
       markFlag('dsh-exists-flag', d.dsh_found);
-      appendLog(
-        'launcher',
-        '[launcher] 检测完成: Node=' + (d.node_path || '未找到') + (d.node_version ? '(' + d.node_version + ')' : '')
-          + '，npm=' + (d.npm_path || '未找到')
-          + '，DSH=' + (d.dsh_path || '未找到')
-      );
-      toast(d.node_found && d.npm_found && d.dsh_found ? '检测完成：环境完整' : '检测完成（存在缺失项）');
+      appendLog('launcher', t('log_detect_done',
+        d.node_path || t('wiz_notfound'),
+        d.node_version ? '(' + d.node_version + ')' : '',
+        d.npm_path || t('wiz_notfound'),
+        d.dsh_path || t('wiz_notfound')));
+      toast(d.node_found && d.npm_found && d.dsh_found ? t('toast_detect_full') : t('toast_detect_missing'));
     } catch (e) {
-      toast('检测失败: ' + e, true);
+      toast(t('toast_detect_fail', e), true);
     }
   };
 
-  $('btn-settings').onclick = () => { openSettings(); refreshAutostartToggle(); };
-  $('btn-cancel-settings').onclick = () => hideModal('settings-modal');
-  $('btn-save-settings').onclick = saveSettings;
-
-  // 开机自启开关：即时生效（写入系统注册表），不随「保存」按钮
-  $('set-autostart').onchange = async (e) => {
-    const target = e.target.checked;
+  // 开机自启开关（即时生效）
+  $('set-autostart').onchange = async (ev) => {
+    const enabled = ev.target.checked;
     try {
-      await invoke('set_autostart', { enabled: target });
-      toast(target ? '已开启开机自动启动' : '已关闭开机自动启动');
+      await invoke('set_autostart', { enabled });
+      toast(enabled ? t('toast_autostart_on') : t('toast_autostart_off'));
     } catch (err) {
-      toast('修改开机自启失败: ' + err, true);
-      e.target.checked = !target; // 回滚
+      ev.target.checked = !enabled;
+      toast(t('toast_autostart_fail', err), true);
     }
   };
 
-  $('btn-cancel-update').onclick = () => hideModal('update-modal');
-  $('btn-confirm-update').onclick = doUpdate;
-
-  $('btn-clear-log').onclick = () => { logBody.innerHTML = ''; };
-  $('btn-close-log').onclick = () => hideModal('log-modal');
-  $('chk-autoscroll').onchange = () => {
-    if ($('chk-autoscroll').checked) logBody.scrollTop = logBody.scrollHeight;
-  };
+  // 检测全局包名
   $('btn-detect-package').onclick = async () => {
-    appendLog('launcher', '[launcher] 正在执行 npm list -g --depth=0 …');
     try {
-      const text = await invoke('detect_npm_package');
-      text.split('\n').forEach((l) => appendLog('launcher', l));
-      toast('检测结果已写入日志');
+      const result = await invoke('detect_npm_package');
+      appendLog('launcher', '[launcher] ' + result);
+      toast(t('toast_pkg_done'));
     } catch (err) {
-      appendLog('launcher', '[launcher] 检测失败: ' + err);
-      toast('检测失败: ' + err, true);
+      appendLog('launcher', t('log_pkg_fail', err));
+      toast(t('toast_pkg_fail', err), true);
     }
   };
 
@@ -716,22 +742,22 @@ function bindUI() {
   // ---- 首次运行引导向导按钮 ----
   $('wiz-btn-recheck').onclick = () => wizDetect();
   $('wiz-btn-recheck2').onclick = () => wizDetect();
-  $('wiz-btn-skip-node').onclick = () => { appendLog('launcher', '[launcher] 已选择稍后手动安装 Node.js。'); wizFinish(); };
-  $('wiz-btn-skip-dsh').onclick = () => { appendLog('launcher', '[launcher] 已选择稍后手动安装 DSH。'); wizFinish(); };
+  $('wiz-btn-skip-node').onclick = () => { appendLog('launcher', t('wiz_skip_node_log')); wizFinish(); };
+  $('wiz-btn-skip-dsh').onclick = () => { appendLog('launcher', t('wiz_skip_dsh_log')); wizFinish(); };
   $('wiz-btn-finish').onclick = () => wizFinish();
   $('wiz-btn-copy-dsh-cmd').onclick = async () => {
     const ok = await copyText($('wiz-dsh-cmd').textContent);
-    toast(ok ? '命令已复制' : '复制失败', !ok);
+    toast(ok ? t('wiz_cmd_copied') : t('toast_copy_fail'), !ok);
   };
   $('wiz-btn-install-node').onclick = async () => {
     if (wiz.busy) return;
     wiz.busy = true;
     renderWiz();
-    setWizProgress(true, '正在下载官方 Node.js LTS 安装包…');
+    setWizProgress(true, t('wiz_download_node'));
     $('wiz-log').classList.remove('hidden');
     try {
       await invoke('setup_install_node');
-      // 进度与结果由 setup-status / setup-result 事件驱动
+      // 进度与结果由 setup-status / setup-result 事件驱动（Rust 端按语言输出）
     } catch (e) {
       wiz.busy = false;
       setWizProgress(false);
@@ -744,7 +770,7 @@ function bindUI() {
     if (wiz.busy) return;
     wiz.busy = true;
     renderWiz();
-    setWizProgress(true, '正在通过 npm 全局安装 DSH…');
+    setWizProgress(true, t('wiz_install_dsh_progress'));
     $('wiz-log').classList.remove('hidden');
     try {
       await invoke('setup_install_dsh');
@@ -756,11 +782,14 @@ function bindUI() {
       toast(String(e), true);
     }
   };
-  $('wiz-open-node-page').onclick = (ev) => {
+  // 官网链接用事件委托：applyDom 重写 html 后 <a> 会被重建，直接绑会丢
+  $('setup-wizard').addEventListener('click', (ev) => {
+    const a = ev.target.closest('a#wiz-open-node-page');
+    if (!a) return;
     ev.preventDefault();
     const page = (wiz.detection && wiz.detection.node_download_page) || 'https://nodejs.org/en/download';
     invoke('open_in_browser', { url: page }).catch((e) => toast(String(e), true));
-  };
+  });
 
   // 点击遮罩关闭模态框（误点弹窗外区域可直接关掉）
   MODALS.forEach((m) => {
@@ -772,7 +801,7 @@ function bindUI() {
 
 window.addEventListener('DOMContentLoaded', () => {
   init().catch((e) => {
-    appendLog('launcher', '[launcher] 初始化失败: ' + e);
-    toast('初始化失败: ' + e, true);
+    appendLog('launcher', '[launcher] ' + (window.I18N ? t('init_fail', e) : e));
+    toast(String(e), true);
   });
 });

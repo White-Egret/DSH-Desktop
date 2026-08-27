@@ -1,5 +1,5 @@
 use crate::config::{self, Config};
-use crate::{detect, logger};
+use crate::{detect, i18n, logger};
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Read};
 use std::net::{SocketAddr, TcpStream};
@@ -372,18 +372,20 @@ fn spawn_log_reader(
                     // 就绪后优先按实际地址加载页面（要求一.8）
                     if matches!(stream, "stdout" | "stderr") {
                         if let Some((url, port)) = extract_local_url(&l) {
-                            let mut guard = state.detected_url.lock().unwrap();
-                            if guard.as_ref().map(|(_, p)| *p) != Some(port) {
+                            // 先更新并释放锁，再发日志（避免持锁期间的跨线程操作）
+                            let changed = {
+                                let mut guard = state.detected_url.lock().unwrap();
+                                let changed = guard.as_ref().map(|(_, p)| *p) != Some(port);
+                                *guard = Some((url.clone(), port));
+                                changed
+                            };
+                            if changed {
                                 emit_log(
                                     &app,
                                     "launcher",
-                                    format!(
-                                        "[launcher] 检测到 DSH 实际监听地址: {}（将以该地址为准加载页面）",
-                                        url
-                                    ),
+                                    i18n::fmt("log_detected_url", &[&url]),
                                 );
                             }
-                            *guard = Some((url, port));
                         }
                     }
                     // 落盘（失败忽略，不影响主流程）
@@ -427,7 +429,9 @@ fn run_cmd_capture(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("无法启动 {}: {}", program, e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| i18n::fmt("err_cmd_spawn", &[&program.to_string(), &e.to_string()]))?;
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let started = Instant::now();
@@ -450,11 +454,11 @@ fn run_cmd_capture(
                     let _ = drain_pipe(&mut stdout);
                     let _ = drain_pipe(&mut stderr);
                     let _ = child.wait();
-                    return Err(format!("命令执行超时（{} 秒）", timeout.as_secs()));
+                    return Err(i18n::fmt("err_cmd_timeout", &[&timeout.as_secs()]));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(e) => return Err(format!("等待命令退出失败: {}", e)),
+            Err(e) => return Err(i18n::fmt("err_cmd_wait", &[&e.to_string()])),
         }
     }
 }
@@ -485,12 +489,12 @@ fn open_dsh_webview(app: &AppHandle, url: &str) {
 
     // add_child 是 Window 的方法：取主窗口的 Window 句柄（unstable API）
     let Some(win) = app.get_window("main") else {
-        emit_log(app, "launcher", "[launcher] 找不到主窗口，无法内嵌 DSH 页面。".to_string());
+        emit_log(app, "launcher", i18n::t("log_no_main_window").to_string());
         return;
     };
     let (w, h) = main_content_size(app);
     let Ok(parsed) = url.parse::<tauri::Url>() else {
-        emit_log(app, "launcher", format!("[launcher] 非法的加载地址: {}", url));
+        emit_log(app, "launcher", i18n::fmt("log_invalid_url", &[&url.to_string()]));
         return;
     };
     let result = win.add_child(
@@ -502,7 +506,7 @@ fn open_dsh_webview(app: &AppHandle, url: &str) {
         tauri::LogicalSize::new(w, h),
     );
     if let Err(e) = result {
-        emit_log(app, "launcher", format!("[launcher] 内嵌 DSH 页面失败: {}", e));
+        emit_log(app, "launcher", i18n::fmt("log_embed_fail", &[&e.to_string()]));
     }
 }
 
@@ -542,21 +546,21 @@ pub fn set_dsh_webview_visible(app: AppHandle, visible: bool) -> Result<(), Stri
 pub fn refresh_dsh_page(app: AppHandle) -> Result<(), String> {
     let st = current_status(&app);
     if st != "running" && st != "running-external" {
-        return Err("DSH service is not running.".to_string());
+        return Err(i18n::t("err_not_running_refresh").to_string());
     }
 
     if let Some(wv) = app.get_webview("dsh") {
         // 优先走 WebView 的 reload：window.location.reload() 保留当前 URL
         wv.eval("window.location.reload()")
             .map_err(|e| format!("Failed to reload DSH page: {}", e))?;
-        emit_log(&app, "launcher", "[launcher] 已刷新 DSH 页面（DSH 服务未重启）。".to_string());
+        emit_log(&app, "launcher", i18n::t("log_refreshed_page").to_string());
         return Ok(());
     }
 
     // 服务在运行但页面不存在（例如之前被销毁）：按当前配置端口重新打开页面（不重启服务）
     let cfg = config::load(&app);
     open_dsh_webview(&app, &local_url(cfg.port));
-    emit_log(&app, "launcher", "[launcher] 已重新打开 DSH 页面（DSH 服务未重启）。".to_string());
+    emit_log(&app, "launcher", i18n::t("log_reopened_page").to_string());
     Ok(())
 }
 
@@ -569,7 +573,7 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         st.as_str(),
         "starting" | "running" | "running-external" | "stopping" | "updating"
     ) {
-        return Err(format!("当前 DSH 状态为「{}」，无法重复启动", st));
+        return Err(i18n::fmt("err_status_locked", &[&st]));
     }
 
     // 开机自启触发：先延迟 12 秒错开系统冷启动高峰（IO 拥堵、Node/网络未就绪极易超时）
@@ -578,18 +582,12 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         emit_log(
             app,
             "launcher",
-            format!(
-                "[launcher] 检测到开机自启触发，先等待 {} 秒错开系统冷启动高峰...",
-                AUTOSTART_DELAY_SECS
-            ),
+            i18n::fmt("log_autostart_wait", &[&AUTOSTART_DELAY_SECS]),
         );
         set_status(
             app,
             "starting",
-            Some(format!(
-                "开机自启：等待 {} 秒后启动 DSH（错开系统冷启动高峰，可点「停止」取消）",
-                AUTOSTART_DELAY_SECS
-            )),
+            Some(i18n::fmt("status_autostart_delay", &[&AUTOSTART_DELAY_SECS])),
         );
         // 分段 sleep，期间允许用户点击「停止」取消延迟
         let total = Duration::from_secs(AUTOSTART_DELAY_SECS);
@@ -600,11 +598,11 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
             elapsed += step;
             let cur = current_status(app);
             if cur != "starting" {
-                emit_log(app, "launcher", "[launcher] 开机自启延迟被取消。".to_string());
+                emit_log(app, "launcher", i18n::t("log_autostart_cancelled").to_string());
                 return Ok(());
             }
         }
-        emit_log(app, "launcher", "[launcher] 延迟结束，开始启动 DSH。".to_string());
+        emit_log(app, "launcher", i18n::t("log_autostart_resume").to_string());
     }
 
     let cfg = config::load(app);
@@ -615,9 +613,7 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
     {
         let env = detect::detect_all(false);
         if env.node.is_none() {
-            let msg = "未找到 Node.js（node.exe）。DSH 依赖 Node.js 运行：请先安装 Node.js LTS \
-                       （https://nodejs.org），或打开「设置」确认路径后重试。"
-                .to_string();
+            let msg = i18n::t("err_node_missing").to_string();
             set_status(app, "error", Some(msg.clone()));
             return Err(msg);
         }
@@ -625,15 +621,11 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
 
     // 2) DSH 可执行文件（自动检测失败时允许用户在设置中手动选择）
     if cfg.dsh_path.trim().is_empty() || !Path::new(&cfg.dsh_path).is_file() {
-        let msg = format!(
-            "未找到 DSH{}。\n请先全局安装：npm install -g {}\n或在「设置」中手动选择 dsh 路径。",
-            if cfg.dsh_path.trim().is_empty() {
-                "（自动检测失败）".to_string()
-            } else {
-                format!("：{}", cfg.dsh_path)
-            },
-            cfg.package_name
-        );
+        let msg = if cfg.dsh_path.trim().is_empty() {
+            i18n::fmt("err_dsh_missing_auto", &[&cfg.package_name])
+        } else {
+            i18n::fmt("err_dsh_missing", &[&cfg.dsh_path, &cfg.package_name])
+        };
         set_status(app, "error", Some(msg.clone()));
         return Err(msg);
     }
@@ -643,27 +635,20 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         emit_log(
             app,
             "launcher",
-            "[launcher] 提示：未找到 npm.cmd，「更新 DSH / 查询最新版本」不可用，但不影响启动。可在「设置」中配置。"
-                .to_string(),
+            i18n::t("log_npm_missing_hint").to_string(),
         );
     }
 
     let cwd = config::workspace_cwd(&cfg);
     if !Path::new(&cwd).is_dir() {
-        let msg = format!(
-            "配置路径无效：启动进程工作目录不存在（{}，由家目录 {} 推导）。请在「设置」中检查 DSH 家目录。",
-            cwd, cfg.dsh_home_dir
-        );
+        let msg = i18n::fmt("err_cwd_invalid", &[&cwd, &cfg.dsh_home_dir]);
         set_status(app, "error", Some(msg.clone()));
         return Err(msg);
     }
 
     // 端口占用检查：绝不强杀未知进程，交给用户决策（可改端口 / 重检 / 连接现有服务）
     if port_in_use(cfg.port) {
-        let msg = format!(
-            "端口 {} 已被其他进程占用（可能是已在运行的 DSH，也可能是其他程序）。本程序不会强制结束未知进程。",
-            cfg.port
-        );
+        let msg = i18n::fmt("err_port_busy", &[&cfg.port]);
         set_status(app, "port-busy", Some(msg.clone()));
         return Err(msg);
     }
@@ -695,7 +680,7 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
     let _ = state.take_last_stderr();
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("启动 DSH 失败: {}（路径: {}）。请检查路径是否有效、程序是否有执行权限。", e, cfg.dsh_path))?;
+        .map_err(|e| i18n::fmt("err_spawn_fail", &[&e.to_string(), &cfg.dsh_path]))?;
     let pid = child.id();
 
     // DSH 输出同时镜像写入 <DSH 家目录>\logs\dsh.log（要求四.2）
@@ -722,19 +707,21 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
     emit_log(
         app,
         "launcher",
-        format!(
-            "[launcher] 启动命令: cmd /C \"{}\" web --port {} --no-open{}（进程工作目录: {}，DSH_HOME: {}，PID: {}；DSH 输出日志: {}）",
-            cfg.dsh_path,
-            cfg.port,
-            if cfg.extra_args.trim().is_empty() {
-                String::new()
-            } else {
-                format!(" {}", cfg.extra_args)
-            },
-            cwd,
-            cfg.dsh_home_dir,
-            pid,
-            logger::dsh_log_path(&cfg.dsh_home_dir).display()
+        i18n::fmt(
+            "log_start_cmd",
+            &[
+                &cfg.dsh_path,
+                &cfg.port,
+                &if cfg.extra_args.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", cfg.extra_args)
+                },
+                &cwd,
+                &cfg.dsh_home_dir,
+                &pid,
+                &logger::dsh_log_path(&cfg.dsh_home_dir).display().to_string(),
+            ],
         ),
     );
 
@@ -762,13 +749,15 @@ fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
     emit_log(
         app,
         "launcher",
-        format!(
-            "[launcher] 正在等待 DSH 就绪（默认 http://127.0.0.1:{}{}）...",
-            port,
-            match timeout {
-                Some(t) => format!("，超时 {} 秒", t.as_secs()),
-                None => "，无超时限制（DSH 进程存活期间持续等待）".to_string(),
-            }
+        i18n::fmt(
+            "log_wait_ready",
+            &[
+                &port,
+                &match timeout {
+                    Some(t) => i18n::fmt("wait_suffix_timeout", &[&t.as_secs()]),
+                    None => i18n::t("wait_suffix_infinite").to_string(),
+                },
+            ],
         ),
     );
     loop {
@@ -791,18 +780,13 @@ fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
                         *state.pid.lock().unwrap() = None;
                         state.close_jobs();
                         let last_err = state.take_last_stderr();
+                        let code = format!("{:?}", status.code());
                         emit_log(
                             app,
                             "launcher",
-                            format!(
-                                "[launcher] DSH 进程在服务就绪前已退出（退出码 {:?}），启动失败！请打开日志查看 DSH 的原始输出。",
-                                status.code()
-                            ),
+                            i18n::fmt("log_exit_before_ready", &[&code]),
                         );
-                        let mut msg = format!(
-                            "DSH 启动失败：进程在端口就绪前退出（退出码 {:?}）",
-                            status.code()
-                        );
+                        let mut msg = i18n::fmt("err_exit_before_ready", &[&code]);
                         if let Some(e) = last_err {
                             msg.push_str("：");
                             msg.push_str(&e);
@@ -812,7 +796,7 @@ fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        emit_log(app, "launcher", format!("[launcher] 检查 DSH 进程状态失败: {}", e));
+                        emit_log(app, "launcher", i18n::fmt("log_proc_check_fail", &[&e.to_string()]));
                     }
                 }
             } else {
@@ -826,10 +810,9 @@ fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
             emit_log(
                 app,
                 "launcher",
-                format!(
-                    "[launcher] DSH 服务已就绪（共等待 {:.0} 秒），正在内嵌页面 {} …",
-                    started.elapsed().as_secs_f64(),
-                    target_url
+                i18n::fmt(
+                    "log_ready_embed",
+                    &[&format!("{:.0}", started.elapsed().as_secs_f64()), &target_url],
                 ),
             );
             set_status(app, "running", None);
@@ -843,19 +826,13 @@ fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
                 emit_log(
                     app,
                     "launcher",
-                    format!(
-                        "[launcher] 等待 DSH 就绪超时（{} 秒），正在停止进程树。若 DSH 冷启动确实很慢，可在设置中调大超时或设为 0（一直等待）。",
-                        t.as_secs()
-                    ),
+                    i18n::fmt("log_timeout_stop", &[&t.as_secs()]),
                 );
                 let _ = stop_internal(app);
                 set_status(
                     app,
                     "error",
-                    Some(format!(
-                        "启动超时：DSH 在 {} 秒内未就绪，进程已停止。可在设置中调大超时时间，或设为 0 表示一直等待。",
-                        t.as_secs()
-                    )),
+                    Some(i18n::fmt("err_timeout", &[&t.as_secs()])),
                 );
                 return;
             }
@@ -881,16 +858,16 @@ fn stop_internal(app: &AppHandle) -> Result<(), String> {
         emit_log(
             app,
             "launcher",
-            format!("[launcher] 正在结束 DSH 进程树: taskkill /PID {} /T /F ...", pid),
+            i18n::fmt("log_stopping_tree", &[&pid]),
         );
         match run_taskkill(pid) {
             Ok(out) => {
                 if !out.is_empty() {
-                    emit_log(app, "launcher", format!("[launcher] taskkill: {}", out));
+                    emit_log(app, "launcher", i18n::fmt("log_taskkill_out", &[&out]));
                 }
             }
             Err(e) => {
-                emit_log(app, "launcher", format!("[launcher] taskkill 执行失败: {}（Job Object 会在程序退出时兜底清理）", e));
+                emit_log(app, "launcher", i18n::fmt("log_taskkill_fail", &[&e]));
             }
         }
     }
@@ -915,7 +892,7 @@ fn stop_internal(app: &AppHandle) -> Result<(), String> {
     // 服务停止后销毁内嵌页面，露出状态区
     destroy_dsh_webview(app);
     set_status(app, "idle", None);
-    emit_log(app, "launcher", "[launcher] DSH 已停止。".to_string());
+    emit_log(app, "launcher", i18n::t("log_stopped").to_string());
     Ok(())
 }
 
@@ -939,20 +916,47 @@ pub fn get_config(app: AppHandle) -> ConfigReport {
 pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, String> {
     // 端口必须是 1~65535 的数字（要求一.5）
     if !(1..=65535).contains(&config.port) {
-        return Err("端口无效：必须是 1 到 65535 之间的数字".to_string());
+        return Err(i18n::t("err_port_invalid").to_string());
     }
     if config.dsh_home_dir.trim().is_empty() {
-        return Err("DSH 家目录不能为空".to_string());
+        return Err(i18n::t("err_home_empty").to_string());
     }
     if config.dsh_path.trim().is_empty() || config.npm_path.trim().is_empty() {
-        return Err("路径不能为空（可点击「自动检测」填写）".to_string());
+        return Err(i18n::t("err_paths_empty").to_string());
     }
+    let old_lang = config::load(&app).language;
     config::save(&app, &config)?;
+
+    // 语言切换即时生效：本会话后续的 launcher 日志、托盘菜单文字（前端自行切换界面文案）。
+    // DSH 自身界面语言通过 settings.yaml 联动，需 DSH 重启后变化。
+    i18n::set_lang(&config.language);
+    crate::refresh_tray_texts(&app);
+    // 同步 DSH 家目录 settings.yaml → locale.preference
+    match config::sync_dsh_locale(&config.dsh_home_dir, &config.language) {
+        Ok(()) => emit_log(
+            &app,
+            "launcher",
+            i18n::fmt("log_locale_synced", &[&config.language]),
+        ),
+        Err(e) => emit_log(
+            &app,
+            "launcher",
+            i18n::fmt("err_locale_sync_fail", &[&e]),
+        ),
+    }
+    if old_lang != config.language {
+        emit_log(
+            &app,
+            "launcher",
+            i18n::fmt("log_lang_changed", &[&config.language]),
+        );
+    }
+
     let report = get_config(app.clone());
     emit_log(
         &app,
         "launcher",
-        format!("[launcher] 配置已保存到 {}（端口 / 参数将在下次启动 DSH 时生效）", report.config_path),
+        i18n::fmt("log_config_saved", &[&report.config_path]),
     );
     Ok(report)
 }
@@ -983,7 +987,7 @@ pub async fn stop_dsh(app: AppHandle) -> Result<(), String> {
         // 外部进程不由本程序管理，只解除连接状态并收起页面
         destroy_dsh_webview(&app);
         set_status(&app, "idle", None);
-        emit_log(&app, "launcher", "[launcher] 已断开与外部服务的连接（该服务不是本程序启动的，仍在运行）。".to_string());
+        emit_log(&app, "launcher", i18n::t("log_disconnected_external").to_string());
         return Ok(());
     }
     stop_internal(&app)
@@ -993,7 +997,7 @@ pub async fn stop_dsh(app: AppHandle) -> Result<(), String> {
 pub async fn restart_dsh(app: AppHandle) -> Result<(), String> {
     let st = current_status(&app);
     if st != "running" && st != "running-external" {
-        return Err("DSH 当前未在运行，无法重启".to_string());
+        return Err(i18n::t("err_restart_not_running").to_string());
     }
     if st == "running-external" {
         destroy_dsh_webview(&app);
@@ -1010,15 +1014,12 @@ pub async fn restart_dsh(app: AppHandle) -> Result<(), String> {
 pub async fn connect_existing(app: AppHandle) -> Result<(), String> {
     let cfg = config::load(&app);
     if !port_in_use(cfg.port) {
-        return Err(format!("端口 {} 当前没有服务在监听，无法连接。", cfg.port));
+        return Err(i18n::fmt("err_connect_no_listener", &[&cfg.port]));
     }
     emit_log(
         &app,
         "launcher",
-        format!(
-            "[launcher] 连接到端口 {} 上的现有服务。注意：该服务不是本程序启动的，关闭本程序不会停止它。",
-            cfg.port
-        ),
+        i18n::fmt("log_connect_existing", &[&cfg.port]),
     );
     set_status(&app, "running-external", None);
     open_dsh_webview(&app, &local_url(cfg.port));
@@ -1055,10 +1056,10 @@ pub async fn check_versions(app: AppHandle) -> Result<VersionInfo, String> {
             }
         }
         if info.local.is_none() {
-            info.error = Some("无法获取本地 DSH 版本（--version / -v / -V 均不可用）".to_string());
+            info.error = Some(i18n::t("err_ver_flags").to_string());
         }
     } else {
-        info.error = Some(format!("找不到 dsh.cmd（{}），无法获取本地版本", cfg.dsh_path));
+        info.error = Some(i18n::fmt("err_ver_no_dsh", &[&cfg.dsh_path]));
     }
 
     if Path::new(&cfg.npm_path).is_file() {
@@ -1077,12 +1078,12 @@ pub async fn check_versions(app: AppHandle) -> Result<VersionInfo, String> {
                 if !v.is_empty() {
                     info.latest = Some(v.to_string());
                 } else {
-                    let e = format!("npm view {} version 返回为空", cfg.package_name);
+                    let e = i18n::fmt("err_ver_view_empty", &[&cfg.package_name]);
                     info.error = Some(join_err(info.error, &e));
                 }
             }
             Ok((false, out)) => {
-                let e = format!("npm view 失败: {}", out.trim());
+                let e = i18n::fmt("err_view_fail", &[&out.trim()]);
                 info.error = Some(join_err(info.error, &e));
             }
             Err(e) => {
@@ -1090,7 +1091,7 @@ pub async fn check_versions(app: AppHandle) -> Result<VersionInfo, String> {
             }
         }
     } else {
-        let e = format!("找不到 npm.cmd（{}），无法查询最新版本", cfg.npm_path);
+        let e = i18n::fmt("err_no_npm_view", &[&cfg.npm_path]);
         info.error = Some(join_err(info.error, &e));
     }
 
@@ -1098,8 +1099,9 @@ pub async fn check_versions(app: AppHandle) -> Result<VersionInfo, String> {
 }
 
 fn join_err(a: Option<String>, b: &str) -> String {
+    let sep = if i18n::is_en() { "; " } else { "；" };
     match a {
-        Some(x) => format!("{}；{}", x, b),
+        Some(x) => format!("{}{}{}", x, sep, b),
         None => b.to_string(),
     }
 }
@@ -1109,7 +1111,7 @@ fn join_err(a: Option<String>, b: &str) -> String {
 pub async fn detect_npm_package(app: AppHandle) -> Result<String, String> {
     let cfg = config::load(&app);
     if !Path::new(&cfg.npm_path).is_file() {
-        return Err(format!("找不到 npm: {}，请先在设置中配置 npm 路径", cfg.npm_path));
+        return Err(i18n::fmt("err_no_npm_detect", &[&cfg.npm_path]));
     }
     let cwd = config::workspace_cwd(&cfg);
     let (ok, out) = run_cmd_capture(
@@ -1128,12 +1130,12 @@ pub async fn detect_npm_package(app: AppHandle) -> Result<String, String> {
     }
     if ok {
         if found.is_empty() {
-            Ok(format!("未在 npm 全局包中发现 dsh 相关包。\n\n完整输出:\n{}", text))
+            Ok(i18n::fmt("log_pkg_none", &[&text]))
         } else {
-            Ok(format!("检测到全局包:\n{}\n\n完整输出:\n{}", found.join("\n"), text))
+            Ok(i18n::fmt("log_pkg_found", &[&found.join("\n"), &text]))
         }
     } else {
-        Ok(format!("npm list 执行失败:\n{}", text))
+        Ok(i18n::fmt("err_pkg_list_fail", &[&text]))
     }
 }
 
@@ -1142,13 +1144,13 @@ pub async fn detect_npm_package(app: AppHandle) -> Result<String, String> {
 pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     if state.updating.swap(true, Ordering::SeqCst) {
-        return Err("已有更新任务正在进行，请等待完成".to_string());
+        return Err(i18n::t("err_update_busy").to_string());
     }
 
     let cfg = config::load(&app);
     if !Path::new(&cfg.npm_path).is_file() {
         state.updating.store(false, Ordering::SeqCst);
-        let msg = format!("找不到 npm: {}，请在「设置」中修改 npm.cmd 路径", cfg.npm_path);
+        let msg = i18n::fmt("err_no_npm_update", &[&cfg.npm_path]);
         set_status(&app, "error", Some(msg.clone()));
         return Err(msg);
     }
@@ -1186,7 +1188,7 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
 
             let mut child = cmd
                 .spawn()
-                .map_err(|e| format!("npm 启动失败: {}", e))?;
+                .map_err(|e| i18n::fmt("err_npm_spawn", &[&e.to_string()]))?;
             let pid = child.id();
 
             // npm 进程也放入独立 Job Object：更新期间本程序退出则一并结束，避免残留
@@ -1201,9 +1203,9 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
             emit_log(
                 &app2,
                 "update",
-                format!(
-                    "[update] 执行: cmd /C \"{}\" {}（进程工作目录: {}，PID: {}；DSH 工作区与此目录无关）",
-                    cfg.npm_path, cfg.update_args, cwd, pid
+                i18n::fmt(
+                    "log_update_cmd",
+                    &[&cfg.npm_path, &cfg.update_args, &cwd, &pid],
                 ),
             );
 
@@ -1217,30 +1219,30 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
             child
                 .wait()
                 .map(|s| s.code().unwrap_or(-1))
-                .map_err(|e| format!("等待 npm 退出失败: {}", e))
+                .map_err(|e| i18n::fmt("err_npm_wait", &[&e.to_string()]))
         })();
 
         let state = app2.state::<AppState>();
         state.close_update_job();
         match result {
             Ok(0) => {
-                emit_log(&app2, "update", "[update] npm 更新成功（退出码 0）。".to_string());
+                emit_log(&app2, "update", i18n::t("log_update_ok").to_string());
                 let _ = app2.emit(
                     "update-finished",
-                    UpdateFinished { success: true, message: "更新成功".to_string() },
+                    UpdateFinished { success: true, message: i18n::t("msg_update_success").to_string() },
                 );
             }
             Ok(code) => {
                 emit_log(
                     &app2,
                     "update",
-                    format!("[update] npm 更新失败（退出码 {}），不会自动启动 DSH。请查看日志。", code),
+                    i18n::fmt("log_update_fail_code", &[&code]),
                 );
                 let _ = app2.emit(
                     "update-finished",
                     UpdateFinished {
                         success: false,
-                        message: format!("更新失败（退出码 {}），详见日志", code),
+                        message: i18n::fmt("msg_update_fail_code", &[&code]),
                     },
                 );
                 set_status(&app2, "idle", None);
@@ -1268,7 +1270,7 @@ pub fn pick_exec_path(app: AppHandle, kind: String) {
     let app2 = app.clone();
     app.dialog()
         .file()
-        .add_filter("命令脚本 / 可执行文件", &["cmd", "bat", "exe"])
+        .add_filter(i18n::t("pick_filter_exec"), &["cmd", "bat", "exe"])
         .pick_file(move |file| {
             if let Some(f) = file {
                 if let Ok(p) = f.into_path() {
@@ -1317,11 +1319,11 @@ pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
     let mgr = app.autolaunch();
     if enabled {
-        mgr.enable().map_err(|e| format!("启用开机自启失败：{}", e))?;
-        emit_log(&app, "launcher", "[launcher] 已开启开机自动启动。".to_string());
+        mgr.enable().map_err(|e| i18n::fmt("err_autostart_enable", &[&e.to_string()]))?;
+        emit_log(&app, "launcher", i18n::t("log_autostart_on").to_string());
     } else {
-        mgr.disable().map_err(|e| format!("取消开机自启失败：{}", e))?;
-        emit_log(&app, "launcher", "[launcher] 已关闭开机自动启动。".to_string());
+        mgr.disable().map_err(|e| i18n::fmt("err_autostart_disable", &[&e.to_string()]))?;
+        emit_log(&app, "launcher", i18n::t("log_autostart_off").to_string());
     }
     // 同步托盘菜单勾选（通过查找 managed state；lib.rs 定义）
     sync_tray_autostart_checked(&app, enabled);
@@ -1354,11 +1356,13 @@ pub fn was_launched_by_autostart(app: AppHandle) -> bool {
 #[tauri::command]
 pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
     let dir = config::config_dir(&app);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建日志目录 {}: {}", dir.display(), e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        i18n::fmt("err_logdir_create", &[&dir.display().to_string(), &e.to_string()])
+    })?;
     Command::new("explorer")
         .arg(dir.as_os_str())
         .spawn()
-        .map_err(|e| format!("无法打开日志目录: {}", e))?;
+        .map_err(|e| i18n::fmt("err_logdir_open", &[&e.to_string()]))?;
     Ok(())
 }
 
@@ -1367,12 +1371,12 @@ pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
 pub fn open_in_browser(url: String) -> Result<(), String> {
     let u = url.trim();
     if !(u.starts_with("http://") || u.starts_with("https://")) {
-        return Err(format!("非法链接: {}", u));
+        return Err(i18n::fmt("err_bad_url", &[&u.to_string()]));
     }
     Command::new("explorer")
         .arg(u)
         .spawn()
-        .map_err(|e| format!("无法打开浏览器: {}", e))?;
+        .map_err(|e| i18n::fmt("err_browser_open", &[&e.to_string()]))?;
     Ok(())
 }
 
@@ -1409,7 +1413,7 @@ pub async fn setup_install_node(app: AppHandle) -> Result<(), String> {
     {
         let state = app.state::<AppState>();
         if state.setup_busy.swap(true, Ordering::SeqCst) {
-            return Err("已有引导安装任务正在进行".to_string());
+            return Err(i18n::t("err_setup_busy").to_string());
         }
     }
     let app2 = app.clone();
@@ -1421,10 +1425,12 @@ pub async fn setup_install_node(app: AppHandle) -> Result<(), String> {
         };
         logger::append_line(
             &logger::desktop_log_path(&app2),
-            &format!(
-                "[setup] Node.js 引导安装{}{}",
-                if ok { "成功" } else { "失败" },
-                if ok { format!("：{}", msg) } else { format!("：{}", msg) }
+            &i18n::fmt(
+                "setup_node_result_line",
+                &[
+                    &i18n::t(if ok { "setup_word_ok" } else { "setup_word_fail" }),
+                    &msg,
+                ],
             ),
         );
         let _ = app2.emit(
@@ -1445,14 +1451,18 @@ fn install_node_blocking(app: &AppHandle) -> Result<String, String> {
     setup_progress(
         app,
         "download",
-        &format!("开始下载官方 Node.js v{} LTS 安装包：{}", detect::NODE_LTS_VERSION, url),
+        &i18n::fmt("setup_dl_start", &[&detect::NODE_LTS_VERSION, &url]),
     );
 
     // 方式一：curl.exe（Windows 10 1803+ 自带）；失败则回退 PowerShell Invoke-WebRequest
-    let mut last_err = String::from("未找到可用的下载工具");
+    let mut last_err = i18n::t("setup_no_dl_tool").to_string();
     let via_curl = try_download_curl(&url, &dest, &mut last_err);
     if !via_curl {
-        setup_progress(app, "download", &format!("curl 下载不可用（{}），改用 PowerShell…", last_err));
+        setup_progress(
+            app,
+            "download",
+            &i18n::fmt("setup_curl_fallback", &[&last_err]),
+        );
         try_download_powershell(&url, &dest)?;
     }
 
@@ -1461,36 +1471,29 @@ fn install_node_blocking(app: &AppHandle) -> Result<String, String> {
         Ok(meta) if meta.len() >= 10 * 1024 * 1024 => {}
         Ok(meta) => {
             let _ = std::fs::remove_file(&dest);
-            return Err(format!(
-                "下载失败：文件不完整（{} 字节）。请检查网络后重试，或到 {} 手动下载安装。",
-                meta.len(),
-                detect::NODE_DOWNLOAD_PAGE
+            return Err(i18n::fmt(
+                "setup_dl_incomplete",
+                &[&meta.len(), &detect::NODE_DOWNLOAD_PAGE.to_string()],
             ));
         }
         Err(_) => {
-            return Err(format!(
-                "下载失败：文件未能保存到 {}。请检查网络连接后重试，或到 {} 手动下载安装。",
-                dest.display(),
-                detect::NODE_DOWNLOAD_PAGE
+            return Err(i18n::fmt(
+                "setup_dl_missing",
+                &[&dest.display().to_string(), &detect::NODE_DOWNLOAD_PAGE.to_string()],
             ));
         }
     }
 
-    setup_progress(
-        app,
-        "install",
-        "下载完成，正在启动官方安装程序。请在弹出的安装窗口 / UAC 提示中确认并等待完成……",
-    );
+    setup_progress(app, "install", i18n::t("setup_install_launch"));
 
     // 运行官方 MSI：/passive 显示进度条但无需逐页点击；UAC 由 Windows 弹出（权限提升交给系统）
     let mut cmd = Command::new("msiexec");
     cmd.arg("/i").arg(&dest).args(["/passive", "/norestart"]);
     apply_no_window(&mut cmd); // 只是不创建控制台窗口；MSI 本身是 GUI 程序不受影响
     let mut child = cmd.spawn().map_err(|e| {
-        format!(
-            "无法启动安装程序（msiexec）: {}。可到 {} 手动下载安装 Node.js 后点击「重新检测」。",
-            e,
-            detect::NODE_DOWNLOAD_PAGE
+        i18n::fmt(
+            "setup_msi_launch_fail",
+            &[&e.to_string(), &detect::NODE_DOWNLOAD_PAGE.to_string()],
         )
     })?;
 
@@ -1506,49 +1509,43 @@ fn install_node_blocking(app: &AppHandle) -> Result<String, String> {
                 if started.elapsed() >= Duration::from_secs(30 * 60) {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(
-                        "等待安装程序完成超时（30 分钟），已中止等待。可到 \
-                         https://nodejs.org 手动安装，然后回到本窗口点击「重新检测」。"
-                            .to_string(),
-                    );
+                    return Err(i18n::t("setup_install_timeout").to_string());
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
-            Err(e) => return Err(format!("等待安装程序退出失败: {}", e)),
+            Err(e) => return Err(i18n::fmt("setup_wait_exit_fail", &[&e.to_string()])),
         }
     }
     let _ = std::fs::remove_file(&dest); // 清理下载的安装包
 
     detect::invalidate_cache();
-    setup_progress(app, "verify", "安装程序已退出，正在重新检测 Node.js…");
+    setup_progress(app, "verify", i18n::t("setup_verifying"));
     match code {
         0 | 3010 => {
             let env = detect::full_detect();
             if env.node_found {
-                let ver = env.node_version.unwrap_or_default();
-                setup_progress(app, "verify", &format!("检测到 Node.js：{} {}", env.node_path, ver));
+                let ver = env.node_version.clone().unwrap_or_default();
+                setup_progress(
+                    app,
+                    "verify",
+                    &i18n::fmt("setup_node_detected", &[&env.node_path, &ver]),
+                );
                 Ok(format!("{} {}", env.node_path, ver))
             } else {
-                Err(format!(
-                    "安装程序已退出（退出码 {}），但未检测到 node.exe。刚装完可能需要重新打开程序使 PATH 生效；\
-                     可点击「重新检测」，或到 {} 手动安装。",
-                    code,
-                    detect::NODE_DOWNLOAD_PAGE
+                Err(i18n::fmt(
+                    "setup_node_not_detected",
+                    &[&code, &detect::NODE_DOWNLOAD_PAGE.to_string()],
                 ))
             }
         }
-        1602 => Err("安装被取消（退出码 1602）。可再次尝试一键安装，或到 https://nodejs.org 手动安装。".to_string()),
-        c => Err(format!(
-            "安装失败（msiexec 退出码 {}）。常见原因：权限不足（UAC 被拒绝）、磁盘空间不足。\
-             可重试或到 https://nodejs.org 手动下载安装。",
-            c
-        )),
+        1602 => Err(i18n::t("setup_node_cancelled").to_string()),
+        c => Err(i18n::fmt("setup_node_fail_code", &[&c])),
     }
 }
 
 fn try_download_curl(url: &str, dest: &Path, last_err: &mut String) -> bool {
     let Some(curl) = detect::where_lookup("curl.exe") else {
-        *last_err = "未找到 curl.exe".to_string();
+        *last_err = i18n::t("setup_no_curl").to_string();
         return false;
     };
     let args: Vec<String> = vec![
@@ -1564,7 +1561,7 @@ fn try_download_curl(url: &str, dest: &Path, last_err: &mut String) -> bool {
     match run_cmd_capture(&curl.to_string_lossy(), &args, "", Duration::from_secs(15 * 60)) {
         Ok((true, _)) => true,
         Ok((false, out)) => {
-            *last_err = format!("curl 执行失败: {}", out.trim());
+            *last_err = i18n::fmt("setup_curl_fail", &[&out.trim()]);
             false
         }
         Err(e) => {
@@ -1597,21 +1594,22 @@ fn try_download_powershell(url: &str, dest: &Path) -> Result<(), String> {
                 || o.contains("resolve")
                 || o.contains("denied")
             {
-                "无法连接网络或访问被拒绝"
+                i18n::t("setup_net_denied")
             } else {
-                "PowerShell 下载失败"
+                i18n::t("setup_ps_fail")
             };
-            Err(format!(
-                "{}：{}。请检查网络连接后重试，或到 {} 手动下载安装 Node.js。",
-                hint,
-                o.chars().take(300).collect::<String>(),
-                detect::NODE_DOWNLOAD_PAGE
+            Err(i18n::fmt(
+                "setup_ps_dl_fail",
+                &[
+                    &hint.to_string(),
+                    &o.chars().take(300).collect::<String>(),
+                    &detect::NODE_DOWNLOAD_PAGE.to_string(),
+                ],
             ))
         }
-        Err(e) => Err(format!(
-            "下载超时或失败（{}）。请检查网络连接，或到 {} 手动下载安装 Node.js。",
-            e,
-            detect::NODE_DOWNLOAD_PAGE
+        Err(e) => Err(i18n::fmt(
+            "setup_dl_timeout",
+            &[&e, &detect::NODE_DOWNLOAD_PAGE.to_string()],
         )),
     }
 }
@@ -1623,17 +1621,14 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
     {
         let state = app.state::<AppState>();
         if state.updating.swap(true, Ordering::SeqCst) {
-            return Err("已有安装任务正在进行".to_string());
+            return Err(i18n::t("err_task_busy").to_string());
         }
     }
 
     let cfg = config::load(&app);
     if cfg.npm_path.trim().is_empty() || !Path::new(&cfg.npm_path).is_file() {
         app.state::<AppState>().updating.store(false, Ordering::SeqCst);
-        return Err(format!(
-            "未找到 npm.cmd（{}）。请先安装 Node.js（含 npm），或在「设置」中配置 npm 路径。",
-            cfg.npm_path
-        ));
+        return Err(i18n::fmt("setup_npm_missing", &[&cfg.npm_path]));
     }
 
     let app2 = app.clone();
@@ -1644,7 +1639,7 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
         emit_log(
             &app2,
             "launcher",
-            format!("[setup] 正在执行: cmd /C \"{}\" install -g {}", npm, pkg),
+            i18n::fmt("setup_dsh_executing", &[&npm, &pkg]),
         );
 
         let outcome: Result<i32, String> = (|| {
@@ -1657,7 +1652,7 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
                 .stderr(Stdio::piped());
             let mut child = cmd
                 .spawn()
-                .map_err(|e| format!("npm 启动失败: {}（路径错误或权限不足？）", e))?;
+                .map_err(|e| i18n::fmt("setup_npm_spawn_fail", &[&e.to_string()]))?;
             let pid = child.id();
 
             // 放入 Job Object：引导期间本程序退出则一并结束，避免残留
@@ -1684,14 +1679,11 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
                         if Instant::now() >= deadline {
                             let _ = child.kill();
                             let _ = child.wait();
-                            return Err(
-                                "npm 安装超时（15 分钟），已中止。请检查网络后重试，或手动执行安装命令。"
-                                    .to_string(),
-                            );
+                            return Err(i18n::t("setup_npm_timeout").to_string());
                         }
                         std::thread::sleep(Duration::from_millis(400));
                     }
-                    Err(e) => return Err(format!("等待 npm 退出失败: {}", e)),
+                    Err(e) => return Err(i18n::fmt("setup_npm_wait_fail", &[&e.to_string()])),
                 }
             }
         })();
@@ -1707,8 +1699,8 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
                 detect::invalidate_cache();
                 let env = detect::full_detect();
                 if env.dsh_found {
-                    let msg = format!("DSH 全局安装成功：{}", env.dsh_path);
-                    logger::append_line(&logger::desktop_log_path(&app2), "[setup] DSH 全局安装成功。");
+                    let msg = i18n::fmt("setup_dsh_success_msg", &[&env.dsh_path]);
+                    logger::append_line(&logger::desktop_log_path(&app2), i18n::t("setup_dsh_ok_log"));
                     let _ = app2.emit(
                         "setup-result",
                         SetupResult { target: "dsh".to_string(), success: true, message: msg },
@@ -1719,16 +1711,13 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
                         SetupResult {
                             target: "dsh".to_string(),
                             success: false,
-                            message: "npm 报告成功但未找到 dsh.cmd。可点击「重新检测」，或重启程序后再试。".to_string(),
+                            message: i18n::t("setup_dsh_notfound").to_string(),
                         },
                     );
                 }
             }
             Ok(c) => {
-                let msg = format!(
-                    "npm install -g {} 失败（退出码 {}）。常见原因：无网络、npm 源不可达、全局目录权限不足。详见日志，也可复制命令手动执行。",
-                    pkg, c
-                );
+                let msg = i18n::fmt("setup_dsh_fail_code", &[&pkg, &c]);
                 logger::append_line(&logger::desktop_log_path(&app2), &msg);
                 let _ = app2.emit(
                     "setup-result",
@@ -1753,6 +1742,8 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
 pub fn finish_setup(app: AppHandle) -> Result<ConfigReport, String> {
     let cfg = config::load(&app);
     config::save(&app, &cfg)?;
-    log_launcher(&app, "[launcher] 初始化引导已完成，配置已写入。");
+    // 引导完成后按用户配置同步一次 DSH 界面语言（默认 zh）
+    let _ = config::sync_dsh_locale(&cfg.dsh_home_dir, &cfg.language);
+    log_launcher(&app, i18n::t("log_setup_done"));
     Ok(get_config(app))
 }

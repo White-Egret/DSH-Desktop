@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
-use crate::detect;
+use crate::{detect, i18n};
 
 /// Launcher 的持久化配置，保存于 %APPDATA%\com.dsh.desktop\config.json
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -27,6 +27,10 @@ pub struct Config {
     pub health_timeout_secs: u64,
     /// 点击主窗口 X 时的行为："tray" = 隐藏到托盘（默认），"quit" = 退出程序
     pub close_action: String,
+    /// 界面语言："zh" = 中文（默认），"en" = English。
+    /// 保存时同步写入 DSH 家目录 settings.yaml 的 locale.preference，
+    /// 让 DSH 自身的 Web 界面跟随中英文切换。
+    pub language: String,
 }
 
 impl Default for Config {
@@ -44,6 +48,8 @@ impl Default for Config {
             health_timeout_secs: 300,
             // 默认点 X 隐藏到托盘（后台继续运行）；可在设置页改为退出程序
             close_action: "tray".to_string(),
+            // 默认中文界面
+            language: "zh".to_string(),
         }
     }
 }
@@ -67,6 +73,79 @@ pub fn workspace_cwd(cfg: &Config) -> String {
         .unwrap_or_else(|| {
             std::env::var("USERPROFILE").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string())
         })
+}
+
+/// 把界面语言写入 `<DSH 家目录>\settings.yaml` 的 locale.preference（最小侵入式行编辑）。
+/// - 已有 `locale:` 块与 `preference:` 行 → 仅替换该行；
+/// - 有 `locale:` 块但没有 preference → 在块首插入；
+/// - 完全没有 → 文件末尾追加 `locale:\n  preference: <zh|en>` 块；
+/// - 文件不存在 → 创建仅含该块的新文件。
+/// 其余行原样保留，不引入 YAML 解析依赖。
+pub fn sync_dsh_locale(home_dir: &str, language: &str) -> Result<(), String> {
+    let pref = if language.eq_ignore_ascii_case("en") { "en" } else { "zh" };
+    let dir = PathBuf::from(home_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
+    let path = dir.join("settings.yaml");
+    let content = if path.is_file() {
+        std::fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?
+    } else {
+        String::new()
+    };
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 4);
+    let mut found_locale = false;
+    let mut i = 0usize;
+    while i < lines.len() {
+        let line = lines[i];
+        // 顶层 locale: 键（行首无缩进、去掉尾部空白后恰为 "locale:"）
+        if line.trim_end() == "locale:" && !line.starts_with(' ') && !line.starts_with('\t') {
+            found_locale = true;
+            out.push(line.to_string());
+            i += 1;
+            // 收集该键的缩进子块（含空行/注释），并在其中替换/插入 preference
+            let mut block: Vec<String> = Vec::new();
+            let mut replaced = false;
+            while i < lines.len() {
+                let bl = lines[i];
+                if bl.trim().is_empty() {
+                    block.push(bl.to_string());
+                    i += 1;
+                    continue;
+                }
+                if !bl.starts_with(' ') && !bl.starts_with('\t') {
+                    break; // 到达下一个顶层键
+                }
+                if bl.trim_start().starts_with("preference:") {
+                    block.push(format!("  preference: {}", pref));
+                    replaced = true;
+                } else {
+                    block.push(bl.to_string());
+                }
+                i += 1;
+            }
+            if !replaced {
+                block.insert(0, format!("  preference: {}", pref));
+            }
+            out.extend(block);
+            continue;
+        }
+        out.push(line.to_string());
+        i += 1;
+    }
+    if !found_locale {
+        if !out.is_empty() && !out.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
+            out.push(String::new());
+        }
+        out.push("locale:".to_string());
+        out.push(format!("  preference: {}", pref));
+    }
+    let mut text = out.join("\n");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    std::fs::write(&path, text).map_err(|e| format!("{}: {}", path.display(), e))?;
+    Ok(())
 }
 
 /// 用自动检测结果补全缺失/失效的路径。
@@ -129,11 +208,13 @@ pub fn load(app: &AppHandle) -> Config {
 
 pub fn save(app: &AppHandle, cfg: &Config) -> Result<(), String> {
     let dir = config_dir(app);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("无法创建配置目录 {}: {}", dir.display(), e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        i18n::fmt("err_cfg_dir", &[&dir.display().to_string(), &e.to_string()])
+    })?;
     let path = config_path(app);
     let s = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    std::fs::write(&path, s)
-        .map_err(|e| format!("无法写入配置文件 {}: {}", path.display(), e))?;
+    std::fs::write(&path, s).map_err(|e| {
+        i18n::fmt("err_cfg_write", &[&path.display().to_string(), &e.to_string()])
+    })?;
     Ok(())
 }

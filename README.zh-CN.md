@@ -26,6 +26,7 @@ Windows 10/11 轻量桌面端（Tauri v2 + Rust + 原生 HTML/CSS/JS），用于
 - 关闭行为可配：点 X 隐藏到托盘（默认）或退出程序；托盘恢复执行 show + unminimize + set_focus
 - 开机自启（官方插件，仅写 HKCU 注册表，无需管理员）；自启时静默托盘化并延迟 12 秒错开冷启动高峰
 - 首次运行向导：检测 Node/npm/DSH 并引导安装（nodejs.org 官方 LTS 安装包在线下载，或代为执行 `npm install -g @deepseek-ai/dsh`），全程可跳过
+- **中英双语界面**：设置页可切换「语言 / Language」；工具栏、状态区、弹窗、托盘菜单与启动器日志全部跟随切换，并通过 DSH 的 `settings.yaml` 联动 DSH 自身界面语言
 - 单实例锁：重复双击只聚焦已有窗口
 
 ## 环境要求（Requirements）
@@ -119,6 +120,22 @@ DSH 启动命令示例:     dsh web --port 3080
 | 包名 | `@deepseek-ai/dsh` | 版本检测 / 更新使用 |
 | 更新参数 | `install -g @deepseek-ai/dsh@latest` | 拼在 `cmd /C npm.cmd` 之后 |
 | 开机自动启动 | 关 | 即时生效，写 HKCU\...\Run，无需管理员 |
+| 界面语言 | `zh`（中文） | `zh` / `en` 可选；见下方「界面语言」 |
+
+## 界面语言（Language）
+
+启动器界面支持简体中文 / English 双语：
+
+- 在 **⚙ 设置 → 语言 / Language** 选择后保存：工具栏、状态区、弹窗、托盘菜单与所有启动器日志即时切换（无需重启 Desktop；重启后同样按配置生效）。选回「中文」即全部恢复中文。
+- **DSH 自身界面**：保存时程序会把对应值写入 `<DSH 家目录>\settings.yaml`：
+
+  ```yaml
+  locale:
+    preference: zh   # 或 en
+  ```
+
+  写入采用最小改动方式，只增改 `locale.preference`，不会破坏该文件中的其他配置。DSH 启动时读取此文件，因此**需重启 DSH**（工具栏「⟳ 重启」）其界面语言才会变化；DSH 正在运行时切换语言，日志中会给出提示。
+- DSH 的原始 stdout/stderr 与 npm 输出属于第三方程序内容，日志中原样呈现、不做翻译。
 
 ## 默认端口（Default port）
 

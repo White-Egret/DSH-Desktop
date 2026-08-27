@@ -1,11 +1,12 @@
 mod config;
 mod detect;
+mod i18n;
 mod logger;
 mod process;
 
 use std::time::Duration;
 use tauri::{
-    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder},
+    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, RunEvent, WindowEvent,
 };
@@ -60,6 +61,9 @@ pub fn run(launched_by_autostart: bool) {
             process::finish_setup,
         ])
         .setup(move |app| {
+            // ---- 0. 按用户配置初始化界面语言（后续所有 launcher 日志/托盘菜单文案跟随） ----
+            i18n::set_lang(&config::load(app.handle()).language);
+
             // ---- 1. 主窗口只在手动启动（非开机自启）时立即显示并聚焦。
             //        关闭拦截统一放在下方 Builder::on_window_event 中处理（hide 而非销毁）。 ----
             if let Some(main) = app.get_webview_window("main") {
@@ -69,11 +73,11 @@ pub fn run(launched_by_autostart: bool) {
                 }
             }
 
-            // ---- 2. 构建托盘菜单 ----
-            let show_item = MenuItemBuilder::new("显示主窗口")
+            // ---- 2. 构建托盘菜单（文案随界面语言） ----
+            let show_item = MenuItemBuilder::new(i18n::t("tray_show"))
                 .id("show_window")
                 .build(app)?;
-            let autostart_item = CheckMenuItemBuilder::new("开机自动启动")
+            let autostart_item = CheckMenuItemBuilder::new(i18n::t("tray_autostart"))
                 .id("toggle_autostart")
                 .build(app)?;
             // 同步系统实际注册状态到菜单勾选
@@ -82,7 +86,7 @@ pub fn run(launched_by_autostart: bool) {
                 let enabled = app.autolaunch().is_enabled().unwrap_or(false);
                 let _ = autostart_item.set_checked(enabled);
             }
-            let quit_item = MenuItemBuilder::new("退出")
+            let quit_item = MenuItemBuilder::new(i18n::t("tray_quit"))
                 .id("quit_app")
                 .build(app)?;
             let tray_menu = MenuBuilder::new(app)
@@ -94,7 +98,9 @@ pub fn run(launched_by_autostart: bool) {
 
             // 将菜单项放入 managed state，托盘菜单回调和前端 invoke 都能同步勾选
             app.manage(TrayMenuItems {
+                show_item: show_item.clone(),
                 autostart_item: autostart_item.clone(),
+                quit_item: quit_item.clone(),
             });
 
             // ---- 3. 创建托盘图标（使用打包进二进制的默认窗口图标，已是替换后的鲸鱼图标） ----
@@ -120,7 +126,7 @@ pub fn run(launched_by_autostart: bool) {
                             };
                             match result {
                                 Err(e) => {
-                                    let line = format!("[launcher] 切换开机自启失败：{}", e);
+                                    let line = i18n::fmt("log_tray_autostart_fail", &[&e.to_string()]);
                                     process::log_launcher(app_handle, &line);
                                 }
                                 Ok(()) => {
@@ -129,9 +135,9 @@ pub fn run(launched_by_autostart: bool) {
                                     if let Some(items) = app_handle.try_state::<TrayMenuItems>() {
                                         let _ = items.autostart_item.set_checked(new_state);
                                     }
-                                    let line = format!(
-                                        "[launcher] 开机自启已{}。",
-                                        if new_state { "开启" } else { "关闭" }
+                                    let line = i18n::fmt(
+                                        "log_tray_autostart_state",
+                                        &[&i18n::t(if new_state { "word_on" } else { "word_off" })],
                                     );
                                     process::log_launcher(app_handle, &line);
                                     // 通知前端同步设置开关
@@ -211,9 +217,23 @@ pub fn run(launched_by_autostart: bool) {
         });
 }
 
-/// 托盘菜单中需要跨回调访问的菜单项（用于同步勾选状态）
+/// 托盘菜单中需要跨回调访问的菜单项（用于同步勾选状态与语言切换后的文案刷新）
 struct TrayMenuItems {
+    show_item: MenuItem<tauri::Wry>,
     autostart_item: CheckMenuItem<tauri::Wry>,
+    quit_item: MenuItem<tauri::Wry>,
+}
+
+/// 语言变更后刷新托盘菜单文字（save_config 时调用；菜单操作需主线程执行）
+pub fn refresh_tray_texts(app: &tauri::AppHandle) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        if let Some(items) = app.try_state::<TrayMenuItems>() {
+            let _ = items.show_item.set_text(i18n::t("tray_show"));
+            let _ = items.autostart_item.set_text(i18n::t("tray_autostart"));
+            let _ = items.quit_item.set_text(i18n::t("tray_quit"));
+        }
+    });
 }
 
 fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {

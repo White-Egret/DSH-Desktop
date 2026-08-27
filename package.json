@@ -1,6 +1,6 @@
 {
   "name": "dsh-launcher",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "private": true,
   "description": "DSH Desktop - 启动并管理本机全局安装的 DSH Web 服务",
   "scripts": {

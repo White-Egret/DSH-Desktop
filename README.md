@@ -29,6 +29,7 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 - Close-to-tray or quit-on-close behavior (configurable); tray menu with Show Main Window / Start with Windows / Exit; tray restore does show + unminimize + set_focus
 - Start with Windows (official autostart plugin, HKCU registry only, no admin rights); autostart runs silently in tray and delays DSH launch by 12 s to avoid the boot-time IO spike
 - First-run setup wizard: detects Node.js/npm/DSH and can guide installation (official nodejs.org LTS installer download or `npm install -g @deepseek-ai/dsh`) — fully skippable
+- **Bilingual UI (Chinese / English)**: choose a language in Settings; the whole launcher (toolbar, status, dialogs, logs, tray menu) switches, and DSH's own web UI follows via its `settings.yaml`
 - Single-instance lock: launching a second copy just focuses the existing window
 
 ## Requirements
@@ -124,6 +125,23 @@ Open **⚙ 设置 (Settings)** from the toolbar. All fields support auto-detecti
 | Package name | `@deepseek-ai/dsh` | used by version check / update |
 | Update args | `install -g @deepseek-ai/dsh@latest` | appended after `cmd /C npm.cmd` |
 | Start with Windows | off | immediate effect, `HKCU\...\Run`, also toggleable from the tray menu |
+| Interface language | `zh` (中文) | `zh` / `en`; switches the whole launcher and syncs DSH's `settings.yaml` — see [Language](#language) |
+
+## Language
+
+The launcher UI is bilingual (Simplified Chinese / English).
+
+- Pick **语言 / Language → English** in **⚙ Settings** and save. The toolbar, status area, dialogs, tray menu and every launcher-generated log line switch to English; choosing **中文** switches everything back. A restart is not required (and after restarting Desktop everything stays in your chosen language, read from `config.json`).
+- **DSH's own web interface**: on save, the app also writes the matching value into `<DSH home dir>\settings.yaml`:
+
+  ```yaml
+  locale:
+    preference: en   # or: zh
+  ```
+
+  This is done as a minimal, targeted line edit — any other keys you keep in `settings.yaml` are preserved. DSH reads this file when it starts, so **restart DSH** (toolbar ⟳ Restart, or Stop + Start) for its interface language to change. If DSH is running when you change the language, the app logs a hint telling you a DSH restart is needed.
+- The first-run setup wizard follows the same rule: it renders in Chinese by default; switch to English any time in Settings.
+- DSH's raw `stdout`/`stderr` and npm's output are third-party program output — they appear verbatim in the log (never rewritten).
 
 ## Default port
 

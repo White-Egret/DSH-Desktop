@@ -229,10 +229,10 @@ pub(crate) fn decode_console_output(bytes: &[u8]) -> String {
     cow.into_owned()
 }
 
-/// 统一日志出口：发到前端「日志」面板，并镜像写入 %APPDATA%\com.dsh.desktop\desktop.log
+/// 统一日志出口：先镜像写入 %APPDATA%\com.dsh.desktop\desktop.log，再发到前端「日志」面板
 pub fn emit_log(app: &AppHandle, stream: &str, line: String) {
-    let _ = app.emit("dsh-log", LogEvent { stream: stream.to_string(), line });
     logger::append_line(&logger::desktop_log_path(app), &line);
+    let _ = app.emit("dsh-log", LogEvent { stream: stream.to_string(), line });
 }
 
 /// 供 lib.rs（托盘回调）等其他模块写 launcher 日志，同样落盘
@@ -337,13 +337,13 @@ fn run_taskkill(pid: u32) -> Result<String, String> {
 }
 
 #[cfg(windows)]
-fn apply_no_window(cmd: &mut Command) {
+pub(crate) fn apply_no_window(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]
-fn apply_no_window(_cmd: &mut Command) {}
+pub(crate) fn apply_no_window(_cmd: &mut Command) {}
 
 /// 子进程输出逐行读取并转发到前端日志面板（绝不吞掉 stdout/stderr）。
 /// 同时落盘：所有行 → desktop.log；DSH 进程的 stdout/stderr 额外 → <DSH家目录>\logs\dsh.log

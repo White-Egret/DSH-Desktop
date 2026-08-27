@@ -46,6 +46,8 @@ pub fn detect_all(force: bool) -> Arc<EnvPaths> {
 pub fn invalidate_cache() {
     *cache_slot().lock().unwrap() = Arc::new(EnvPaths::default());
     SCANNED.store(false, Ordering::SeqCst);
+    // 安装器同样会改写注册表里的 PATH，注册表快照必须一起丢弃，否则又会拿到旧的。
+    invalidate_reg_path_cache();
 }
 
 fn scan() -> EnvPaths {
@@ -203,16 +205,252 @@ pub fn quick_version(exe: &Path, timeout_secs: u64) -> Option<String> {
 
 // ---------- 官方 Node.js LTS 安装引导常量（不内置，仅引导在线下载官方安装包） ----------
 
-/// 引导安装时使用的 Node.js LTS 版本（来自 nodejs.org 官方 dist）
-pub const NODE_LTS_VERSION: &str = "20.18.1";
+/// 引导安装跟随的 Node.js **LTS 线**（主版本号）。补丁版本在下载前从官方 dist
+/// 的 SHASUMS256.txt 动态解析（见 process.rs::resolve_latest_lts_version），
+/// 因此不必每次 Node 发新版就改代码。
+/// 选 24：当前 active LTS（支持窗口到 2028-04；22 线 2027-04 就结束）。
+/// 可行性依据：DSH 未声明 engines 限制，且其原生依赖 koffi 走 N-API
+/// （自带 node-api-headers，跨 Node 大版本 ABI 稳定），无需为版本重编译。
+pub const NODE_LTS_LINE: &str = "24";
+/// 解析失败（离线、镜像缺该文件、网络被墙）时回退使用的固定版本。
+pub const NODE_LTS_VERSION: &str = "24.20.0";
 /// 官方下载页（备选手动安装入口）
 pub const NODE_DOWNLOAD_PAGE: &str = "https://nodejs.org/en/download";
 
+/// 该 LTS 线的滚动目录校验清单（约 2 KB，用来查最新补丁版本号）
+pub fn node_shasums_url() -> String {
+    format!("https://nodejs.org/dist/latest-v{}/SHASUMS256.txt", NODE_LTS_LINE)
+}
+
+/// 本次运行内实际解析到的 Node 版本；未解析成功时用固定回退版本。
+static RESOLVED_NODE_VERSION: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn resolved_slot() -> &'static Mutex<Option<String>> {
+    RESOLVED_NODE_VERSION.get_or_init(|| Mutex::new(None))
+}
+
+/// 记下解析到的最新 LTS 版本，让下载地址与向导展示保持一致。
+pub fn record_node_version(v: &str) {
+    *resolved_slot().lock().unwrap() = Some(v.to_string());
+}
+
+/// 当前应使用的 Node 版本号（已解析 → 最新补丁版；否则 → 回退版本）。
+pub fn current_node_version() -> String {
+    resolved_slot()
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| NODE_LTS_VERSION.to_string())
+}
+
 pub fn node_msi_url() -> String {
-    format!(
-        "https://nodejs.org/dist/v{}/node-v{}-x64.msi",
-        NODE_LTS_VERSION, NODE_LTS_VERSION
-    )
+    let v = current_node_version();
+    format!("https://nodejs.org/dist/v{0}/node-v{0}-x64.msi", v)
+}
+
+// ---------- PATH 环境：注册表刷新与子进程 PATH 组装 ----------
+//
+// 为什么需要这一段：引导安装 Node.js 发生在「本程序已经在运行」的时候。
+// 官方 MSI 会把 C:\Program Files\nodejs 写进注册表的系统 PATH，但本进程持有的
+// PATH 仍是启动时的旧快照 —— 所有由本程序派生的子进程都继承这个旧快照。
+// 后果：npm.cmd 自身能用（它优先调用同目录的 node.exe），但它为原生依赖
+// 派生的生命周期脚本是 `cmd /d /s /c node ./cnoke.cjs …`，这个**裸 node**
+// 要查 PATH，于是报「'node' 不是内部或外部命令」（GBK 输出），
+// npm 以 `npm error code 1` 失败。修复 = 派子进程时显式给出补好的 PATH。
+
+/// 系统 PATH 所在注册表键（MSI 安装写这里）
+const MACHINE_PATH_KEY: &str = r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+/// 当前用户 PATH 所在注册表键
+const USER_PATH_KEY: &str = r"HKCU\Environment";
+
+/// 注册表 PATH（Machine + User）的进程内缓存，避免每次派子进程都 reg query。
+static REG_PATH: OnceLock<Mutex<Option<Vec<PathBuf>>>> = OnceLock::new();
+
+fn reg_path_slot() -> &'static Mutex<Option<Vec<PathBuf>>> {
+    REG_PATH.get_or_init(|| Mutex::new(None))
+}
+
+/// 丢弃注册表 PATH 缓存（安装完成后调用，强制重新读取）。
+pub fn invalidate_reg_path_cache() {
+    *reg_path_slot().lock().unwrap() = None;
+}
+
+/// 目录去重键：去尾部分隔符 + 小写（Windows 路径大小写不敏感）。
+fn dir_key(d: &Path) -> String {
+    d.to_string_lossy()
+        .trim()
+        .trim_end_matches(|c: char| c == '\\' || c == '/')
+        .to_lowercase()
+}
+
+fn split_path_list(s: &str) -> Vec<PathBuf> {
+    s.split(';')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn current_path_dirs() -> Vec<PathBuf> {
+    match std::env::var_os("PATH") {
+        Some(v) => split_path_list(&v.to_string_lossy()),
+        None => Vec::new(),
+    }
+}
+
+fn dedupe_dirs(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for d in dirs {
+        let k = dir_key(&d);
+        if k.is_empty() || seen.iter().any(|s| *s == k) {
+            continue;
+        }
+        seen.push(k);
+        out.push(d);
+    }
+    out
+}
+
+/// 从 `reg query` 的输出里取出指定值名对应的数据。
+/// 输出形如：`    Path    REG_EXPAND_SZ    C:\Windows\system32;...`
+fn parse_reg_value(text: &str, name: &str) -> Option<String> {
+    for line in text.lines() {
+        let t = line.trim_start();
+        let head = match t.as_bytes().get(..name.len()) {
+            Some(h) => h,
+            None => continue,
+        };
+        if !head.eq_ignore_ascii_case(name.as_bytes()) {
+            continue;
+        }
+        let rest = &t[name.len()..];
+        if !rest.starts_with(char::is_whitespace) {
+            continue;
+        }
+        // 去掉类型列（REG_SZ / REG_EXPAND_SZ），剩下的才是值
+        let Some((_, value)) = rest.trim_start().split_once(char::is_whitespace) else {
+            continue;
+        };
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// 展开 `%SystemRoot%` 之类的引用；未知变量原样保留（不猜测）。
+fn expand_percent(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find('%') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        match after.find('%') {
+            Some(j) if j > 0 => {
+                let name = &after[..j];
+                match std::env::var(name) {
+                    Ok(v) => out.push_str(&v),
+                    Err(_) => out.push_str(&rest[i..i + j + 2]),
+                }
+                rest = &after[j + 1..];
+            }
+            _ => {
+                out.push('%');
+                rest = &rest[i + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 读某个注册表键下的 `Path` 值（失败返回空）。
+fn registry_path_raw(key: &str) -> Option<String> {
+    let mut cmd = Command::new("reg");
+    cmd.arg("query").arg(key).arg("/v").arg("Path");
+    apply_no_window(&mut cmd);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_reg_value(&decode_console_output(&out.stdout), "Path")
+}
+
+/// 注册表里的 PATH 目录（Machine 在前、User 在后），带缓存。
+fn registry_path_dirs() -> Vec<PathBuf> {
+    let slot = reg_path_slot();
+    let mut guard = slot.lock().unwrap();
+    if let Some(cached) = guard.as_ref() {
+        return cached.clone();
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for key in [MACHINE_PATH_KEY, USER_PATH_KEY] {
+        if let Some(raw) = registry_path_raw(key) {
+            dirs.extend(split_path_list(&expand_percent(&raw)));
+        }
+    }
+    let dirs = dedupe_dirs(dirs);
+    *guard = Some(dirs.clone());
+    dirs
+}
+
+/// 用注册表里最新的 PATH 重建**本进程**的 PATH，返回本次新增的目录数。
+/// 引导装完 Node.js 后调用：之后所有派生的子进程（含 detect 的 `where` 查询）
+/// 都能看到新装的 node，不需要重启本程序。
+pub fn refresh_process_path() -> usize {
+    invalidate_reg_path_cache();
+    let cur = current_path_dirs();
+    let mut seen: Vec<String> = cur.iter().map(|d| dir_key(d)).collect();
+    let mut merged = cur.clone();
+    let mut added = 0usize;
+    for d in registry_path_dirs() {
+        let k = dir_key(&d);
+        if seen.iter().any(|s| *s == k) {
+            continue;
+        }
+        seen.push(k);
+        merged.push(d);
+        added += 1;
+    }
+    if added > 0 {
+        if let Ok(joined) = std::env::join_paths(&merged) {
+            std::env::set_var("PATH", joined);
+        }
+    }
+    added
+}
+
+/// 为 npm / dsh 等子进程组装 PATH：把 node、npm、npm 全局 bin、dsh 所在目录放到最前面，
+/// 再接本进程 PATH 与注册表 PATH（去重）。即使本进程 PATH 还是旧快照，
+/// 子进程里的 `node`、npm 生命周期脚本也一定能被解析到。
+pub fn child_path_for(exes: &[&str]) -> std::ffi::OsString {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for e in exes {
+        if let Some(d) = Path::new(e).parent() {
+            if !d.as_os_str().is_empty() {
+                dirs.push(d.to_path_buf());
+            }
+        }
+    }
+    dirs.extend(npm_global_bin_dirs());
+    let cached = detect_all(false);
+    for p in [&cached.node, &cached.npm, &cached.dsh] {
+        if let Some(p) = p {
+            if let Some(d) = p.parent() {
+                dirs.push(d.to_path_buf());
+            }
+        }
+    }
+    dirs.extend(current_path_dirs());
+    dirs.extend(registry_path_dirs());
+    let dirs = dedupe_dirs(dirs);
+    std::env::join_paths(&dirs)
+        .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
 }
 
 // ---------- Tauri 命令层使用的数据结构 ----------

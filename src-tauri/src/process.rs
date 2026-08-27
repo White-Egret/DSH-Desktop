@@ -358,45 +358,57 @@ fn spawn_log_reader(
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
         let desktop_log = logger::desktop_log_path(&app);
-        let reader = BufReader::new(out);
-        for line in reader.lines() {
-            match line {
-                Ok(l) => {
-                    if l.trim().is_empty() {
-                        continue;
-                    }
-                    if track_stderr && stream == "stderr" {
-                        state.set_last_stderr(&l);
-                    }
-                    // 从 DSH 输出中解析实际监听地址（如 "dsh web: http://127.0.0.1:3080"），
-                    // 就绪后优先按实际地址加载页面（要求一.8）
-                    if matches!(stream, "stdout" | "stderr") {
-                        if let Some((url, port)) = extract_local_url(&l) {
-                            // 先更新并释放锁，再发日志（避免持锁期间的跨线程操作）
-                            let changed = {
-                                let mut guard = state.detected_url.lock().unwrap();
-                                let changed = guard.as_ref().map(|(_, p)| *p) != Some(port);
-                                *guard = Some((url.clone(), port));
-                                changed
-                            };
-                            if changed {
-                                emit_log(
-                                    &app,
-                                    "launcher",
-                                    i18n::fmt("log_detected_url", &[&url]),
-                                );
-                            }
-                        }
-                    }
-                    // 落盘（失败忽略，不影响主流程）
-                    if let Some(f) = &dsh_file {
-                        logger::append_line(f, &l);
-                    }
-                    logger::append_line(&desktop_log, &l);
-                    let _ = app.emit(event, LogEvent { stream: stream.to_string(), line: l });
-                }
+        let mut reader = BufReader::new(out);
+        // 必须按字节切行再解码：中文 Windows 上 cmd.exe / npm 会把子命令的错误
+        // 信息（如「'node' 不是内部或外部命令」）以 GBK 写进 stderr。
+        // BufRead::lines() 要求整行是合法 UTF-8，遇到 GBK 字节返回 Err —— 原来的
+        // `Err(_) => break` 会让整条日志流在最关键的那一行**直接中断**，
+        // 用户只看到半截 npm error、看不到真正原因。这里统一走 decode_console_output。
+        loop {
+            let mut raw: Vec<u8> = Vec::new();
+            match reader.read_until(b'\n', &mut raw) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
             }
+            while matches!(raw.last(), Some(b'\n') | Some(b'\r')) {
+                raw.pop();
+            }
+            if raw.iter().all(|b| b.is_ascii_whitespace()) {
+                continue;
+            }
+            let l = decode_console_output(&raw);
+
+            if track_stderr && stream == "stderr" {
+                state.set_last_stderr(&l);
+            }
+            // 从 DSH 输出中解析实际监听地址（如 "dsh web: http://127.0.0.1:3080"），
+            // 就绪后优先按实际地址加载页面（要求一.8）
+            if matches!(stream, "stdout" | "stderr") {
+                if let Some((url, port)) = extract_local_url(&l) {
+                    // 先更新并释放锁，再发日志（避免持锁期间的跨线程操作）
+                    let changed = {
+                        let mut guard = state.detected_url.lock().unwrap();
+                        let changed = guard.as_ref().map(|(_, p)| *p) != Some(port);
+                        *guard = Some((url.clone(), port));
+                        changed
+                    };
+                    if changed {
+                        emit_log(
+                            &app,
+                            "launcher",
+                            i18n::fmt("log_detected_url", &[&url]),
+                        );
+                    }
+                }
+            }
+            // 落盘（失败忽略，不影响主流程）
+            if let Some(f) = &dsh_file {
+                logger::append_line(f, &l);
+            }
+            logger::append_line(&desktop_log, &l);
+            let _ = app.emit(event, LogEvent { stream: stream.to_string(), line: l });
         }
     });
 }
@@ -426,6 +438,9 @@ fn run_cmd_capture(
         cmd.current_dir(cwd);
     }
     apply_no_window(&mut cmd);
+    // 显式补全 PATH：本进程 PATH 可能是装 Node 之前的旧快照，
+    // 否则 dsh.cmd / npm.cmd 派生的脚本里的裸 `node` 会找不到。
+    cmd.env("PATH", detect::child_path_for(&[program]));
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -671,6 +686,11 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
     // 工作目录：DSH 家目录的上一级；DSH_HOME 指向家目录（DSH 在此读取配置）
     cmd.current_dir(&cwd);
     cmd.env("DSH_HOME", &cfg.dsh_home_dir);
+    // dsh.cmd 是 npm 生成的 shim，回退分支同样依赖 PATH 里的 node
+    cmd.env(
+        "PATH",
+        detect::child_path_for(&[cfg.dsh_path.as_str(), cfg.npm_path.as_str()]),
+    );
     apply_no_window(&mut cmd);
     // stdin 不需要输入；stdout/stderr 必须 piped 转发到日志，绝不吞掉
     cmd.stdin(Stdio::null())
@@ -1181,6 +1201,8 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
                 cmd.arg(a);
             }
             cmd.current_dir(&cwd);
+            // npm.cmd 自身能找到 node，但它派生的安装脚本调的是裸 `node`：必须给出补好的 PATH
+            cmd.env("PATH", detect::child_path_for(&[cfg.npm_path.as_str()]));
             apply_no_window(&mut cmd);
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -1442,7 +1464,76 @@ pub async fn setup_install_node(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 从官方 dist 的 SHASUMS256.txt 解析该 LTS 线最新补丁版本号（如 "22.23.2"）。
+/// 任何一步失败（无网络、镜像缺文件、格式意外）都返回 None，由调用方回退固定版本。
+fn resolve_latest_lts_version(last_err: &mut String) -> Option<String> {
+    let url = detect::node_shasums_url();
+    let dest = std::env::temp_dir().join("dsh-node-shasums256.txt");
+    let _ = std::fs::remove_file(&dest);
+
+    let mut curl_err = String::new();
+    let downloaded = try_download_curl(&url, &dest, &mut curl_err)
+        || try_download_powershell(&url, &dest).is_ok();
+    if !downloaded {
+        *last_err = if curl_err.trim().is_empty() {
+            i18n::t("setup_no_dl_tool").to_string()
+        } else {
+            curl_err
+        };
+        return None;
+    }
+    let text = std::fs::read_to_string(&dest).unwrap_or_default();
+    let _ = std::fs::remove_file(&dest);
+
+    // 清单每行形如：`<sha256>  node-v24.20.0-x64.msi`
+    // 注意：必须是「node-v<完整版本>-x64.msi」，先剥掉前后缀再校验主版本线，
+    // 否则会把 "node-v24." 当前缀吃掉主版本号，解析出 "20.0" 这种残缺值。
+    let line_prefix = format!("{}.", detect::NODE_LTS_LINE);
+    for token in text.split_whitespace() {
+        let name = token.rsplit(['/', '\\']).next().unwrap_or(token);
+        let Some(rest) = name.strip_prefix("node-v") else {
+            continue;
+        };
+        let Some(v) = rest.strip_suffix("-x64.msi") else {
+            continue;
+        };
+        if !v.starts_with(line_prefix.as_str()) {
+            continue; // 其它 LTS 线的条目，跳过
+        }
+        if !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            return Some(v.to_string());
+        }
+    }
+    *last_err = i18n::t("setup_node_no_msi_entry").to_string();
+    None
+}
+
 fn install_node_blocking(app: &AppHandle) -> Result<String, String> {
+    // 先解析该 LTS 线的最新补丁版本；失败就用固定回退版本（绝不因为探测失败而卡住安装）
+    let mut probe_err = String::new();
+    let node_version = match resolve_latest_lts_version(&mut probe_err) {
+        Some(v) => {
+            detect::record_node_version(&v);
+            setup_progress(
+                app,
+                "download",
+                &i18n::fmt("setup_lts_resolved", &[&detect::NODE_LTS_LINE, &v]),
+            );
+            v
+        }
+        None => {
+            setup_progress(
+                app,
+                "download",
+                &i18n::fmt(
+                    "setup_lts_fallback",
+                    &[&probe_err, &detect::NODE_LTS_VERSION.to_string()],
+                ),
+            );
+            detect::NODE_LTS_VERSION.to_string()
+        }
+    };
+
     let url = detect::node_msi_url();
     let file_name = url.rsplit('/').next().unwrap_or("node-lts-x64.msi").to_string();
     let dest = std::env::temp_dir().join(&file_name);
@@ -1451,7 +1542,7 @@ fn install_node_blocking(app: &AppHandle) -> Result<String, String> {
     setup_progress(
         app,
         "download",
-        &i18n::fmt("setup_dl_start", &[&detect::NODE_LTS_VERSION, &url]),
+        &i18n::fmt("setup_dl_start", &[&node_version, &url]),
     );
 
     // 方式一：curl.exe（Windows 10 1803+ 自带）；失败则回退 PowerShell Invoke-WebRequest
@@ -1522,6 +1613,13 @@ fn install_node_blocking(app: &AppHandle) -> Result<String, String> {
     setup_progress(app, "verify", i18n::t("setup_verifying"));
     match code {
         0 | 3010 => {
+            // 关键修复：MSI 只改了注册表里的 PATH，本进程 PATH 仍是启动时的旧快照。
+            // 不刷新它，随后 npm install -g 里 koffi 的生命周期脚本会报
+            // 「'node' 不是内部或外部命令」而 npm error code 1。
+            let added = detect::refresh_process_path();
+            if added > 0 {
+                setup_progress(app, "verify", &i18n::fmt("setup_path_refreshed", &[&added]));
+            }
             let env = detect::full_detect();
             if env.node_found {
                 let ver = env.node_version.clone().unwrap_or_default();
@@ -1646,6 +1744,8 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
             let mut cmd = Command::new("cmd");
             cmd.arg("/C").arg(&npm).arg("install").arg("-g").arg(&pkg);
             cmd.current_dir(&cwd);
+            // 同上：koffi 等原生依赖的 prebuild 脚本用裸 `node`，PATH 必须包含 node 目录
+            cmd.env("PATH", detect::child_path_for(&[npm.as_str()]));
             apply_no_window(&mut cmd);
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::piped())

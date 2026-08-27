@@ -123,6 +123,10 @@ pub fn t(key: &str) -> &'static str {
         // ---------- 首次运行引导：Node.js ----------
         "err_setup_busy" => if en { "A guided setup task is already running" } else { "已有引导安装任务正在进行" },
         "setup_dl_start" => if en { "Downloading the official Node.js v{0} LTS installer: {1}" } else { "开始下载官方 Node.js v{0} LTS 安装包：{1}" },
+        "setup_lts_resolved" => if en { "[launcher] Resolved the newest LTS on the v{0} line: v{1}" } else { "[launcher] 已解析 v{0} 线当前最新 LTS：v{1}" },
+        "setup_lts_fallback" => if en { "[launcher] Cannot resolve the newest LTS ({0}); using the pinned v{1} instead." } else { "[launcher] 未能解析最新 LTS（{0}），改用固定版本 v{1}。" },
+        "setup_node_no_msi_entry" => if en { "no -x64.msi entry found in the official SHASUMS256.txt" } else { "官方 SHASUMS256.txt 中未找到 -x64.msi 条目" },
+        "setup_path_refreshed" => if en { "[launcher] Node.js has updated the system PATH; this app refreshed its own PATH ({0} new dir(s)) so npm installs can find node." } else { "[launcher] Node.js 已写入系统 PATH，本进程 PATH 同步刷新（新增 {0} 个目录），后续 npm 安装可以找到 node。" },
         "setup_curl_fallback" => if en { "curl download unavailable ({0}); falling back to PowerShell..." } else { "curl 下载不可用（{0}），改用 PowerShell…" },
         "setup_no_dl_tool" => if en { "No usable download tool found" } else { "未找到可用的下载工具" },
         "setup_no_curl" => if en { "curl.exe not found" } else { "未找到 curl.exe" },

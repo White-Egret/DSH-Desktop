@@ -40,8 +40,10 @@
         <div class="row gap">
           <button id="btn-connect" class="btn primary">连接现有服务</button>
           <button id="btn-change-port" class="btn">修改端口</button>
+          <button id="btn-recheck-port" class="btn">重新检测</button>
         </div>
       </div>
+      <button id="btn-copy-error" class="btn small hidden">复制错误信息</button>
     </div>
   </main>
 
@@ -58,6 +60,9 @@
     <div class="modal-box">
       <div class="modal-title">设置</div>
       <div class="form">
+        <div class="row left">
+          <button id="btn-autodetect" class="btn small">自动检测 Node / npm / DSH 路径</button>
+        </div>
         <label class="field">
           <span>npm.cmd 路径 <em id="npm-exists-flag" class="flag"></em></span>
           <div class="row">
@@ -73,7 +78,7 @@
           </div>
         </label>
         <label class="field">
-          <span>DSH 家目录（配置文件位置，如 C:\Users\admin\.dsh）<em id="home-exists-flag" class="flag"></em></span>
+          <span>DSH 家目录（DSH 配置文件位置，默认 %USERPROFILE%\.dsh）<em id="home-exists-flag" class="flag"></em></span>
           <div class="row">
             <input id="set-home-dir" type="text" spellcheck="false" />
             <button class="btn small" data-pick="folder" data-kind="home" data-target="set-home-dir">浏览</button>
@@ -81,14 +86,21 @@
         </label>
         <div class="row two">
           <label class="field">
-            <span>端口</span>
-            <input id="set-port" type="number" min="1" max="65535" />
+            <span>端口（1~65535，默认 3080）</span>
+            <input id="set-port" type="number" min="1" max="65535" placeholder="3080" />
           </label>
           <label class="field">
             <span>就绪超时（秒，0 = 一直等待）</span>
             <input id="set-timeout" type="number" min="0" max="3600" />
           </label>
         </div>
+        <label class="field">
+          <span>点击窗口 X 时</span>
+          <select id="set-close-action">
+            <option value="tray">隐藏到托盘（后台继续运行，可从托盘恢复）</option>
+            <option value="quit">退出程序（停止本次启动的 DSH 进程）</option>
+          </select>
+        </label>
         <label class="field field-switch">
           <span>开机自动启动（系统登录后静默拉起，可在托盘恢复窗口；首启先延迟 12 秒错开冷启动高峰）</span>
           <input type="checkbox" id="set-autostart" />
@@ -107,7 +119,8 @@
         </label>
         <div class="hint">
           配置保存于：<span id="set-config-path"></span><br />
-          家目录是 DSH 摆放配置文件的地方（通过 DSH_HOME 传给 DSH）；进程工作目录自动取其上一级，DSH 的工作区在网页内随意指定。端口 / 参数修改在<b>下次启动 DSH</b> 时生效。本程序不会读取或修改你的 DSH 配置。
+          路径留空或失效时会自动检测本机的 Node / npm / DSH；也可点上方「自动检测」或手动浏览选择。<br />
+          家目录是 DSH 摆放配置文件的地方（通过 DSH_HOME 传给 DSH）；进程工作目录自动取其上一级，DSH 的工作区在网页内随意指定。端口 / 参数修改在<b>下次启动 DSH</b> 时生效。Desktop 日志写入同目录 desktop.log，DSH 输出日志写入 &lt;家目录&gt;\logs\dsh.log。
         </div>
         <div class="row gap">
           <button id="btn-detect-package" class="btn small">检测全局包名（npm list -g）</button>
@@ -127,6 +140,8 @@
         <div class="modal-title">日志</div>
         <div class="log-tools">
           <label class="autoscroll"><input type="checkbox" id="chk-autoscroll" checked /> 自动滚动</label>
+          <button id="btn-open-logdir" class="btn small">打开日志目录</button>
+          <button id="btn-copy-log" class="btn small">复制日志</button>
           <button id="btn-clear-log" class="btn small">清空</button>
           <button id="btn-close-log" class="btn small">关闭</button>
         </div>
@@ -147,6 +162,73 @@
       <div class="modal-actions">
         <button id="btn-cancel-update" class="btn">取消</button>
         <button id="btn-confirm-update" class="btn primary">开始更新</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 首次运行引导（仅当配置文件 %APPDATA%\com.dsh.desktop\config.json 尚不存在时显示）。
+       全部在应用内实现，风格与设置页/日志面板一致；可随时跳过；不内置 Node/DSH，
+       只引导在线下载官方 Node.js LTS 安装包或执行 npm install -g @deepseek-ai/dsh。 -->
+  <div id="setup-wizard" class="setup-wizard hidden">
+    <div class="setup-card">
+      <div class="modal-title">欢迎使用 DSH Desktop —— 环境检查</div>
+      <div class="setup-desc">
+        本程序<b>不内置 Node.js 和 DSH</b>，需要本机已安装：<br />
+        ① <b>Node.js</b>（含 npm，建议 LTS 版）　② <b>DSH</b>（npm 包 <code>@deepseek-ai/dsh</code>）<br />
+        已装好可直接点「完成」；缺什么可用下方按钮引导安装，也可以跳过后自行安装。
+      </div>
+
+      <table class="check-table">
+        <thead><tr><th>组件</th><th>状态</th><th>路径 / 版本</th></tr></thead>
+        <tbody>
+          <tr><td>Node.js</td><td id="wiz-node-flag">检测中…</td><td id="wiz-node-path" class="mono"></td></tr>
+          <tr><td>npm</td><td id="wiz-npm-flag">检测中…</td><td id="wiz-npm-path" class="mono"></td></tr>
+          <tr><td>DSH</td><td id="wiz-dsh-flag">检测中…</td><td id="wiz-dsh-path" class="mono"></td></tr>
+        </tbody>
+      </table>
+
+      <!-- 缺少 Node.js 时的引导步骤 -->
+      <div id="wiz-step-node" class="wiz-step hidden">
+        <div class="wiz-step-title">缺少 Node.js</div>
+        <div class="wiz-step-body">
+          将从官方地址下载并运行 Node.js LTS 安装包（不内置、不使用便携版）：<br />
+          <code id="wiz-node-url" class="block-code"></code>
+          一键安装会弹出官方安装窗口 / UAC 提示，按提示完成即可；也可以到
+          <a href="#" id="wiz-open-node-page">nodejs.org 官网</a> 手动下载安装。
+        </div>
+        <div class="row gap left">
+          <button id="wiz-btn-install-node" class="btn primary">一键下载并安装（官方 LTS）</button>
+          <button id="wiz-btn-recheck" class="btn">重新检测</button>
+          <button id="wiz-btn-skip-node" class="btn">稍后手动安装</button>
+        </div>
+      </div>
+
+      <!-- 缺少 DSH 时的引导步骤 -->
+      <div id="wiz-step-dsh" class="wiz-step hidden">
+        <div class="wiz-step-title">缺少 DSH</div>
+        <div class="wiz-step-body">
+          将执行以下命令全局安装 DSH：
+          <code id="wiz-dsh-cmd" class="block-code"></code>
+          可由程序代为执行并显示输出，也可复制命令自行在终端运行。
+        </div>
+        <div class="row gap left">
+          <button id="wiz-btn-install-dsh" class="btn primary">自动执行安装</button>
+          <button id="wiz-btn-copy-dsh-cmd" class="btn">复制命令</button>
+          <button id="wiz-btn-recheck2" class="btn">重新检测</button>
+          <button id="wiz-btn-skip-dsh" class="btn">稍后手动安装</button>
+        </div>
+      </div>
+
+      <div id="wiz-progress" class="wiz-progress hidden">
+        <div class="spinner small"></div>
+        <span id="wiz-progress-text">处理中…</span>
+      </div>
+
+      <pre id="wiz-log" class="wiz-log hidden"></pre>
+
+      <div class="setup-actions">
+        <span id="wiz-skip-note">组件缺失时也可先进入主界面，启动时会给出明确错误提示。</span>
+        <button id="wiz-btn-finish" class="btn primary hidden" disabled>检测中…</button>
       </div>
     </div>
   </div>

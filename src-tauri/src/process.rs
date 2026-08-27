@@ -1,8 +1,9 @@
 use crate::config::{self, Config};
+use crate::{detect, logger};
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Read};
 use std::net::{SocketAddr, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -78,6 +79,10 @@ pub struct AppState {
     pub updating: AtomicBool,
     /// DSH 崩溃前最后一条 stderr 输出（用于在状态区显示单行错误原因）
     last_stderr: Mutex<Option<String>>,
+    /// 从 DSH 输出中解析出的实际监听地址 (url, port)；就绪后优先按它加载页面
+    pub detected_url: Mutex<Option<(String, u16)>>,
+    /// 首次运行引导安装互斥标志（同一时间只允许一个引导任务）
+    pub setup_busy: AtomicBool,
     /// 当前进程是否由「开机自启」触发（main.rs 检测 --autostart 参数后置 true）。
     /// start_internal 消费此标志后置回 false，避免重复延迟。
     pub launched_by_autostart: AtomicBool,
@@ -99,6 +104,8 @@ impl AppState {
             status: Mutex::new("idle".to_string()),
             updating: AtomicBool::new(false),
             last_stderr: Mutex::new(None),
+            detected_url: Mutex::new(None),
+            setup_busy: AtomicBool::new(false),
             launched_by_autostart: AtomicBool::new(launched_by_autostart),
             #[cfg(windows)]
             job: Mutex::new(None),
@@ -170,6 +177,28 @@ pub struct UpdateFinished {
     pub message: String,
 }
 
+/// 首次运行引导安装：阶段性进度（download | install | verify）
+#[derive(Clone, Serialize)]
+pub struct SetupStatus {
+    pub phase: String,
+    pub message: String,
+}
+
+/// 首次运行引导安装：最终结果（target = node | dsh）
+#[derive(Clone, Serialize)]
+pub struct SetupResult {
+    pub target: String,
+    pub success: bool,
+    pub message: String,
+}
+
+/// 端口可用性检查结果
+#[derive(Serialize)]
+pub struct PortCheck {
+    pub port: u16,
+    pub in_use: bool,
+}
+
 #[derive(Serialize, Clone)]
 pub struct VersionInfo {
     pub local: Option<String>,
@@ -185,12 +214,14 @@ pub struct ConfigReport {
     pub npm_exists: bool,
     pub home_exists: bool,
     pub config_path: String,
+    /// 首次运行（%APPDATA%\com.dsh.desktop\config.json 尚不存在）：前端据此显示安装引导
+    pub first_run: bool,
 }
 
 // ---------- 工具函数 ----------
 
 /// Windows 控制台输出可能是 UTF-8（node）或 GBK（taskkill 等系统命令），做无损解码。
-fn decode_console_output(bytes: &[u8]) -> String {
+pub(crate) fn decode_console_output(bytes: &[u8]) -> String {
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.to_string();
     }
@@ -198,8 +229,15 @@ fn decode_console_output(bytes: &[u8]) -> String {
     cow.into_owned()
 }
 
-fn emit_log(app: &AppHandle, stream: &str, line: String) {
+/// 统一日志出口：发到前端「日志」面板，并镜像写入 %APPDATA%\com.dsh.desktop\desktop.log
+pub fn emit_log(app: &AppHandle, stream: &str, line: String) {
     let _ = app.emit("dsh-log", LogEvent { stream: stream.to_string(), line });
+    logger::append_line(&logger::desktop_log_path(app), &line);
+}
+
+/// 供 lib.rs（托盘回调）等其他模块写 launcher 日志，同样落盘
+pub fn log_launcher(app: &AppHandle, line: &str) {
+    emit_log(app, "launcher", line.to_string());
 }
 
 fn set_status(app: &AppHandle, status: &str, message: Option<String>) {
@@ -220,6 +258,38 @@ fn current_status(app: &AppHandle) -> String {
 fn port_in_use(port: u16) -> bool {
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
     TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
+}
+
+/// 规范化的本机服务地址
+fn local_url(port: u16) -> String {
+    format!("http://127.0.0.1:{}", port)
+}
+
+/// 从 DSH 输出行中提取本机监听地址，如：
+///   `dsh web: http://127.0.0.1:3080`、`Local: http://localhost:3000/`
+/// 返回 (规范化URL, 端口)。只接受 127.0.0.1 / localhost。
+fn extract_local_url(line: &str) -> Option<(String, u16)> {
+    const NEEDLE: &str = "http://";
+    let mut rest = line;
+    while let Some(i) = rest.find(NEEDLE) {
+        let s = &rest[i..];
+        let end = s
+            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+            .unwrap_or(s.len());
+        let url = &s[..end];
+        let host = url.trim_start_matches("http://");
+        let authority = host.split('/').next().unwrap_or("");
+        let mut it = authority.splitn(2, ':');
+        let hostname = it.next().unwrap_or("");
+        let port_str = it.next().unwrap_or("");
+        if let Ok(p) = port_str.parse::<u16>() {
+            if p > 0 && (hostname == "127.0.0.1" || hostname.eq_ignore_ascii_case("localhost")) {
+                return Some((local_url(p), p));
+            }
+        }
+        rest = &rest[i + NEEDLE.len()..];
+    }
+    None
 }
 
 /// 端口可连接后，再发一个轻量 HTTP GET 确认服务真正能响应（任意响应码都算就绪）。
@@ -275,16 +345,19 @@ fn apply_no_window(cmd: &mut Command) {
 #[cfg(not(windows))]
 fn apply_no_window(_cmd: &mut Command) {}
 
-/// 子进程输出逐行读取并转发到前端日志面板（绝不吞掉 stdout/stderr）
+/// 子进程输出逐行读取并转发到前端日志面板（绝不吞掉 stdout/stderr）。
+/// 同时落盘：所有行 → desktop.log；DSH 进程的 stdout/stderr 额外 → <DSH家目录>\logs\dsh.log
 fn spawn_log_reader(
     app: AppHandle,
     out: impl Read + Send + 'static,
     stream: &'static str,
     event: &'static str,
     track_stderr: bool,
+    dsh_file: Option<PathBuf>,
 ) {
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
+        let desktop_log = logger::desktop_log_path(&app);
         let reader = BufReader::new(out);
         for line in reader.lines() {
             match line {
@@ -295,6 +368,29 @@ fn spawn_log_reader(
                     if track_stderr && stream == "stderr" {
                         state.set_last_stderr(&l);
                     }
+                    // 从 DSH 输出中解析实际监听地址（如 "dsh web: http://127.0.0.1:3080"），
+                    // 就绪后优先按实际地址加载页面（要求一.8）
+                    if matches!(stream, "stdout" | "stderr") {
+                        if let Some((url, port)) = extract_local_url(&l) {
+                            let mut guard = state.detected_url.lock().unwrap();
+                            if guard.as_ref().map(|(_, p)| *p) != Some(port) {
+                                emit_log(
+                                    &app,
+                                    "launcher",
+                                    format!(
+                                        "[launcher] 检测到 DSH 实际监听地址: {}（将以该地址为准加载页面）",
+                                        url
+                                    ),
+                                );
+                            }
+                            *guard = Some((url, port));
+                        }
+                    }
+                    // 落盘（失败忽略，不影响主流程）
+                    if let Some(f) = &dsh_file {
+                        logger::append_line(f, &l);
+                    }
+                    logger::append_line(&desktop_log, &l);
                     let _ = app.emit(event, LogEvent { stream: stream.to_string(), line: l });
                 }
                 Err(_) => break,
@@ -324,7 +420,9 @@ fn run_cmd_capture(
     for a in args {
         cmd.arg(a);
     }
-    cmd.current_dir(cwd);
+    if !cwd.is_empty() {
+        cmd.current_dir(cwd);
+    }
     apply_no_window(&mut cmd);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -374,10 +472,9 @@ fn main_content_size(app: &AppHandle) -> (f64, f64) {
     (1024.0, 640.0)
 }
 
-/// 在主窗口内创建（或刷新）内嵌的 DSH Webview
-fn open_dsh_webview(app: &AppHandle, port: u16) {
-    let url = format!("http://127.0.0.1:{}", port);
-
+/// 在主窗口内创建（或刷新）内嵌的 DSH Webview。
+/// `url` 由调用方决定：优先用从 DSH 输出解析到的实际地址，否则用配置端口构造。
+fn open_dsh_webview(app: &AppHandle, url: &str) {
     // 已存在：直接刷新到当前 URL（端口可能已变更）
     if let Some(wv) = app.get_webview("dsh") {
         sync_dsh_webview_size(app);
@@ -392,7 +489,10 @@ fn open_dsh_webview(app: &AppHandle, port: u16) {
         return;
     };
     let (w, h) = main_content_size(app);
-    let parsed: tauri::Url = url.parse().expect("valid url");
+    let Ok(parsed) = url.parse::<tauri::Url>() else {
+        emit_log(app, "launcher", format!("[launcher] 非法的加载地址: {}", url));
+        return;
+    };
     let result = win.add_child(
         tauri::WebviewBuilder::new(
             "dsh",
@@ -455,7 +555,7 @@ pub fn refresh_dsh_page(app: AppHandle) -> Result<(), String> {
 
     // 服务在运行但页面不存在（例如之前被销毁）：按当前配置端口重新打开页面（不重启服务）
     let cfg = config::load(&app);
-    open_dsh_webview(&app, cfg.port);
+    open_dsh_webview(&app, &local_url(cfg.port));
     emit_log(&app, "launcher", "[launcher] 已重新打开 DSH 页面（DSH 服务未重启）。".to_string());
     Ok(())
 }
@@ -508,25 +608,57 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
     }
 
     let cfg = config::load(app);
-    if !Path::new(&cfg.dsh_path).is_file() {
+
+    // ---- 前置检查：依赖缺失时立即给出明确错误，绝不无限等待（要求三.3 / 四.5） ----
+
+    // 1) Node.js：DSH 是 Node 程序，缺 node 必然失败
+    {
+        let env = detect::detect_all(false);
+        if env.node.is_none() {
+            let msg = "未找到 Node.js（node.exe）。DSH 依赖 Node.js 运行：请先安装 Node.js LTS \
+                       （https://nodejs.org），或打开「设置」确认路径后重试。"
+                .to_string();
+            set_status(app, "error", Some(msg.clone()));
+            return Err(msg);
+        }
+    }
+
+    // 2) DSH 可执行文件（自动检测失败时允许用户在设置中手动选择）
+    if cfg.dsh_path.trim().is_empty() || !Path::new(&cfg.dsh_path).is_file() {
         let msg = format!(
-            "找不到 DSH 可执行文件：{}\n请在「设置」中手动选择 dsh.cmd 的路径。",
-            cfg.dsh_path
+            "未找到 DSH{}。\n请先全局安装：npm install -g {}\n或在「设置」中手动选择 dsh 路径。",
+            if cfg.dsh_path.trim().is_empty() {
+                "（自动检测失败）".to_string()
+            } else {
+                format!("：{}", cfg.dsh_path)
+            },
+            cfg.package_name
         );
         set_status(app, "error", Some(msg.clone()));
         return Err(msg);
     }
+
+    // 3) npm 缺失只影响更新 / 版本查询，不阻止启动
+    if cfg.npm_path.trim().is_empty() || !Path::new(&cfg.npm_path).is_file() {
+        emit_log(
+            app,
+            "launcher",
+            "[launcher] 提示：未找到 npm.cmd，「更新 DSH / 查询最新版本」不可用，但不影响启动。可在「设置」中配置。"
+                .to_string(),
+        );
+    }
+
     let cwd = config::workspace_cwd(&cfg);
     if !Path::new(&cwd).is_dir() {
         let msg = format!(
-            "启动进程工作目录不存在：{}（由家目录 {} 推导），请检查「设置」中的 DSH 家目录。",
+            "配置路径无效：启动进程工作目录不存在（{}，由家目录 {} 推导）。请在「设置」中检查 DSH 家目录。",
             cwd, cfg.dsh_home_dir
         );
         set_status(app, "error", Some(msg.clone()));
         return Err(msg);
     }
 
-    // 端口占用检查：绝不强杀未知进程，交给用户决策
+    // 端口占用检查：绝不强杀未知进程，交给用户决策（可改端口 / 重检 / 连接现有服务）
     if port_in_use(cfg.port) {
         let msg = format!(
             "端口 {} 已被其他进程占用（可能是已在运行的 DSH，也可能是其他程序）。本程序不会强制结束未知进程。",
@@ -535,6 +667,9 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         set_status(app, "port-busy", Some(msg.clone()));
         return Err(msg);
     }
+
+    // 本轮启动前清空上一次解析到的实际地址
+    *state.detected_url.lock().unwrap() = None;
 
     // 启动命令等价于：cmd /C "<dsh_path>" web --port <port> --no-open [extra_args]
     // --no-open：DSH 官方参数，禁止其自动打开默认浏览器（Edge）
@@ -560,14 +695,16 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
     let _ = state.take_last_stderr();
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("启动 DSH 失败: {}（路径: {}）", e, cfg.dsh_path))?;
+        .map_err(|e| format!("启动 DSH 失败: {}（路径: {}）。请检查路径是否有效、程序是否有执行权限。", e, cfg.dsh_path))?;
     let pid = child.id();
 
+    // DSH 输出同时镜像写入 <DSH 家目录>\logs\dsh.log（要求四.2）
+    let dsh_log_file = logger::dsh_log_path(&cfg.dsh_home_dir);
     if let Some(so) = child.stdout.take() {
-        spawn_log_reader(app.clone(), so, "stdout", "dsh-log", false);
+        spawn_log_reader(app.clone(), so, "stdout", "dsh-log", false, Some(dsh_log_file.clone()));
     }
     if let Some(se) = child.stderr.take() {
-        spawn_log_reader(app.clone(), se, "stderr", "dsh-log", true);
+        spawn_log_reader(app.clone(), se, "stderr", "dsh-log", true, Some(dsh_log_file));
     }
 
     // Job Object 兜底：即使本程序异常退出，Windows 内核也会结束 DSH 进程树
@@ -586,7 +723,7 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         app,
         "launcher",
         format!(
-            "[launcher] 启动命令: cmd /C \"{}\" web --port {} --no-open{}（进程工作目录: {}，DSH_HOME: {}，PID: {}；DSH 工作区由你在网页内指定，与此目录无关）",
+            "[launcher] 启动命令: cmd /C \"{}\" web --port {} --no-open{}（进程工作目录: {}，DSH_HOME: {}，PID: {}；DSH 输出日志: {}）",
             cfg.dsh_path,
             cfg.port,
             if cfg.extra_args.trim().is_empty() {
@@ -596,7 +733,8 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
             },
             cwd,
             cfg.dsh_home_dir,
-            pid
+            pid,
+            logger::dsh_log_path(&cfg.dsh_home_dir).display()
         ),
     );
 
@@ -615,16 +753,17 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 等待 DSH 就绪：同时监控子进程存活 + 轮询 HTTP；就绪后才把 DSH 页面内嵌进主窗口
+/// 等待 DSH 就绪：同时监控子进程存活 + 轮询 HTTP；就绪后才把 DSH 页面内嵌进主窗口。
+/// 若 DSH 输出中解析到实际监听地址（如 `dsh web: http://127.0.0.1:3080`），
+/// 则以实际地址为准轮询并加载。
 fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
     let state = app.state::<AppState>();
-    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
     let started = Instant::now();
     emit_log(
         app,
         "launcher",
         format!(
-            "[launcher] 正在等待 DSH 就绪（http://127.0.0.1:{}{}）...",
+            "[launcher] 正在等待 DSH 就绪（默认 http://127.0.0.1:{}{}）...",
             port,
             match timeout {
                 Some(t) => format!("，超时 {} 秒", t.as_secs()),
@@ -633,6 +772,14 @@ fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
         ),
     );
     loop {
+        // 0) 实际监听地址优先（要求一.8）：输出中出现则切换轮询/加载目标
+        let detected = state.detected_url.lock().unwrap().clone();
+        let (target_url, poll_port) = match &detected {
+            Some((url, dp)) => (url.clone(), *dp),
+            None => (local_url(port), port),
+        };
+        let addr: SocketAddr = format!("127.0.0.1:{}", poll_port).parse().unwrap();
+
         // 1) 监控子进程存活：DSH 若在端口就绪前闪退，立即终止等待并显示错误
         {
             let mut guard = state.child.lock().unwrap();
@@ -680,12 +827,13 @@ fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
                 app,
                 "launcher",
                 format!(
-                    "[launcher] DSH 服务已就绪（共等待 {:.0} 秒），正在内嵌页面…",
-                    started.elapsed().as_secs_f64()
+                    "[launcher] DSH 服务已就绪（共等待 {:.0} 秒），正在内嵌页面 {} …",
+                    started.elapsed().as_secs_f64(),
+                    target_url
                 ),
             );
             set_status(app, "running", None);
-            open_dsh_webview(app, port);
+            open_dsh_webview(app, &target_url);
             return;
         }
 
@@ -776,22 +924,28 @@ fn stop_internal(app: &AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn get_config(app: AppHandle) -> ConfigReport {
     let cfg = config::load(&app);
+    let first_run = !config::config_path(&app).exists();
     ConfigReport {
         dsh_exists: Path::new(&cfg.dsh_path).is_file(),
         npm_exists: Path::new(&cfg.npm_path).is_file(),
         home_exists: Path::new(&cfg.dsh_home_dir).is_dir(),
         config_path: config::config_path(&app).to_string_lossy().to_string(),
+        first_run,
         config: cfg,
     }
 }
 
 #[tauri::command]
 pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, String> {
-    if config.port == 0 {
-        return Err("端口无效".to_string());
+    // 端口必须是 1~65535 的数字（要求一.5）
+    if !(1..=65535).contains(&config.port) {
+        return Err("端口无效：必须是 1 到 65535 之间的数字".to_string());
+    }
+    if config.dsh_home_dir.trim().is_empty() {
+        return Err("DSH 家目录不能为空".to_string());
     }
     if config.dsh_path.trim().is_empty() || config.npm_path.trim().is_empty() {
-        return Err("路径不能为空".to_string());
+        return Err("路径不能为空（可点击「自动检测」填写）".to_string());
     }
     config::save(&app, &config)?;
     let report = get_config(app.clone());
@@ -867,7 +1021,7 @@ pub async fn connect_existing(app: AppHandle) -> Result<(), String> {
         ),
     );
     set_status(&app, "running-external", None);
-    open_dsh_webview(&app, cfg.port);
+    open_dsh_webview(&app, &local_url(cfg.port));
     Ok(())
 }
 
@@ -1054,10 +1208,10 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
             );
 
             if let Some(so) = child.stdout.take() {
-                spawn_log_reader(app2.clone(), so, "update", "update-log", false);
+                spawn_log_reader(app2.clone(), so, "update", "update-log", false, None);
             }
             if let Some(se) = child.stderr.take() {
-                spawn_log_reader(app2.clone(), se, "update", "update-log", false);
+                spawn_log_reader(app2.clone(), se, "update", "update-log", false, None);
             }
 
             child
@@ -1192,4 +1346,413 @@ pub fn was_launched_by_autostart(app: AppHandle) -> bool {
     app.state::<AppState>()
         .launched_by_autostart
         .load(Ordering::SeqCst)
+}
+
+// ---------- 工具命令（日志目录 / 浏览器 / 端口检查 / 环境检测） ----------
+
+/// 打开 Desktop 日志目录（%APPDATA%\com.dsh.desktop）
+#[tauri::command]
+pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
+    let dir = config::config_dir(&app);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建日志目录 {}: {}", dir.display(), e))?;
+    Command::new("explorer")
+        .arg(dir.as_os_str())
+        .spawn()
+        .map_err(|e| format!("无法打开日志目录: {}", e))?;
+    Ok(())
+}
+
+/// 用系统默认浏览器打开链接（仅允许 http/https，用于引导页打开官网等）
+#[tauri::command]
+pub fn open_in_browser(url: String) -> Result<(), String> {
+    let u = url.trim();
+    if !(u.starts_with("http://") || u.starts_with("https://")) {
+        return Err(format!("非法链接: {}", u));
+    }
+    Command::new("explorer")
+        .arg(u)
+        .spawn()
+        .map_err(|e| format!("无法打开浏览器: {}", e))?;
+    Ok(())
+}
+
+/// 检查配置端口当前是否被占用（端口占用面板的「重新检测」按钮使用）
+#[tauri::command]
+pub async fn check_port(app: AppHandle) -> Result<PortCheck, String> {
+    let cfg = config::load(&app);
+    Ok(PortCheck { port: cfg.port, in_use: port_in_use(cfg.port) })
+}
+
+/// 完整环境检测（强制刷新缓存）：Node.js / npm / DSH 的存在性与路径、Node 版本
+#[tauri::command]
+pub async fn detect_environment(_app: AppHandle) -> Result<detect::EnvDetection, String> {
+    Ok(detect::full_detect())
+}
+
+// ---------- 首次运行引导安装（要求七；不内置 Node/DSH，只在线引导官方安装包） ----------
+
+fn setup_progress(app: &AppHandle, phase: &str, msg: &str) {
+    let _ = app.emit(
+        "setup-status",
+        SetupStatus { phase: phase.to_string(), message: msg.to_string() },
+    );
+    logger::append_line(
+        &logger::desktop_log_path(app),
+        &format!("[setup][{}] {}", phase, msg),
+    );
+}
+
+/// 引导安装 Node.js：下载官方 LTS MSI → 启动安装程序 → 等待 → 验证。
+/// 失败时给出明确原因（无网络/下载失败/权限不足/用户取消），绝不静默失败。
+#[tauri::command]
+pub async fn setup_install_node(app: AppHandle) -> Result<(), String> {
+    {
+        let state = app.state::<AppState>();
+        if state.setup_busy.swap(true, Ordering::SeqCst) {
+            return Err("已有引导安装任务正在进行".to_string());
+        }
+    }
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let outcome = install_node_blocking(&app2);
+        let (ok, msg) = match outcome {
+            Ok(m) => (true, m),
+            Err(e) => (false, e),
+        };
+        logger::append_line(
+            &logger::desktop_log_path(&app2),
+            &format!(
+                "[setup] Node.js 引导安装{}{}",
+                if ok { "成功" } else { "失败" },
+                if ok { format!("：{}", msg) } else { format!("：{}", msg) }
+            ),
+        );
+        let _ = app2.emit(
+            "setup-result",
+            SetupResult { target: "node".to_string(), success: ok, message: msg },
+        );
+        app2.state::<AppState>().setup_busy.store(false, Ordering::SeqCst);
+    });
+    Ok(())
+}
+
+fn install_node_blocking(app: &AppHandle) -> Result<String, String> {
+    let url = detect::node_msi_url();
+    let file_name = url.rsplit('/').next().unwrap_or("node-lts-x64.msi").to_string();
+    let dest = std::env::temp_dir().join(&file_name);
+    let _ = std::fs::remove_file(&dest);
+
+    setup_progress(
+        app,
+        "download",
+        &format!("开始下载官方 Node.js v{} LTS 安装包：{}", detect::NODE_LTS_VERSION, url),
+    );
+
+    // 方式一：curl.exe（Windows 10 1803+ 自带）；失败则回退 PowerShell Invoke-WebRequest
+    let mut last_err = String::from("未找到可用的下载工具");
+    let via_curl = try_download_curl(&url, &dest, &mut last_err);
+    if !via_curl {
+        setup_progress(app, "download", &format!("curl 下载不可用（{}），改用 PowerShell…", last_err));
+        try_download_powershell(&url, &dest)?;
+    }
+
+    // 校验文件已落盘且大小合理（MSI 一般 ~30MB）
+    match std::fs::metadata(&dest) {
+        Ok(meta) if meta.len() >= 10 * 1024 * 1024 => {}
+        Ok(meta) => {
+            let _ = std::fs::remove_file(&dest);
+            return Err(format!(
+                "下载失败：文件不完整（{} 字节）。请检查网络后重试，或到 {} 手动下载安装。",
+                meta.len(),
+                detect::NODE_DOWNLOAD_PAGE
+            ));
+        }
+        Err(_) => {
+            return Err(format!(
+                "下载失败：文件未能保存到 {}。请检查网络连接后重试，或到 {} 手动下载安装。",
+                dest.display(),
+                detect::NODE_DOWNLOAD_PAGE
+            ));
+        }
+    }
+
+    setup_progress(
+        app,
+        "install",
+        "下载完成，正在启动官方安装程序。请在弹出的安装窗口 / UAC 提示中确认并等待完成……",
+    );
+
+    // 运行官方 MSI：/passive 显示进度条但无需逐页点击；UAC 由 Windows 弹出（权限提升交给系统）
+    let mut cmd = Command::new("msiexec");
+    cmd.arg("/i").arg(&dest).args(["/passive", "/norestart"]);
+    apply_no_window(&mut cmd); // 只是不创建控制台窗口；MSI 本身是 GUI 程序不受影响
+    let mut child = cmd.spawn().map_err(|e| {
+        format!(
+            "无法启动安装程序（msiexec）: {}。可到 {} 手动下载安装 Node.js 后点击「重新检测」。",
+            e,
+            detect::NODE_DOWNLOAD_PAGE
+        )
+    })?;
+
+    let started = Instant::now();
+    let code;
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => {
+                code = st.code().unwrap_or(-1);
+                break;
+            }
+            Ok(None) => {
+                if started.elapsed() >= Duration::from_secs(30 * 60) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(
+                        "等待安装程序完成超时（30 分钟），已中止等待。可到 \
+                         https://nodejs.org 手动安装，然后回到本窗口点击「重新检测」。"
+                            .to_string(),
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(e) => return Err(format!("等待安装程序退出失败: {}", e)),
+        }
+    }
+    let _ = std::fs::remove_file(&dest); // 清理下载的安装包
+
+    detect::invalidate_cache();
+    setup_progress(app, "verify", "安装程序已退出，正在重新检测 Node.js…");
+    match code {
+        0 | 3010 => {
+            let env = detect::full_detect();
+            if env.node_found {
+                let ver = env.node_version.unwrap_or_default();
+                setup_progress(app, "verify", &format!("检测到 Node.js：{} {}", env.node_path, ver));
+                Ok(format!("{} {}", env.node_path, ver))
+            } else {
+                Err(format!(
+                    "安装程序已退出（退出码 {}），但未检测到 node.exe。刚装完可能需要重新打开程序使 PATH 生效；\
+                     可点击「重新检测」，或到 {} 手动安装。",
+                    code,
+                    detect::NODE_DOWNLOAD_PAGE
+                ))
+            }
+        }
+        1602 => Err("安装被取消（退出码 1602）。可再次尝试一键安装，或到 https://nodejs.org 手动安装。".to_string()),
+        c => Err(format!(
+            "安装失败（msiexec 退出码 {}）。常见原因：权限不足（UAC 被拒绝）、磁盘空间不足。\
+             可重试或到 https://nodejs.org 手动下载安装。",
+            c
+        )),
+    }
+}
+
+fn try_download_curl(url: &str, dest: &Path, last_err: &mut String) -> bool {
+    let Some(curl) = detect::where_lookup("curl.exe") else {
+        *last_err = "未找到 curl.exe".to_string();
+        return false;
+    };
+    let args: Vec<String> = vec![
+        "-fL".into(),
+        "--retry".into(),
+        "2".into(),
+        "--connect-timeout".into(),
+        "15".into(),
+        "-o".into(),
+        dest.to_string_lossy().to_string(),
+        url.to_string(),
+    ];
+    match run_cmd_capture(&curl.to_string_lossy(), &args, "", Duration::from_secs(15 * 60)) {
+        Ok((true, _)) => true,
+        Ok((false, out)) => {
+            *last_err = format!("curl 执行失败: {}", out.trim());
+            false
+        }
+        Err(e) => {
+            *last_err = e;
+            false
+        }
+    }
+}
+
+fn try_download_powershell(url: &str, dest: &Path) -> Result<(), String> {
+    let script = format!(
+        "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{}' -OutFile '{}'",
+        url,
+        dest.display()
+    );
+    let args: Vec<String> = vec![
+        "-NoProfile".into(),
+        "-NonInteractive".into(),
+        "-ExecutionPolicy".into(),
+        "Bypass".into(),
+        "-Command".into(),
+        script,
+    ];
+    match run_cmd_capture("powershell", &args, "", Duration::from_secs(15 * 60)) {
+        Ok((true, _)) => Ok(()),
+        Ok((false, out)) => {
+            let o = out.trim();
+            let hint = if o.contains("Unable to connect")
+                || o.contains("远程名称")
+                || o.contains("resolve")
+                || o.contains("denied")
+            {
+                "无法连接网络或访问被拒绝"
+            } else {
+                "PowerShell 下载失败"
+            };
+            Err(format!(
+                "{}：{}。请检查网络连接后重试，或到 {} 手动下载安装 Node.js。",
+                hint,
+                o.chars().take(300).collect::<String>(),
+                detect::NODE_DOWNLOAD_PAGE
+            ))
+        }
+        Err(e) => Err(format!(
+            "下载超时或失败（{}）。请检查网络连接，或到 {} 手动下载安装 Node.js。",
+            e,
+            detect::NODE_DOWNLOAD_PAGE
+        )),
+    }
+}
+
+/// 引导安装 DSH：执行 `cmd /C <npm> install -g @deepseek-ai/dsh`，
+/// 输出实时转发到日志面板，结束后自动重新检测。
+#[tauri::command]
+pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
+    {
+        let state = app.state::<AppState>();
+        if state.updating.swap(true, Ordering::SeqCst) {
+            return Err("已有安装任务正在进行".to_string());
+        }
+    }
+
+    let cfg = config::load(&app);
+    if cfg.npm_path.trim().is_empty() || !Path::new(&cfg.npm_path).is_file() {
+        app.state::<AppState>().updating.store(false, Ordering::SeqCst);
+        return Err(format!(
+            "未找到 npm.cmd（{}）。请先安装 Node.js（含 npm），或在「设置」中配置 npm 路径。",
+            cfg.npm_path
+        ));
+    }
+
+    let app2 = app.clone();
+    let npm = cfg.npm_path.clone();
+    let pkg = cfg.package_name.clone();
+    let cwd = config::workspace_cwd(&cfg);
+    std::thread::spawn(move || {
+        emit_log(
+            &app2,
+            "launcher",
+            format!("[setup] 正在执行: cmd /C \"{}\" install -g {}", npm, pkg),
+        );
+
+        let outcome: Result<i32, String> = (|| {
+            let mut cmd = Command::new("cmd");
+            cmd.arg("/C").arg(&npm).arg("install").arg("-g").arg(&pkg);
+            cmd.current_dir(&cwd);
+            apply_no_window(&mut cmd);
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = cmd
+                .spawn()
+                .map_err(|e| format!("npm 启动失败: {}（路径错误或权限不足？）", e))?;
+            let pid = child.id();
+
+            // 放入 Job Object：引导期间本程序退出则一并结束，避免残留
+            #[cfg(windows)]
+            {
+                let st = app2.state::<AppState>();
+                if let Some(j) = win::create_kill_on_close_job(pid) {
+                    *st.update_job.lock().unwrap() = Some(j);
+                }
+            }
+
+            if let Some(so) = child.stdout.take() {
+                spawn_log_reader(app2.clone(), so, "update", "dsh-log", false, None);
+            }
+            if let Some(se) = child.stderr.take() {
+                spawn_log_reader(app2.clone(), se, "update", "dsh-log", false, None);
+            }
+
+            let deadline = Instant::now() + Duration::from_secs(15 * 60);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(st)) => return Ok(st.code().unwrap_or(-1)),
+                    Ok(None) => {
+                        if Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(
+                                "npm 安装超时（15 分钟），已中止。请检查网络后重试，或手动执行安装命令。"
+                                    .to_string(),
+                            );
+                        }
+                        std::thread::sleep(Duration::from_millis(400));
+                    }
+                    Err(e) => return Err(format!("等待 npm 退出失败: {}", e)),
+                }
+            }
+        })();
+
+        {
+            let st = app2.state::<AppState>();
+            st.close_update_job();
+            st.updating.store(false, Ordering::SeqCst);
+        }
+
+        match outcome {
+            Ok(0) => {
+                detect::invalidate_cache();
+                let env = detect::full_detect();
+                if env.dsh_found {
+                    let msg = format!("DSH 全局安装成功：{}", env.dsh_path);
+                    logger::append_line(&logger::desktop_log_path(&app2), "[setup] DSH 全局安装成功。");
+                    let _ = app2.emit(
+                        "setup-result",
+                        SetupResult { target: "dsh".to_string(), success: true, message: msg },
+                    );
+                } else {
+                    let _ = app2.emit(
+                        "setup-result",
+                        SetupResult {
+                            target: "dsh".to_string(),
+                            success: false,
+                            message: "npm 报告成功但未找到 dsh.cmd。可点击「重新检测」，或重启程序后再试。".to_string(),
+                        },
+                    );
+                }
+            }
+            Ok(c) => {
+                let msg = format!(
+                    "npm install -g {} 失败（退出码 {}）。常见原因：无网络、npm 源不可达、全局目录权限不足。详见日志，也可复制命令手动执行。",
+                    pkg, c
+                );
+                logger::append_line(&logger::desktop_log_path(&app2), &msg);
+                let _ = app2.emit(
+                    "setup-result",
+                    SetupResult { target: "dsh".to_string(), success: false, message: msg },
+                );
+            }
+            Err(e) => {
+                logger::append_line(&logger::desktop_log_path(&app2), &e);
+                let _ = app2.emit(
+                    "setup-result",
+                    SetupResult { target: "dsh".to_string(), success: false, message: e },
+                );
+            }
+        }
+    });
+    Ok(())
+}
+
+/// 完成首次运行引导：把当前（含自动检测补全的）配置写入 %APPDATA%\com.dsh.desktop\config.json。
+/// 写入成功后 get_config.first_run 变为 false，向导不再出现。
+#[tauri::command]
+pub fn finish_setup(app: AppHandle) -> Result<ConfigReport, String> {
+    let cfg = config::load(&app);
+    config::save(&app, &cfg)?;
+    log_launcher(&app, "[launcher] 初始化引导已完成，配置已写入。");
+    Ok(get_config(app))
 }

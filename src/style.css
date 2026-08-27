@@ -430,3 +430,148 @@ body {
   user-select: text;
 }
 .toast.error { background: var(--danger); }
+
+/* ---------- 新增小控件 ---------- */
+
+/* 左对齐按钮行（向导 / 设置页顶部） */
+.row.left { gap: 8px; justify-content: flex-start; }
+
+/* 状态区错误下方的复制按钮 */
+#btn-copy-error { margin-top: -4px; }
+
+/* 下拉框与输入框风格一致 */
+.field select {
+  height: 30px;
+  width: 100%;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-family: inherit;
+  color: var(--text);
+  background: #fff;
+}
+
+/* 小号旋转指示（向导进度条用） */
+.spinner.small { width: 18px; height: 18px; border-width: 2px; }
+
+/* ---------- 首次运行引导向导 ---------- */
+
+.setup-wizard {
+  position: fixed;
+  inset: 0;
+  background: var(--stage-bg);
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.setup-card {
+  width: 720px;
+  max-width: 100%;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.setup-desc {
+  font-size: 12.5px;
+  line-height: 1.8;
+  color: var(--text);
+  background: #f6f8fa;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.setup-desc code {
+  font-family: Consolas, monospace;
+  background: #eceff3;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.check-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+}
+.check-table th,
+.check-table td {
+  text-align: left;
+  border-bottom: 1px solid var(--toolbar-border);
+  padding: 7px 10px;
+}
+.check-table th { color: var(--text-dim); font-weight: 500; }
+.check-table .mono {
+  font-family: Consolas, "Microsoft YaHei", monospace;
+  word-break: break-all;
+  user-select: text;
+}
+
+.wiz-step {
+  background: #fffdf5;
+  border: 1px solid #f0e3b8;
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wiz-step-title { font-weight: 600; font-size: 13px; }
+
+.wiz-step-body {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text);
+}
+#wiz-open-node-page { color: var(--accent); }
+
+.block-code {
+  display: block;
+  background: #f0f2f5;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-top: 6px;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  user-select: text;
+}
+
+.wiz-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.wiz-log {
+  height: 180px;
+  overflow-y: auto;
+  background: #101418;
+  color: #d5dbe2;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  padding: 10px 14px;
+  border-radius: 8px;
+  user-select: text;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}
+
+.setup-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 4px;
+  border-top: 1px solid var(--toolbar-border);
+}
+#wiz-skip-note { font-size: 11.5px; color: var(--text-dim); }

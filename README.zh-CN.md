@@ -1,143 +1,181 @@
 # DSH Desktop
 
-Windows 10 轻装桌面端（Tauri v2），用于启动、设置、运行、更新本机 npm 全局安装的 DSH（DeepSeek Harness）Web 服务。
+Windows 10/11 轻量桌面端（Tauri v2 + Rust + 原生 HTML/CSS/JS），用于启动、配置、运行、更新本机 npm 全局安装的 DSH（DeepSeek Harness）Web 服务。英文主文档见 [README.md](README.md)。
 
-- **单窗口设计**：整个使用过程只有一个窗口。顶部 43.2px 工具栏（左侧操作按钮、右侧一行状态：状态点 · 端口 · 版本），下方区域在启动等待/错误提示与 DSH 页面之间切换——DSH 就绪后其 Web 界面**直接内嵌在工具栏下方**，不再弹出独立窗口，也**绝不打开默认浏览器**（启动命令固定带 `--no-open`）
-- 不弹终端、不下载运行时、不内置 Node/DSH、不读取也不修改你的 DSH 用户配置
-- DSH 的 stdout / stderr 实时收集到「日志」弹窗（工具栏按钮打开），启动失败时错误原因直接显示为一行提示
-- 等待就绪不着急：DSH 冷启动（尤其重启电脑后首次）可能需要一两分钟，默认耐心等待 **300 秒**，可设为 **0 = 一直等待**；等待期间显示已等待秒数
-- **开机自动启动**（官方 autostart 插件）：设置里一个开关即可注册/取消；开机自启时**静默托盘化**——窗口不弹出，DSH 先延迟 12 秒（错开系统冷启动高峰）再后台拉起，点托盘图标随时恢复窗口
-- **系统托盘常驻**：点窗口 X 不再直接退出，而是最小化到托盘；托盘右键菜单提供「显示主窗口 / 开机自动启动 / 退出」，真正退出时才结束 DSH 进程树（`taskkill /PID <pid> /T /F` + Job Object 双保险，程序崩溃也不残留进程）
-- **刷新页面**（新增）：只重新加载内嵌的 DSH 网页，**不会停止或重启 DSH 后台服务**。
-- 一键更新：`npm install -g @deepseek-ai/dsh@latest`，输出实时显示，成功后自动重启 DSH
-- 单实例锁：重复双击只会聚焦已有窗口
+> **重要 —— 本程序不内置任何运行时**
+>
+> - 本程序**不内置 Node.js**。
+> - 本程序**不内置 DSH**。
+> - 也不下载/部署任何便携版 Node/DSH 运行环境。
+> - 用户需自行安装 Node.js 与 DSH（首次运行向导可引导安装，见「环境要求」）。
 
-## 一、获取程序（GitHub Actions 自动构建，无需本地安装 Rust）
+## 概览
 
-你不需要在本机安装 Rust、Visual Studio Build Tools 或 Tauri CLI，全部在 GitHub 云端完成：
+- **单窗口设计**：顶部 43.2px 工具栏（操作按钮 + 一行状态：状态点 · 端口 · 版本），DSH 就绪后其 Web 界面**直接内嵌在工具栏下方**，绝不打开默认浏览器（启动命令固定带 `--no-open`）。
+- 程序按你配置的路径与端口启动 DSH：先 TCP + HTTP 轮询确认服务真正就绪，再加载页面；若 DSH 在就绪前闪退，立即显示最后一条 stderr 报错，绝不无限等待。
+- **只管理自己启动的进程**：退出时用 `taskkill /PID <pid> /T /F` + Windows Job Object 结束本次启动的 DSH 进程树，绝不使用 `taskkill /IM node.exe /F` 这类误杀式命令。
 
-1. **创建仓库**：登录 GitHub → 右上角 `+` → *New repository* → 名称如 `dsh-launcher` → *Create repository*。
-2. **上传代码**（三选一）：
-   - 网页上传：仓库页 → *uploading an existing file* → 把本项目所有文件/文件夹拖进去（保持 `.github/workflows/build-windows.yml` 的相对路径不变）→ *Commit changes*。
-   - 命令行：
-     ```bash
-     cd dsh-launcher
-     git init
-     git add .
-     git commit -m "DSH Desktop"
-     git branch -M main
-     git remote add origin https://github.com/<你的用户名>/dsh-launcher.git
-     git push -u origin main
-     ```
-   - GitHub Desktop：Add Existing Repository → Publish repository。
-3. **触发构建**：push 到 `main` 会自动触发；也可到仓库 *Actions* 标签 → 选择 *Build Windows* → *Run workflow* 手动触发。
-4. **下载产物**：*Actions* → 点进最新的成功运行记录 → 页面底部 *Artifacts* 区域下载：
-   - `DSH-Desktop-windows-nsis` — NSIS 安装包（推荐，双击安装）
-   - `DSH-Desktop-windows-msi` — MSI 安装包
-   - `DSH-Desktop-windows-portable-exe` — 免安装独立 exe
-5. 首次构建约 8~15 分钟（编译 Rust），之后有缓存会快很多。
+## 功能特性
 
-> 如果 Actions 没有自动运行：检查仓库 *Settings → Actions → General → Actions permissions* 是否允许运行；确认 `.github/workflows/build-windows.yml` 已提交。
+- 端口可配置（默认 **3080**），路径自动检测 + 设置页手动选择
+- 端口占用保护：提示而非强杀——可连接现有服务、修改端口、重新检测
+- 实际地址识别：DSH 输出中打印了真实监听地址时（如 `dsh web: http://127.0.0.1:3080`），优先按该地址加载
+- 文件日志：Desktop 日志 `%APPDATA%\com.dsh.desktop\desktop.log`；DSH 输出日志 `%USERPROFILE%\.dsh\logs\dsh.log`；UI 提供「打开日志目录」「复制错误信息」「复制日志」
+- 刷新页面：只重载内嵌网页，不重启后台服务（`F5` / `Ctrl+R`）
+- 一键更新 DSH（npm 全局更新，输出实时可见）
+- 关闭行为可配：点 X 隐藏到托盘（默认）或退出程序；托盘恢复执行 show + unminimize + set_focus
+- 开机自启（官方插件，仅写 HKCU 注册表，无需管理员）；自启时静默托盘化并延迟 12 秒错开冷启动高峰
+- 首次运行向导：检测 Node/npm/DSH 并引导安装（nodejs.org 官方 LTS 安装包在线下载，或代为执行 `npm install -g @deepseek-ai/dsh`），全程可跳过
+- 单实例锁：重复双击只聚焦已有窗口
 
-## 二、使用
+## 环境要求（Requirements）
 
-1. 安装/运行 DSH Desktop（NSIS 安装包或独立 exe 均可），窗口默认 1200×760。
-2. 首次启动会自动尝试启动 DSH。默认配置适配以下环境（不同则点「设置」改）：
+| 项目 | 要求 |
+|---|---|
+| 操作系统 | Windows 10 或 11，x64 |
+| WebView2 | Win10/11 一般已随 Edge 预装；安装包缺失时可引导安装 |
+| Node.js | DSH 的运行依赖（建议 LTS）。**不随本程序分发** |
+| DSH | 通过 npm 全局安装。**不随本程序分发** |
+
+## 环境准备（Prerequisites）
+
+启动服务前必须具备：
+
+1. **Node.js（含 npm）**——从官网 <https://nodejs.org/en/download> 安装 LTS 版；
+2. **DSH**——全局安装：
+
+   ```bash
+   npm install -g @deepseek-ai/dsh
+   ```
+
+可用以下命令自检：
+
+```bash
+node --version
+npm --version
+dsh --version
+```
+
+缺什么时程序会给出明确错误（哪个组件没找到、找过哪些位置、怎么修），不会无限等待。首次运行向导也会自动检测：缺 Node 时提供一键下载运行 nodejs.org 官方 LTS 安装包（运行时在线下载，绝不内置），缺 DSH 时可代为执行 `npm install -g @deepseek-ai/dsh`。每一步都可以跳过（稍后手动安装），失败原因（无网络/下载失败/权限不足/用户取消）都会明确提示。
+
+## 安装（Installation）
+
+无需本地 Rust 环境——GitHub Actions 云端构建（见下一节）。取最新成功构建的产物：
+
+- `DSH-Desktop-windows-nsis` → 内含 `DSH Desktop_<版本>_x64-setup.exe`（NSIS 安装包，推荐）
+- `DSH-Desktop-windows-msi` → MSI 安装包
+- `DSH-Desktop-windows-portable-exe` → 免安装独立 exe
+
+用 NSIS 安装包安装或直接运行便携 exe。首次启动会出现一次环境检查向导；一旦 `%APPDATA%\com.dsh.desktop\config.json` 存在即不再出现。
+
+## 从源码构建（Build from source）
+
+需要：Node.js 18+/20 LTS、Rust stable（MSVC）、Visual Studio Build Tools、WebView2。
+
+```bash
+npm ci
+npm run tauri build
+```
+
+产物位于 `src-tauri/target/release/bundle/nsis/`、`.../msi/`，独立 exe 在 `src-tauri/target/release/`。
+
+## GitHub Actions 构建
+
+`.github/workflows/build-windows.yml` 在 push 到 `main`/`master`、打 `v*` 标签、PR 及手动触发时自动构建，产物见「安装」一节。首次构建约 8~15 分钟（Rust 编译），之后有缓存会快很多。
+
+## 使用（Usage）
+
+1. 安装/运行 **DSH Desktop**，窗口默认 1200×760。
+2. 首次启动出现环境检查向导：
+   - 已装齐 → 点「完成，进入主界面」；
+   - 有缺失 → 用引导按钮安装，或直接跳过进入主界面（之后启动会给出明确错误）。
+3. 点 **▶ 启动**（或让程序自动拉起）：状态区显示等待秒数，就绪后无缝切换为内嵌的 DSH 页面。
+4. 工具栏右侧始终显示：状态点 · 当前端口 · 版本。
+5. 默认点 X 是隐藏到托盘（可在设置改为退出）；从托盘图标/菜单唤回窗口；托盘菜单「退出」才真正结束本程序及其启动的 DSH 进程树。
+
+程序实际执行的命令示例（以你的配置为准）：
+
+```text
+默认访问地址:        http://127.0.0.1:3080
+DSH 启动命令示例:     dsh web --port 3080
+全局安装命令示例:     npm install -g @deepseek-ai/dsh
+```
+
+## 配置（Configuration）
+
+配置文件：`%APPDATA%\com.dsh.desktop\config.json`（当前用户目录，绝不写入 Program Files 或程序安装目录）。
+
+工具栏打开 **⚙ 设置**。所有路径支持自动检测：留空或失效时，程序通过 `where` 查找与常见目录扫描（如 `%ProgramFiles%\nodejs`、`%APPDATA%\npm`）自动补全，也可手动浏览选择。
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
-| npm.cmd 路径 | `D:\Programs\nodejs\npm.cmd` | 用于更新 DSH / 查询最新版本 |
-| dsh.cmd 路径 | `C:\Users\admin\AppData\Roaming\npm\dsh.cmd` | 用于启动 DSH |
-| DSH 家目录 | `%USERPROFILE%\.dsh`（如 `C:\Users\admin\.dsh`） | **DSH 摆放配置文件的地方**，通过 `DSH_HOME` 环境变量传给 DSH；不是工作目录 |
-| 端口 | `3080` | |
-| 就绪超时 | `300` 秒 | DSH 冷启动可能要一两分钟；**0 = 一直等待**（只要进程活着就一直等） |
+| npm.cmd 路径 | 空 → 自动检测 | 用于更新 / 查询最新版本 |
+| dsh 路径 | 空 → 自动检测 | 支持 `dsh.cmd` / `dsh.exe` / `dsh.bat` |
+| DSH 家目录 | `%USERPROFILE%\.dsh` | 经 `DSH_HOME` 传给 DSH；进程工作目录取其上一级；不是工作区 |
+| 端口 | `3080` | 必须为 1~65535，保存时校验，下次启动生效 |
+| 就绪超时 | `300` 秒 | 冷启动可能较慢；**0 = 一直等待** |
+| 点击窗口 X 时 | 隐藏到托盘 | 可改「退出程序」（结束本次启动的 DSH 进程） |
 | 附加参数 | 空 | 追加在 `dsh web --port N --no-open` 之后 |
-| 更新命令 | `install -g @deepseek-ai/dsh@latest` | 拼在 `cmd /C npm.cmd` 之后 |
-| 开机自动启动 | 关 | 设置里的开关**即时生效**（写入注册表 `HKCU\...\Run`，无需管理员权限），托盘菜单也可切换 |
+| 包名 | `@deepseek-ai/dsh` | 版本检测 / 更新使用 |
+| 更新参数 | `install -g @deepseek-ai/dsh@latest` | 拼在 `cmd /C npm.cmd` 之后 |
+| 开机自动启动 | 关 | 即时生效，写 HKCU\...\Run，无需管理员 |
 
-3. 启动流程：工具栏下方显示一行「正在启动 DSH，已等待 X 秒…」→ 服务就绪后该区域无缝切换为**内嵌的 DSH 页面**。就绪前绝不加载网页，无需手动刷新。
-4. 若 DSH 启动瞬间崩溃：提示立即变为红色错误行（含 DSH 退出前最后一条报错），完整输出见「日志」。
-5. 若端口 3080 被占用：程序不会强杀未知进程，而是显示提示面板，可选择 **连接现有服务**（不接管该进程）或 **修改端口**。
+## 默认端口（Default port）
 
-### 界面说明
+- 默认端口为 **3080**。
+- 可在设置页修改；启动命令、健康检查轮询、内嵌 WebView 加载地址全部跟随配置端口。
+- 示例：`http://127.0.0.1:3080`、`dsh web --port 3080`。
+- 每次启动前检测端口占用；被占用时**绝不强杀未知进程**，面板提供「连接现有服务」「修改端口」「重新检测」。若 DSH 输出中给出不同实际地址（如 `dsh web: http://127.0.0.1:3080`），以实际地址优先加载。
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│ ▶启动 ■停止 ⟳重启 ↻刷新页面 ⤓更新DSH 检查版本 日志 ⚙设置   ● 运行中 · 端口 3080 · 版本 1.0.1 │ ← 43.2px 浅灰工具栏
-├──────────────────────────────────────────────────────────────┤
-│                                                              │
-│   等待中：一行提示 + 转圈（已等待 X 秒…）                        │
-│   失败时：一行红色错误                                         │
-│   就绪后：DSH 页面内嵌于此（铺满整个剩余区域）                    │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
-```
+## 更新 DSH（Update DSH)
 
-- 窗口缩放时内嵌页面自动跟随调整大小。
-- 打开「设置 / 日志 / 更新确认」弹窗时内嵌页面自动暂时隐藏，关闭弹窗后恢复。
+工具栏点「⤓ 更新 DSH」→ 确认 → 自动停止服务 → 执行 `cmd /C "<npm>" install -g @deepseek-ai/dsh@latest`（输出实时写入日志，来源标记 update）→ 成功后自动重启 DSH。「检测全局包名」（`npm list -g --depth=0`）可确认包名。版本栏显示本地 `--version` 与远端 `npm view` 结果对比。
 
-### 刷新页面（不重启 DSH）
+## 日志（Logs）
 
-- **刷新页面** 按钮位于「重启」旁边，只重新加载内嵌的 DSH 网页——**不会停止或重启 DSH 服务**。
-- 适用场景：更换壁纸后刷新界面、应用皮肤后刷新界面、前端显示没有及时更新、页面临时异常但不想重启整个 DSH。
-- 刷新期间页面上会显示「正在刷新...」的提示，直到新页面出现。
-- 保留当前访问地址（`http://127.0.0.1:3080` 或你配置的端口），不会重新走完整的 DSH 启动流程。
-- 快捷键：`F5`、`Ctrl + R`（焦点在 Launcher 界面时生效；在 DSH 页面内部，WebView2 也原生支持 F5/Ctrl+R 刷新）。
-- 如果 DSH 服务当前未运行，点击「刷新页面」会提示：`DSH service is not running.`
-- **「重启 DSH」按钮仍然独立存在**，用于完整重启后台服务；两者不会混淆。
+两份日志都在用户目录下（无需管理员权限），超过 5MB 自动滚动为 `*.old`：
 
-### 窗口与托盘行为
-
-- **点主窗口的 X**：不再退出，而是**最小化到系统托盘**（后台继续运行，DSH 不受影响）。
-- **托盘图标**（黑鲸鱼）：
-  - 左键单击 / 双击 → 显示并聚焦主窗口；
-  - 右键 → 菜单：「显示主窗口」「开机自动启动（勾选切换）」「退出」。
-- **退出**（托盘菜单）= 停止 DSH 进程树并退出整个程序；程序崩溃时 Job Object 兜底清理，绝不残留进程。
-- 若连接的是"外部进程"（不是本程序启动的），退出本程序不会动它，只会断开页面连接。
-
-### 开机自动启动（官方 autostart 插件）
-
-- 设置里的「开机自动启动」开关**即时生效**，也可从托盘右键菜单勾选切换，两处状态实时同步。
-- 注册方式：Windows 注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，无需管理员权限。
-- **开机自启的体验优化**：
-  1. **静默托盘化**——开机登录后主窗口不弹出、不抢焦点，只在后台运行，需要时点托盘图标恢复窗口；
-  2. **延迟 12 秒**——刚开机时系统 IO 高、Node 环境/网络未必就绪，立即启动 DSH 极易超时；程序检测到自启触发（命令行带 `--autostart`）后先等 12 秒再拉起 DSH，等待期间可随时点「停止」取消。
-
-### 更新 DSH
-
-工具栏点「更新 DSH」→ 确认（弹窗显示将执行的完整命令）→ 自动停止服务 → 执行 `cmd /C "D:\Programs\nodejs\npm.cmd" install -g @deepseek-ai/dsh@latest` → npm 输出实时写入日志（来源标记 `update`）→ 按退出码提示成功/失败 → 成功自动重启 DSH。更新过程按钮自动禁用，防止重复操作。包名可通过设置里的「检测全局包名」（`npm list -g --depth=0`）确认。
-
-## 三、验收清单
-
-| # | 项目 | 结果 |
+| 日志 | 路径 | 内容 |
 |---|---|---|
-| 1 | 双击无终端窗口 | release 版设置 `windows_subsystem = "windows"` + `CREATE_NO_WINDOW` |
-| 2 | 全程一个窗口、不开浏览器 | DSH 页面内嵌主窗口（多 Webview），启动固定带 `--no-open` |
-| 3 | 自动启动 | 双击即自动拉起 `cmd /C dsh.cmd web --port 3080 --no-open` |
-| 4 | 就绪前等待提示，就绪后加载 | Rust 端 TCP+HTTP 轮询，就绪才创建内嵌 Webview；默认等 300 秒，可设 0 无限等 |
-| 5 | 崩溃立报错 | 轮询同时 `try_wait` 监控进程，退出即停并显示最后一条报错 |
-| 6/7 | 关窗无残留 | `taskkill /PID <pid> /T /F` + Job Object(KILL_ON_JOB_CLOSE) 双保险 |
-| 8 | 重开正常 | 配置持久化于 `%APPDATA%\com.dsh.desktop\config.json` |
-| 9/10 | 更新与重启 | 见"更新 DSH" |
-| 11 | 不内置运行时 | 仅调用本机 npm/dsh |
-| 12 | 免本地构建 | GitHub Actions windows-latest 全自动 |
-| 13 | 开机自启 + 托盘 | 官方 autostart 插件；自启静默托盘化 + 延迟 12 秒；关窗=托盘，托盘菜单退出 |
-| 14 | 刷新页面 | 只刷新内嵌 DSH 网页；后台 DSH 服务不重启；保留配置端口与当前地址 |
+| Desktop 日志 | `%APPDATA%\com.dsh.desktop\desktop.log` | launcher/update/setup 事件 + DSH stdout/stderr 镜像 |
+| DSH 输出日志 | `%USERPROFILE%\.dsh\logs\dsh.log` | DSH 原始输出（跟随家目录设置：`<家目录>\logs\dsh.log`） |
 
-## 四、故障排查
+UI 支持：「日志」实时面板（自动滚动/清空）、**打开日志目录**、**复制错误信息**（错误/端口占用状态下出现）、**复制日志**。DSH 的 stdout/stderr 绝不隐藏：实时进日志面板并同时写入上述两个文件。
 
-- **提示找不到 dsh.cmd / npm.cmd**：设置 → 浏览选择正确路径（dsh.cmd 通常在 `%APPDATA%\npm\`，npm.cmd 在 Node.js 安装目录）。
-- **启动后秒退**：看「日志」中 DSH 的原生报错；常见原因是 DSH 家目录配置错误导致 DSH 找不到配置。
-- **等待超时被停止**：冷启动确实慢的话，设置里把超时调大或设为 `0`（一直等待）。
-- **端口被占用**：确认是否已有 DSH 在跑（选择"连接现有服务"），或在任务管理器中自行处理后改端口/重启。
-- **更新失败**：查看日志中 npm 的完整输出；多为网络问题或全局目录权限（本程序不请求管理员权限）。
-- **WebView2 缺失**：NSIS/MSI 安装包会自动引导下载 WebView2 运行时（Win10 一般已随 Edge 安装）。
-- **关了窗口以为退出了**：点 X 是最小化到托盘，程序和 DSH 都还在后台运行；要真正退出请用托盘右键菜单「退出」。
-- **开机自启没生效**：确认设置开关已开启（或托盘菜单有勾选）；检查 `reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "DSH Desktop"`；注意免安装 portable exe 若被移动路径需重新开启一次开关。
+## 故障排查（Troubleshooting)
 
-## 五、本项目不做的事
+- **未找到 Node.js** — 到 <https://nodejs.org> 安装 LTS；或在设置里点「自动检测」/手动浏览选择。
+- **未找到 npm** — 通常装好 Node.js 即有；npm.cmd 与 node.exe 同目录（如 `C:\Program Files\nodejs\npm.cmd`）。
+- **未找到 DSH** — 执行 `npm install -g @deepseek-ai/dsh`（或用向导），或在设置中指向已有 `dsh.cmd`（通常在 `%APPDATA%\npm\`）。
+- **端口被占用** — 选「连接现有服务」（若是另一个 DSH 实例）、在设置中修改端口、或在任务管理器自行处理占用进程；本程序绝不强杀。
+- **DSH 启动超时** — 冷启动慢属正常；调大超时或设为 `0`（进程活着就一直等）。
+- **DSH 启动后立即退出** — 看红色错误行（最后一条 stderr）与完整日志；常见原因：家目录配置错误、全局安装损坏、DSH 自身配置冲突。
+- **配置路径无效** — 错误会给出具体路径；在设置中修正即可（自动检测通常能修复）。
+- **关了窗口还在运行** — 默认点 X 是隐藏到托盘；请用托盘菜单「退出」。可在设置「点击窗口 X 时」修改行为。
+- **托盘点不开窗口** — 现已实现 show/unminimize/set_focus + 重绘兜底；如仍遇到，请附 desktop.log 反馈。
+- **更新失败** — 查看日志里 npm 的完整输出；多为网络问题或全局目录权限不足（本程序从不请求管理员权限）。
+- **WebView2 缺失** — NSIS/MSI 安装包会引导安装 WebView2 运行时。
 
-- 不读取/修改你的 DSH 用户配置目录（`~/.dsh` 仅作为 `DSH_HOME` 传给 DSH 本身）
-- 不打印或上传 API Key / credentials / 环境变量
-- 不强杀未知端口占用进程，不使用 `taskkill /IM node.exe`
-- 不内置 Node.js / DSH / 便携运行时
+## FAQ
+
+**内置 Node.js 或 DSH 吗？**
+否。既不内置也不嵌入，更不部署便携运行时；程序只使用你自己安装的官方版本（必要时引导你在线安装官方包）。
+
+**配置存在哪里？**
+`%APPDATA%\com.dsh.desktop\config.json` —— 当前用户目录，无需管理员权限，绝不在 Program Files。
+
+**用什么端口？**
+默认 3080，可在设置页修改（1~65535，带校验）。见「默认端口」。
+
+**会管理不是它启动的 DSH 进程吗？**
+不会。只按 PID + Job Object 结束自己启动的进程树；外部服务只能「连接查看」，退出时不受影响。
+
+**关闭窗口等于退出吗？**
+默认不是——隐藏到托盘。可在设置把关闭按钮改为「退出程序」。
+
+**为什么开机自启要等 12 秒？**
+刚登录时磁盘 IO 高峰、Node/网络未必就绪，延迟可避免大多数超时失败；等待期间点「停止」可取消。
+
+## 许可证（License）
+
+以 MIT 许可证发布（如仓库另有 LICENSE 文件，以其为准）。

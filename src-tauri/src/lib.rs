@@ -1,4 +1,6 @@
 mod config;
+mod detect;
+mod logger;
 mod process;
 
 use std::time::Duration;
@@ -47,6 +49,15 @@ pub fn run(launched_by_autostart: bool) {
             process::is_autostart_enabled,
             process::set_autostart,
             process::was_launched_by_autostart,
+            // 工具命令
+            process::check_port,
+            process::open_log_dir,
+            process::open_in_browser,
+            process::detect_environment,
+            // 首次运行引导安装
+            process::setup_install_node,
+            process::setup_install_dsh,
+            process::finish_setup,
         ])
         .setup(move |app| {
             // ---- 1. 主窗口只在手动启动（非开机自启）时立即显示并聚焦。
@@ -110,13 +121,7 @@ pub fn run(launched_by_autostart: bool) {
                             match result {
                                 Err(e) => {
                                     let line = format!("[launcher] 切换开机自启失败：{}", e);
-                                    let _ = app_handle.emit(
-                                        "dsh-log",
-                                        process::LogEvent {
-                                            stream: "launcher".to_string(),
-                                            line,
-                                        },
-                                    );
+                                    process::log_launcher(app_handle, &line);
                                 }
                                 Ok(()) => {
                                     let new_state = !currently;
@@ -128,13 +133,7 @@ pub fn run(launched_by_autostart: bool) {
                                         "[launcher] 开机自启已{}。",
                                         if new_state { "开启" } else { "关闭" }
                                     );
-                                    let _ = app_handle.emit(
-                                        "dsh-log",
-                                        process::LogEvent {
-                                            stream: "launcher".to_string(),
-                                            line,
-                                        },
-                                    );
+                                    process::log_launcher(app_handle, &line);
                                     // 通知前端同步设置开关
                                     let _ = app_handle.emit(
                                         "autostart-changed",
@@ -177,11 +176,20 @@ pub fn run(launched_by_autostart: bool) {
             Ok(())
         })
         .on_window_event(|window, event| match event {
-            // 拦截主窗口关闭：阻止销毁，改为隐藏到托盘（X 不再退出程序）
+            // 拦截主窗口关闭：按设置页「点击窗口 X 时」决定隐藏到托盘或退出程序
             WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
-                api.prevent_close();
-                // 直接用事件中的窗口句柄隐藏，避免窗口查找失败导致点 X 无反应
-                let _ = window.hide();
+                let quit_on_close = {
+                    let app = window.app_handle();
+                    config::load(app).close_action.trim().eq_ignore_ascii_case("quit")
+                };
+                if quit_on_close {
+                    // 退出程序：结束本次启动的 DSH 进程树（RunEvent::Exit 兜底 cleanup 会执行）
+                    window.app_handle().exit(0);
+                } else {
+                    api.prevent_close();
+                    // 直接用事件中的窗口句柄隐藏，避免窗口查找失败导致点 X 无反应
+                    let _ = window.hide();
+                }
             }
             // 窗口尺寸变化时同步内嵌 DSH Webview 的大小（工具栏 43.2px 之下填满）
             WindowEvent::Resized(_) if window.label() == "main" => {

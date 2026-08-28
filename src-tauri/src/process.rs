@@ -2014,16 +2014,16 @@ pub fn set_language(app: AppHandle, lang: String) -> Result<(), String> {
     let old = cfg.language.clone();
 
     if let Err(e) = config::set_ui_language_override(&app, &lang) {
-        log_launcher(&app, i18n::fmt("err_lang_persist_fail", &[&e]));
+        log_launcher(&app, &i18n::fmt("err_lang_persist_fail", &[&e]));
     }
     // 家目录可能还不存在：sync_dsh_locale 内部会创建目录与文件，best-effort
     if let Err(e) = config::sync_dsh_locale(&cfg.dsh_home_dir, &lang) {
-        log_launcher(&app, i18n::fmt("err_locale_sync_fail", &[&e]));
+        log_launcher(&app, &i18n::fmt("err_locale_sync_fail", &[&e]));
     }
     i18n::set_lang(&lang);
     crate::refresh_tray_texts(&app);
     if old != lang {
-        log_launcher(&app, i18n::fmt("log_lang_changed", &[&lang]));
+        log_launcher(&app, &i18n::fmt("log_lang_changed", &[&lang]));
     }
     Ok(())
 }

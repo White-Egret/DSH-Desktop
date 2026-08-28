@@ -59,6 +59,7 @@ pub fn run(launched_by_autostart: bool) {
             process::setup_install_node,
             process::setup_install_dsh,
             process::finish_setup,
+            process::set_language,
         ])
         .setup(move |app| {
             // ---- 0. 按用户配置初始化界面语言（后续所有 launcher 日志/托盘菜单文案跟随） ----

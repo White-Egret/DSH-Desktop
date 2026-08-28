@@ -7,7 +7,7 @@ A lightweight Windows 10/11 desktop app (Tauri v2 + Rust + vanilla HTML/CSS/JS) 
 > - This desktop does **not** bundle Node.js.
 > - This desktop does **not** bundle DSH.
 > - It does not ship or deploy any portable Node/DSH runtime either.
-> - Users must install Node.js and DSH themselves (the first-run wizard can guide you; see [Prerequisites](#prerequisites)).
+> - Users must install Node.js and DSH from choice (the first-run wizard can guide you through this; see [Prerequisites](#prerequisites)).
 
 ## Overview
 

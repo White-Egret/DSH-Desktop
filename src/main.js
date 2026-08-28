@@ -535,6 +535,23 @@ async function runSetupWizard() {
   $('wiz-log').classList.add('hidden');
   $('wiz-log').textContent = '';
   $('wiz-progress').classList.add('hidden');
+  // 第一步：语言选择（固定双语展示）。选完语言再检测环境，
+  // 这样检测/安装/进度文案从一开始就是用户所选语言。
+  $('wiz-step-lang').classList.remove('hidden');
+  $('wiz-btn-finish').classList.add('hidden');
+}
+
+async function onWizLanguage(lang) {
+  // 先切前端词典并刷新 DOM，后续向导文案立即变为所选语言
+  I18N.setLang(lang);
+  I18N.applyDom();
+  $('wiz-step-lang').classList.add('hidden');
+  // 后端：托盘文案、DSH settings.yaml、sidecar 持久化（best-effort，失败不阻断）
+  try {
+    await invoke('set_language', { lang });
+  } catch (e) {
+    toast(t('toast_lang_fail', e), true);
+  }
   appendLog('launcher', t('wiz_first_run_log'));
   await wizDetect();
 }
@@ -740,6 +757,9 @@ function bindUI() {
   });
 
   // ---- 首次运行引导向导按钮 ----
+  // 第一步语言选择：固定双语按钮（不挂 data-i18n，永不被词典改写）
+  $('wiz-btn-lang-en').onclick = () => onWizLanguage('en');
+  $('wiz-btn-lang-zh').onclick = () => onWizLanguage('zh');
   $('wiz-btn-recheck').onclick = () => wizDetect();
   $('wiz-btn-recheck2').onclick = () => wizDetect();
   $('wiz-btn-skip-node').onclick = () => { appendLog('launcher', t('wiz_skip_node_log')); wizFinish(); };

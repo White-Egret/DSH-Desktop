@@ -5,8 +5,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -347,6 +347,8 @@ pub(crate) fn apply_no_window(_cmd: &mut Command) {}
 
 /// 子进程输出逐行读取并转发到前端日志面板（绝不吞掉 stdout/stderr）。
 /// 同时落盘：所有行 → desktop.log；DSH 进程的 stdout/stderr 额外 → <DSH家目录>\logs\dsh.log
+/// `fetch_counter`：可选，每读到一行 npm 的 http fetch 记录就 +1，
+/// 供引导安装 DSH 时在界面上显示「已下载 N 个包文件」的进度。
 fn spawn_log_reader(
     app: AppHandle,
     out: impl Read + Send + 'static,
@@ -354,6 +356,7 @@ fn spawn_log_reader(
     event: &'static str,
     track_stderr: bool,
     dsh_file: Option<PathBuf>,
+    fetch_counter: Option<std::sync::Arc<AtomicUsize>>,
 ) {
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
@@ -379,6 +382,14 @@ fn spawn_log_reader(
                 continue;
             }
             let l = decode_console_output(&raw);
+
+            // npm 的 http 日志行（loglevel=http 时形如 "npm http fetch GET 200 …"），
+            // 每行代表一次 registry 请求 → 作为「已下载包文件数」的进度依据
+            if let Some(c) = fetch_counter.as_ref() {
+                if l.contains("http fetch") {
+                    c.fetch_add(1, Ordering::Relaxed);
+                }
+            }
 
             if track_stderr && stream == "stderr" {
                 state.set_last_stderr(&l);
@@ -706,10 +717,10 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
     // DSH 输出同时镜像写入 <DSH 家目录>\logs\dsh.log（要求四.2）
     let dsh_log_file = logger::dsh_log_path(&cfg.dsh_home_dir);
     if let Some(so) = child.stdout.take() {
-        spawn_log_reader(app.clone(), so, "stdout", "dsh-log", false, Some(dsh_log_file.clone()));
+        spawn_log_reader(app.clone(), so, "stdout", "dsh-log", false, Some(dsh_log_file.clone()), None);
     }
     if let Some(se) = child.stderr.take() {
-        spawn_log_reader(app.clone(), se, "stderr", "dsh-log", true, Some(dsh_log_file));
+        spawn_log_reader(app.clone(), se, "stderr", "dsh-log", true, Some(dsh_log_file), None);
     }
 
     // Job Object 兜底：即使本程序异常退出，Windows 内核也会结束 DSH 进程树
@@ -1232,10 +1243,10 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
             );
 
             if let Some(so) = child.stdout.take() {
-                spawn_log_reader(app2.clone(), so, "update", "update-log", false, None);
+                spawn_log_reader(app2.clone(), so, "update", "update-log", false, None, None);
             }
             if let Some(se) = child.stderr.take() {
-                spawn_log_reader(app2.clone(), se, "update", "update-log", false, None);
+                spawn_log_reader(app2.clone(), se, "update", "update-log", false, None, None);
             }
 
             child
@@ -1472,8 +1483,9 @@ fn resolve_latest_lts_version(last_err: &mut String) -> Option<String> {
     let _ = std::fs::remove_file(&dest);
 
     let mut curl_err = String::new();
-    let downloaded = try_download_curl(&url, &dest, &mut curl_err)
-        || try_download_powershell(&url, &dest).is_ok();
+    let downloaded =
+        try_download_curl(&url, &dest, &mut curl_err, None)
+            || try_download_powershell(&url, &dest).is_ok();
     if !downloaded {
         *last_err = if curl_err.trim().is_empty() {
             i18n::t("setup_no_dl_tool").to_string()
@@ -1546,8 +1558,9 @@ fn install_node_blocking(app: &AppHandle) -> Result<String, String> {
     );
 
     // 方式一：curl.exe（Windows 10 1803+ 自带）；失败则回退 PowerShell Invoke-WebRequest
+    // curl 下载时实时回报进度（MB / 百分比）；PS 回退路径拿不到流式落盘，只有提示行
     let mut last_err = i18n::t("setup_no_dl_tool").to_string();
-    let via_curl = try_download_curl(&url, &dest, &mut last_err);
+    let via_curl = try_download_curl(&url, &dest, &mut last_err, Some(app));
     if !via_curl {
         setup_progress(
             app,
@@ -1641,30 +1654,128 @@ fn install_node_blocking(app: &AppHandle) -> Result<String, String> {
     }
 }
 
-fn try_download_curl(url: &str, dest: &Path, last_err: &mut String) -> bool {
+/// 把字节数格式化成 MB（保留 1 位小数）。
+fn mb_str(bytes: u64) -> String {
+    format!("{:.1}", bytes as f64 / 1048576.0)
+}
+
+/// 按 `Content-Length` + 已落盘字节数，向前端/日志发一次下载进度。
+fn emit_download_progress(app: &AppHandle, done: u64, total: Option<u64>) {
+    let msg = match total {
+        Some(t) if t > 0 => {
+            let pct = (((done as f64) / (t as f64)) * 100.0).round().max(0.0) as u64;
+            i18n::fmt("setup_dl_progress", &[&pct, &mb_str(done), &mb_str(t)])
+        }
+        _ => i18n::fmt("setup_dl_progress_unknown", &[&mb_str(done)]),
+    };
+    setup_progress(app, "download", &msg);
+}
+
+/// 用 curl HEAD 探测下载总大小（失败只影响百分比显示，不阻断下载）。
+/// `-sIL`：静默 + HEAD + 跟随重定向；取最后一个 content-length（重定向后的生效值）。
+fn probe_content_length(curl: &Path, url: &str) -> Option<u64> {
+    let args: Vec<String> = vec![
+        "-sIL".into(),
+        "--max-time".into(),
+        "20".into(),
+        url.to_string(),
+    ];
+    let out = run_cmd_capture(&curl.to_string_lossy(), &args, "", Duration::from_secs(25)).ok()?.1;
+    let mut len: Option<u64> = None;
+    for line in out.lines() {
+        let lower = line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("content-length:") {
+            if let Ok(v) = rest.trim().parse::<u64>() {
+                len = Some(v); // 多次重定向时保留最后一个
+            }
+        }
+    }
+    len
+}
+
+/// curl 下载官方 Node.js 安装包：spawn 后轮询落盘文件大小，
+/// 通过 setup-status 事件实时回报「已下载字节 / 百分比」（约 0.4s 一次）。
+/// 返回 true 表示下载成功；失败原因写入 last_err。
+fn try_download_curl(
+    url: &str,
+    dest: &Path,
+    last_err: &mut String,
+    app: Option<&AppHandle>,
+) -> bool {
     let Some(curl) = detect::where_lookup("curl.exe") else {
         *last_err = i18n::t("setup_no_curl").to_string();
         return false;
     };
+    let total = probe_content_length(&curl, url);
+
     let args: Vec<String> = vec![
         "-fL".into(),
         "--retry".into(),
         "2".into(),
         "--connect-timeout".into(),
         "15".into(),
+        "-sS".into(), // 静默（进度由我们自己按文件大小计算），但保留错误输出
         "-o".into(),
         dest.to_string_lossy().to_string(),
         url.to_string(),
     ];
-    match run_cmd_capture(&curl.to_string_lossy(), &args, "", Duration::from_secs(15 * 60)) {
-        Ok((true, _)) => true,
-        Ok((false, out)) => {
-            *last_err = i18n::fmt("setup_curl_fail", &[&out.trim()]);
-            false
-        }
+    let mut cmd = Command::new(&curl);
+    for a in &args {
+        cmd.arg(a);
+    }
+    apply_no_window(&mut cmd);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
         Err(e) => {
-            *last_err = e;
-            false
+            *last_err = e.to_string();
+            return false;
+        }
+    };
+
+    let started = Instant::now();
+    let mut last_report = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => {
+                let mut err_pipe = child.stderr.take();
+                let err_text = decode_console_output(&drain_pipe(&mut err_pipe));
+                if st.success() {
+                    // 收尾：无论是否发过，都补一次 100% 的进度
+                    if let Some(app) = app {
+                        let done = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+                        emit_download_progress(app, done, total);
+                    }
+                    return true;
+                }
+                *last_err = i18n::fmt("setup_curl_fail", &[&err_text.trim()]);
+                return false;
+            }
+            Ok(None) => {
+                if let Some(app) = app {
+                    if last_report.elapsed() >= Duration::from_millis(400) {
+                        last_report = Instant::now();
+                        let done = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+                        emit_download_progress(app, done, total);
+                    }
+                }
+                if started.elapsed() >= Duration::from_secs(15 * 60) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    *last_err = i18n::fmt(
+                        "setup_dl_timeout",
+                        &[&"900".to_string(), &detect::NODE_DOWNLOAD_PAGE.to_string()],
+                    );
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => {
+                *last_err = e.to_string();
+                return false;
+            }
         }
     }
 }
@@ -1740,12 +1851,37 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
             i18n::fmt("setup_dsh_executing", &[&npm, &pkg]),
         );
 
+        // 下载进度：计数 npm http fetch 行，每秒向向导进度区回报一次。
+        // 放在安装闭包外层：进度标志要在 npm 进程结束后仍可置位。
+        let fetch_counter = Arc::new(AtomicUsize::new(0));
+        let npm_done = Arc::new(AtomicBool::new(false));
+        {
+            let app_tick = app2.clone();
+            let counter = fetch_counter.clone();
+            let done_flag = npm_done.clone();
+            let started = Instant::now();
+            std::thread::spawn(move || {
+                while !done_flag.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(1000));
+                    if done_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let n = counter.load(Ordering::Relaxed);
+                    let secs = started.elapsed().as_secs();
+                    setup_progress(&app_tick, "install", &i18n::fmt("setup_npm_progress", &[&n, &secs]));
+                }
+            });
+        }
+
         let outcome: Result<i32, String> = (|| {
             let mut cmd = Command::new("cmd");
             cmd.arg("/C").arg(&npm).arg("install").arg("-g").arg(&pkg);
             cmd.current_dir(&cwd);
             // 同上：koffi 等原生依赖的 prebuild 脚本用裸 `node`，PATH 必须包含 node 目录
             cmd.env("PATH", detect::child_path_for(&[npm.as_str()]));
+            // loglevel=http：npm 会把每次 registry 请求打成一行日志，
+            // 日志读取线程据此给界面进度（「已下载 N 个包文件」）计数
+            cmd.env("npm_config_loglevel", "http");
             apply_no_window(&mut cmd);
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -1764,11 +1900,29 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
                 }
             }
 
+            // 下载进度：日志读取线程会对每行 http fetch 计数（计数器在外层）
+
             if let Some(so) = child.stdout.take() {
-                spawn_log_reader(app2.clone(), so, "update", "dsh-log", false, None);
+                spawn_log_reader(
+                    app2.clone(),
+                    so,
+                    "update",
+                    "dsh-log",
+                    false,
+                    None,
+                    Some(fetch_counter.clone()),
+                );
             }
             if let Some(se) = child.stderr.take() {
-                spawn_log_reader(app2.clone(), se, "update", "dsh-log", false, None);
+                spawn_log_reader(
+                    app2.clone(),
+                    se,
+                    "update",
+                    "dsh-log",
+                    false,
+                    None,
+                    Some(fetch_counter.clone()),
+                );
             }
 
             let deadline = Instant::now() + Duration::from_secs(15 * 60);
@@ -1787,6 +1941,7 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
                 }
             }
         })();
+        npm_done.store(true, Ordering::Relaxed);
 
         {
             let st = app2.state::<AppState>();
@@ -1846,4 +2001,29 @@ pub fn finish_setup(app: AppHandle) -> Result<ConfigReport, String> {
     let _ = config::sync_dsh_locale(&cfg.dsh_home_dir, &cfg.language);
     log_launcher(&app, i18n::t("log_setup_done"));
     Ok(get_config(app))
+}
+
+/// 向导第一步「选择语言」：立即切换本进程与托盘文案，同步 DSH 的
+/// settings.yaml，并把选择持久化到 ui-language sidecar（config.json 生成前
+/// 的唯一载体；finish_setup 之后以 config.json 为准）。
+/// 不写 config.json —— 否则 first_run 语义被破坏，用户中途中断重开后向导会消失。
+#[tauri::command]
+pub fn set_language(app: AppHandle, lang: String) -> Result<(), String> {
+    let lang = if lang.eq_ignore_ascii_case("en") { "en".to_string() } else { "zh".to_string() };
+    let cfg = config::load(&app);
+    let old = cfg.language.clone();
+
+    if let Err(e) = config::set_ui_language_override(&app, &lang) {
+        log_launcher(&app, i18n::fmt("err_lang_persist_fail", &[&e]));
+    }
+    // 家目录可能还不存在：sync_dsh_locale 内部会创建目录与文件，best-effort
+    if let Err(e) = config::sync_dsh_locale(&cfg.dsh_home_dir, &lang) {
+        log_launcher(&app, i18n::fmt("err_locale_sync_fail", &[&e]));
+    }
+    i18n::set_lang(&lang);
+    crate::refresh_tray_texts(&app);
+    if old != lang {
+        log_launcher(&app, i18n::fmt("log_lang_changed", &[&lang]));
+    }
+    Ok(())
 }

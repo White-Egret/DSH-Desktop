@@ -184,10 +184,12 @@ fn legacy_config_path() -> Option<PathBuf> {
 
 pub fn load(app: &AppHandle) -> Config {
     let path = config_path(app);
+    let mut first_run = false;
     let mut cfg = if let Ok(s) = std::fs::read_to_string(&path) {
         serde_json::from_str::<Config>(&s).unwrap_or_default()
     } else {
         // 自动迁移旧目录 com.dsh.launcher → com.dsh.desktop，避免升级后配置丢失
+        first_run = true;
         let mut migrated = None;
         if let Some(old) = legacy_config_path() {
             if old != path {
@@ -201,6 +203,14 @@ pub fn load(app: &AppHandle) -> Config {
         }
         migrated.unwrap_or_default()
     };
+    // 首次运行（config.json 尚未生成）时，向导「选择语言」一步的选择存在
+    // ui-language sidecar 里；这里取它作为界面语言，等 finish_setup 真正
+    // 写出 config.json 后就以其 language 字段为准（sidecar 随 save 一并清除）。
+    if first_run {
+        if let Some(lang) = read_ui_language_override(app) {
+            cfg.language = lang;
+        }
+    }
     // 缺失/失效的路径用本机检测结果补齐（不写盘，写盘仍由用户「保存」触发）
     autofill_from_detection(&mut cfg);
     cfg
@@ -216,5 +226,37 @@ pub fn save(app: &AppHandle, cfg: &Config) -> Result<(), String> {
     std::fs::write(&path, s).map_err(|e| {
         i18n::fmt("err_cfg_write", &[&path.display().to_string(), &e.to_string()])
     })?;
+    // config.json 一旦存在，语言以其中的 language 字段为准，sidecar 完成使命
+    let _ = std::fs::remove_file(ui_language_sidecar_path(app));
     Ok(())
+}
+
+// ---------- 界面语言 sidecar（首次运行向导专用） ----------
+
+/// sidecar 路径：<config 目录>\ui-language（内容只有 "zh" / "en" 一行）。
+/// 仅在 config.json 尚不存在（first_run）期间生效：向导第一步选完语言立即
+/// 持久化，中途中断重开也不会丢；finish_setup 写出 config.json 后即失效。
+fn ui_language_sidecar_path(app: &AppHandle) -> PathBuf {
+    config_dir(app).join("ui-language")
+}
+
+/// 记录向导里选择的语言（写入失败由调用方记录日志，不阻断界面切换）。
+pub fn set_ui_language_override(app: &AppHandle, lang: &str) -> Result<(), String> {
+    let dir = config_dir(app);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let value = if lang.eq_ignore_ascii_case("en") { "en" } else { "zh" };
+    std::fs::write(ui_language_sidecar_path(app), value).map_err(|e| e.to_string())
+}
+
+/// 读取 sidecar；内容非法（被手改）时忽略，回落默认 zh。
+fn read_ui_language_override(app: &AppHandle) -> Option<String> {
+    let raw = std::fs::read_to_string(ui_language_sidecar_path(app)).ok()?;
+    let t = raw.trim();
+    if t.eq_ignore_ascii_case("en") {
+        Some("en".to_string())
+    } else if t.eq_ignore_ascii_case("zh") {
+        Some("zh".to_string())
+    } else {
+        None
+    }
 }

@@ -164,6 +164,7 @@
     wiz_first_run_log: '[launcher] 首次运行：开始环境检测（Node.js / npm / DSH）…',
     wiz_done_log: '[launcher] 初始化完成。可随时通过工具栏「设置」修改端口与路径；「设置 → 语言」切换中英文界面。',
     toast_setup_save_fail: '保存初始配置失败: {0}',
+    toast_lang_fail: '语言切换失败（本次会话仍会跟随您的选择，重启后恢复）: {0}',
     toast_detect_fail_short: '检测失败: {0}',
     log_locale_synced: '[launcher] DSH 界面语言已同步写入 settings.yaml，点工具栏「重启」即可切换 DSH 界面语言。',
   };
@@ -314,6 +315,7 @@
     wiz_first_run_log: '[launcher] First run: starting the environment check (Node.js / npm / DSH)…',
     wiz_done_log: '[launcher] Setup complete. You can change the port / paths anytime under "Settings"; the UI language lives under Settings → Language.',
     toast_setup_save_fail: 'Failed to save the initial config: {0}',
+    toast_lang_fail: 'Failed to switch the language (this session still follows your choice; it reverts after a restart): {0}',
     toast_detect_fail_short: 'Check failed: {0}',
     log_locale_synced: '[launcher] DSH UI language synced into settings.yaml — click "Restart" in the toolbar to switch DSH\'s own interface language.',
   };

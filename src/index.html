@@ -181,6 +181,27 @@
        只引导在线下载官方 Node.js LTS 安装包或执行 npm install -g @deepseek-ai/dsh。 -->
   <div id="setup-wizard" class="setup-wizard hidden">
     <div class="setup-card">
+      <!-- 第一步：选择界面语言。固定双语展示（不挂 data-i18n），
+           选择后立即生效：向导后续文案、Desktop 主界面、托盘菜单、
+           DSH 自身界面（写入 settings.yaml）与安装提示全部跟随。 -->
+      <div id="wiz-step-lang" class="wiz-step lang-step">
+        <div class="wiz-step-title lang-title">Language / 语言</div>
+        <div class="wiz-step-body lang-note">
+          Please choose your language to proceed.<br />
+          请选择您要使用的语言，再进入下一步。（之后可随时在「设置 ⚙」里修改 / You can change it anytime in Settings.）
+        </div>
+        <div class="row gap left lang-row">
+          <button id="wiz-btn-lang-en" class="btn lang-btn" type="button">
+            <span class="lang-main">English</span>
+            <span class="lang-sub">Continue in English</span>
+          </button>
+          <button id="wiz-btn-lang-zh" class="btn lang-btn" type="button">
+            <span class="lang-main">中文（简体）</span>
+            <span class="lang-sub">以中文继续</span>
+          </button>
+        </div>
+      </div>
+
       <div class="modal-title" data-i18n="wiz_title">欢迎使用 DSH Desktop —— 环境检查</div>
       <div class="setup-desc" data-i18n-html="wiz_desc_html">
         本程序<b>不内置 Node.js 和 DSH</b>，需要本机已安装：<br />

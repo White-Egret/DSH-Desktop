@@ -208,4 +208,4 @@ Right after login, disk IO spikes and Node/network may not be ready; the delay a
 
 ## License
 
-Released under the MIT License (choose otherwise per your repository needs — adding a `LICENSE` file overrides this note).
+Released under the [MIT License](LICENSE).

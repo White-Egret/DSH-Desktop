@@ -484,7 +484,7 @@ async function checkVersions() {
 
 function confirmUpdate() {
   if (!config) return;
-  $('update-cmd-preview').textContent = `cmd /C "${config.npm_path}" ${config.update_args}`;
+  $('update-cmd-preview').textContent = `"${config.npm_path}" ${config.update_args}`;
   showModal('update-modal');
 }
 

@@ -440,15 +440,17 @@ fn drain_pipe(r: &mut Option<impl Read>) -> Vec<u8> {
 // 又会对整条命令行二次解析，于是 `extra_args` 填 `a&calc.exe` 就成了第二条命令。
 //
 // 修法分三层：
-// 1) .exe 目标直接 CreateProcess，完全绕开 cmd.exe（curl.exe / powershell.exe 走这条）；
+// 1) 非批处理目标（.exe / 无扩展名，如 curl.exe、powershell）直接 CreateProcess，
+//    链路上完全没有 cmd.exe；
 // 2) .cmd/.bat 只能经 cmd.exe，改由我们自己掌控引号：每个令牌成对加引号，
 //    外层再用 `/d`（跳过 AutoRun 钩子）+ `/s /c "…"`（cmd 无条件剥掉最外层引号）；
 // 3) 会进命令行的配置字段先过校验：参数类走白名单，路径类拒绝引号与 `% !`。
 //    （cmd 即使在双引号内也会展开 `%VAR%`，所以 `%` 只能拒绝、无法转义。）
 
 /// 允许出现在「传给 npm / DSH 的参数」里的字符。
-/// 合法的 dsh / npm 参数只需要字母数字与 `- _ . , : = + @ / ~ \`；
-/// `& | < > ^ % ! " ' \` $ ( ) ;` 等一概拒绝，宁可报清晰错误也不让这类值进入执行路径。
+///
+/// 合法的 dsh / npm 参数只需要字母数字，以及 `- _ . , : = + @ / ~` 和路径分隔符；
+/// `& | < > ^ % ! " '` 等一概拒绝 —— 宁可报清晰错误，也不让这类值进入执行路径。
 fn is_safe_arg_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ',' | ':' | '=' | '+' | '@' | '/' | '\\' | '~')
 }
@@ -499,31 +501,41 @@ fn build_cmd_line(program: &str, args: &[String]) -> String {
     format!("/d /s /c \"{inner}\"")
 }
 
+/// 只有批处理 shim（npm.cmd / dsh.cmd / *.bat）在 Windows 上必须经 cmd.exe 执行。
+#[cfg(windows)]
+fn needs_cmd_shim(program: &str) -> bool {
+    matches!(
+        Path::new(program).extension().and_then(|e| e.to_str()),
+        Some(ext) if ext.eq_ignore_ascii_case("bat") || ext.eq_ignore_ascii_case("cmd")
+    )
+}
+
 /// 派生「调用 npm.cmd / dsh.cmd / curl.exe 等本机 CLI」的 Command。
-/// `.exe` 直接执行；`.cmd`/`.bat` 经 cmd.exe 但由我们自己拼引号（见上方注释）。
+///
+/// `.exe` 与无扩展名（如 `powershell`）直接 CreateProcess，链路上根本没有 cmd.exe；
+/// 只有 `.cmd`/`.bat` 才经 cmd.exe，此时命令行由我们自己加引号（见上方注释）。
+#[cfg(windows)]
 pub(crate) fn command_for(program: &str, args: &[String]) -> Result<Command, String> {
     validate_program_path(program)?;
-    #[cfg(windows)]
-    {
-        if Path::new(program)
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
-        {
-            let mut cmd = Command::new(program);
-            cmd.args(args);
-            return Ok(cmd);
-        }
+    if needs_cmd_shim(program) {
         use std::os::windows::process::CommandExt;
         let mut cmd = Command::new("cmd");
         cmd.raw_arg(build_cmd_line(program, args));
-        return Ok(cmd);
-    }
-    #[cfg(not(windows))]
-    {
+        Ok(cmd)
+    } else {
+        // 没有 cmd.exe 二次解析，交给 std 的标准转义（它正确处理引号与尾部反斜杠）
         let mut cmd = Command::new(program);
         cmd.args(args);
         Ok(cmd)
     }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn command_for(program: &str, args: &[String]) -> Result<Command, String> {
+    validate_program_path(program)?;
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    Ok(cmd)
 }
 
 /// 带超时地运行 <program> <args...> 并捕获输出（用于版本查询等小输出命令）

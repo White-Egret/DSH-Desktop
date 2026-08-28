@@ -36,7 +36,7 @@ pub fn t(key: &str) -> &'static str {
         "err_cwd_invalid" => if en { "Invalid configured path: the process working directory does not exist ({0}, derived from home dir {1}). Check the DSH home dir in Settings." } else { "配置路径无效：启动进程工作目录不存在（{0}，由家目录 {1} 推导）。请在「设置」中检查 DSH 家目录。" },
         "err_port_busy" => if en { "Port {0} is occupied by another process (possibly an already-running DSH, or another program). This app will not force-kill unknown processes." } else { "端口 {0} 已被其他进程占用（可能是已在运行的 DSH，也可能是其他程序）。本程序不会强制结束未知进程。" },
         "err_spawn_fail" => if en { "Failed to start DSH: {0} (path: {1}). Check that the path is valid and executable." } else { "启动 DSH 失败: {0}（路径: {1}）。请检查路径是否有效、程序是否有执行权限。" },
-        "log_start_cmd" => if en { "[launcher] Command: cmd /C \"{0}\" web --port {1} --no-open{2} (cwd: {3}, DSH_HOME: {4}, PID: {5}; DSH log file: {6})" } else { "[launcher] 启动命令: cmd /C \"{0}\" web --port {1} --no-open{2}（进程工作目录: {3}，DSH_HOME: {4}，PID: {5}；DSH 输出日志: {6}）" },
+        "log_start_cmd" => if en { "[launcher] Command: \"{0}\" web --port {1} --no-open{2} (cwd: {3}, DSH_HOME: {4}, PID: {5}; DSH log file: {6})" } else { "[launcher] 启动命令: \"{0}\" web --port {1} --no-open{2}（进程工作目录: {3}，DSH_HOME: {4}，PID: {5}；DSH 输出日志: {6}）" },
         "log_wait_ready" => if en { "[launcher] Waiting for DSH to become ready (default http://127.0.0.1:{0}{1})..." } else { "[launcher] 正在等待 DSH 就绪（默认 http://127.0.0.1:{0}{1}）..." },
         "wait_suffix_timeout" => if en { ", timeout {0} s" } else { "，超时 {0} 秒" },
         "wait_suffix_infinite" => if en { ", no timeout (waits while the DSH process is alive)" } else { "，无超时限制（DSH 进程存活期间持续等待）" },
@@ -81,6 +81,9 @@ pub fn t(key: &str) -> &'static str {
         "err_logdir_open" => if en { "Cannot open the log directory: {0}" } else { "无法打开日志目录: {0}" },
         "err_bad_url" => if en { "Invalid URL: {0}" } else { "非法链接: {0}" },
         "err_browser_open" => if en { "Cannot open the browser: {0}" } else { "无法打开浏览器: {0}" },
+        // 配置项里的 cmd 元字符（见 process.rs 的 command_for / validate_arg_token）
+        "err_cfg_arg_danger" => if en { "Unsafe {0} value \"{1}\": the character \"{2}\" is not allowed. This field is passed to the npm / DSH command line, so shell metacharacters (& | < > ^ % ! and quotes) are rejected; ordinary flags such as --host=127.0.0.1 or --no-open are unaffected." } else { "{0} 的值「{1}」不安全：含有不允许的字符「{2}」。该字段会作为参数交给 npm / DSH 的命令行，因此拒绝 shell 元字符（& | < > ^ % ! 及引号）；普通参数如 --host=127.0.0.1、--no-open 不受影响。" },
+        "err_cfg_prog_danger" => if en { "Unsafe program path \"{0}\": the character \"{1}\" is not allowed (cmd.exe could expand it or break the quoting). Please pick this file again in Settings." } else { "程序路径「{0}」不安全：含有不允许的字符「{1}」（可能被 cmd.exe 展开或破坏引号配对）。请在「设置」中重新选择该程序。" },
 
         // ---------- 版本 / 包检测 ----------
         "err_ver_flags" => if en { "Cannot read the local DSH version (--version / -v / -V all failed)" } else { "无法获取本地 DSH 版本（--version / -v / -V 均不可用）" },
@@ -157,7 +160,7 @@ pub fn t(key: &str) -> &'static str {
         // ---------- 首次运行引导：DSH ----------
         "err_task_busy" => if en { "An install task is already running" } else { "已有安装任务正在进行" },
         "setup_npm_missing" => if en { "npm.cmd not found ({0}). Install Node.js (which includes npm) first, or set the npm path in Settings." } else { "未找到 npm.cmd（{0}）。请先安装 Node.js（含 npm），或在「设置」中配置 npm 路径。" },
-        "setup_dsh_executing" => if en { "[setup] Running: cmd /C \"{0}\" install -g {1}" } else { "[setup] 正在执行: cmd /C \"{0}\" install -g {1}" },
+        "setup_dsh_executing" => if en { "[setup] Running: \"{0}\" install -g {1}" } else { "[setup] 正在执行: \"{0}\" install -g {1}" },
         "setup_npm_spawn_fail" => if en { "npm failed to start: {0} (wrong path or missing permission?)" } else { "npm 启动失败: {0}（路径错误或权限不足？）" },
         "setup_npm_timeout" => if en { "npm install timed out (15 minutes) and was aborted. Check your network and retry, or run the install command manually." } else { "npm 安装超时（15 分钟），已中止。请检查网络后重试，或手动执行安装命令。" },
         "setup_npm_wait_fail" => if en { "Failed while waiting for npm to exit: {0}" } else { "等待 npm 退出失败: {0}" },

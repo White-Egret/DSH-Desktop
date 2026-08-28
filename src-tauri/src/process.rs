@@ -433,18 +433,107 @@ fn drain_pipe(r: &mut Option<impl Read>) -> Vec<u8> {
     buf
 }
 
-/// 带超时地运行 cmd /C <program> <args...> 并捕获输出（用于版本查询等小输出命令）
+// ---------- 派生子进程的安全包装（HIGH-1：配置文本不得成为 shell 令牌） ----------
+//
+// 根因：Rust std 拼 Windows 命令行时遵循 MSVC 规则——只在令牌含空白 / `"` / `\` 时
+// 才加引号，`& | < > ^` 这类「无空白的 cmd 元字符」会原样写进命令行；而 cmd.exe
+// 又会对整条命令行二次解析，于是 `extra_args` 填 `a&calc.exe` 就成了第二条命令。
+//
+// 修法分三层：
+// 1) .exe 目标直接 CreateProcess，完全绕开 cmd.exe（curl.exe / powershell.exe 走这条）；
+// 2) .cmd/.bat 只能经 cmd.exe，改由我们自己掌控引号：每个令牌成对加引号，
+//    外层再用 `/d`（跳过 AutoRun 钩子）+ `/s /c "…"`（cmd 无条件剥掉最外层引号）；
+// 3) 会进命令行的配置字段先过校验：参数类走白名单，路径类拒绝引号与 `% !`。
+//    （cmd 即使在双引号内也会展开 `%VAR%`，所以 `%` 只能拒绝、无法转义。）
+
+/// 允许出现在「传给 npm / DSH 的参数」里的字符。
+/// 合法的 dsh / npm 参数只需要字母数字与 `- _ . , : = + @ / ~ \`；
+/// `& | < > ^ % ! " ' \` $ ( ) ;` 等一概拒绝，宁可报清晰错误也不让这类值进入执行路径。
+fn is_safe_arg_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ',' | ':' | '=' | '+' | '@' | '/' | '\\' | '~')
+}
+
+/// 校验单个参数令牌（已按空白切分，故不含空格）。
+pub(crate) fn validate_arg_token(field: &str, token: &str) -> Result<(), String> {
+    if let Some(c) = token.chars().find(|c| !is_safe_arg_char(*c)) {
+        return Err(i18n::fmt("err_cfg_arg_danger", &[&field, &token, &c]));
+    }
+    Ok(())
+}
+
+/// 校验一整串参数字段（按空白切分后逐令牌校验）。空串合法 = 没有附加参数。
+pub(crate) fn validate_arg_field(field: &str, value: &str) -> Result<(), String> {
+    for tok in value.split_whitespace() {
+        validate_arg_token(field, tok)?;
+    }
+    Ok(())
+}
+
+/// 校验要交给 cmd.exe 的可执行文件路径。
+/// 只拒绝会破坏引号配对 / 触发批处理二次展开的字符（`"` `%` `!` 与控制字符）；
+/// `&`、空格、括号等在成对双引号内是字面量，允许，避免误伤
+/// `C:\Program Files\A & B\npm.cmd` 这类合法目录名。
+pub(crate) fn validate_program_path(path: &str) -> Result<(), String> {
+    for c in path.chars() {
+        if c == '"' || c == '%' || c == '!' || (c as u32) < 0x20 {
+            return Err(i18n::fmt("err_cfg_prog_danger", &[&path, &c]));
+        }
+    }
+    Ok(())
+}
+
+/// 我们自己掌控引号的安全形式（仅 Windows 需要）。
+#[cfg(windows)]
+fn quote_token(tok: &str) -> String {
+    // 裁掉尾部反斜杠：否则 `"…\"` 会让引号配对失效，后面的内容被 cmd 重新解析
+    format!("\"{}\"", tok.trim_end_matches('\\'))
+}
+
+#[cfg(windows)]
+fn build_cmd_line(program: &str, args: &[String]) -> String {
+    let mut inner = quote_token(program);
+    for a in args {
+        inner.push(' ');
+        inner.push_str(&quote_token(a));
+    }
+    format!("/d /s /c \"{inner}\"")
+}
+
+/// 派生「调用 npm.cmd / dsh.cmd / curl.exe 等本机 CLI」的 Command。
+/// `.exe` 直接执行；`.cmd`/`.bat` 经 cmd.exe 但由我们自己拼引号（见上方注释）。
+pub(crate) fn command_for(program: &str, args: &[String]) -> Result<Command, String> {
+    validate_program_path(program)?;
+    #[cfg(windows)]
+    {
+        if Path::new(program)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+        {
+            let mut cmd = Command::new(program);
+            cmd.args(args);
+            return Ok(cmd);
+        }
+        use std::os::windows::process::CommandExt;
+        let mut cmd = Command::new("cmd");
+        cmd.raw_arg(build_cmd_line(program, args));
+        return Ok(cmd);
+    }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        Ok(cmd)
+    }
+}
+
+/// 带超时地运行 <program> <args...> 并捕获输出（用于版本查询等小输出命令）
 fn run_cmd_capture(
     program: &str,
     args: &[String],
     cwd: &str,
     timeout: Duration,
 ) -> Result<(bool, String), String> {
-    let mut cmd = Command::new("cmd");
-    cmd.arg("/C").arg(program);
-    for a in args {
-        cmd.arg(a);
-    }
+    let mut cmd = command_for(program, args)?;
     if !cwd.is_empty() {
         cmd.current_dir(cwd);
     }
@@ -682,18 +771,29 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
     // 本轮启动前清空上一次解析到的实际地址
     *state.detected_url.lock().unwrap() = None;
 
-    // 启动命令等价于：cmd /C "<dsh_path>" web --port <port> --no-open [extra_args]
+    // 启动命令等价于："<dsh_path>" web --port <port> --no-open [extra_args]
     // --no-open：DSH 官方参数，禁止其自动打开默认浏览器（Edge）
-    let mut cmd = Command::new("cmd");
-    cmd.arg("/C")
-        .arg(&cfg.dsh_path)
-        .arg("web")
-        .arg("--port")
-        .arg(cfg.port.to_string())
-        .arg("--no-open");
+    //
+    // extra_args 来自配置文件（%APPDATA%\com.dsh.desktop\config.json）——那是任何
+    // 同用户进程都能写的明文 JSON，且本程序会在开机自启时静默执行它，
+    // 所以必须在「使用点」再校验一次（保存时的校验挡不住手改/被改的文件）。
+    let port_str = cfg.port.to_string();
+    let mut launch_args: Vec<String> =
+        vec!["web".to_string(), "--port".to_string(), port_str, "--no-open".to_string()];
     for a in cfg.extra_args.split_whitespace() {
-        cmd.arg(a);
+        if let Err(e) = validate_arg_token("extra_args", a) {
+            set_status(app, "error", Some(e.clone()));
+            return Err(e);
+        }
+        launch_args.push(a.to_string());
     }
+    let mut cmd = match command_for(&cfg.dsh_path, &launch_args) {
+        Ok(c) => c,
+        Err(e) => {
+            set_status(app, "error", Some(e.clone()));
+            return Err(e);
+        }
+    };
     // 工作目录：DSH 家目录的上一级；DSH_HOME 指向家目录（DSH 在此读取配置）
     cmd.current_dir(&cwd);
     cmd.env("DSH_HOME", &cfg.dsh_home_dir);
@@ -955,6 +1055,13 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     if config.dsh_path.trim().is_empty() || config.npm_path.trim().is_empty() {
         return Err(i18n::t("err_paths_empty").to_string());
     }
+    // 这三个字段最终会拼成子进程的命令行，在保存入口就把 cmd 元字符挡掉，
+    // 用户能立刻在设置页看到原因（使用点还有第二道校验，手改的配置文件绕不过去）。
+    validate_arg_field("extra_args", &config.extra_args)?;
+    validate_arg_field("update_args", &config.update_args)?;
+    validate_arg_field("package_name", &config.package_name)?;
+    validate_program_path(&config.dsh_path)?;
+    validate_program_path(&config.npm_path)?;
     let old_lang = config::load(&app).language;
     config::save(&app, &config)?;
 
@@ -1061,6 +1168,8 @@ pub async fn connect_existing(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn check_versions(app: AppHandle) -> Result<VersionInfo, String> {
     let cfg = config::load(&app);
+    // package_name 会作为参数交给 `npm view`：先挡掉任何 cmd 元字符（宁可报错也不执行）
+    validate_arg_field("package_name", &cfg.package_name)?;
     let cwd = config::workspace_cwd(&cfg);
     let mut info = VersionInfo { local: None, latest: None, error: None };
 
@@ -1186,6 +1295,13 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
         return Err(msg);
     }
 
+    // 先校验将拼进 npm 命令行的参数：避免非法配置已经把 DSH 停掉了才报错
+    if let Err(e) = validate_arg_field("update_args", &cfg.update_args) {
+        state.updating.store(false, Ordering::SeqCst);
+        set_status(&app, "error", Some(e.clone()));
+        return Err(e);
+    }
+
     // 停止本程序启动的 DSH（外部进程模式不动）
     let st = current_status(&app);
     if st == "running" || st == "starting" {
@@ -1206,11 +1322,7 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
     let app2 = app.clone();
     std::thread::spawn(move || {
         let result: Result<i32, String> = (|| {
-            let mut cmd = Command::new("cmd");
-            cmd.arg("/C").arg(&cfg.npm_path);
-            for a in &args {
-                cmd.arg(a);
-            }
+            let mut cmd = command_for(&cfg.npm_path, &args)?;
             cmd.current_dir(&cwd);
             // npm.cmd 自身能找到 node，但它派生的安装脚本调的是裸 `node`：必须给出补好的 PATH
             cmd.env("PATH", detect::child_path_for(&[cfg.npm_path.as_str()]));
@@ -1839,6 +1951,11 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
         app.state::<AppState>().updating.store(false, Ordering::SeqCst);
         return Err(i18n::fmt("setup_npm_missing", &[&cfg.npm_path]));
     }
+    // 包名会作为参数交给 npm，同样必须是纯字面量
+    if let Err(e) = validate_arg_field("package_name", &cfg.package_name) {
+        app.state::<AppState>().updating.store(false, Ordering::SeqCst);
+        return Err(e);
+    }
 
     let app2 = app.clone();
     let npm = cfg.npm_path.clone();
@@ -1874,8 +1991,9 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
         }
 
         let outcome: Result<i32, String> = (|| {
-            let mut cmd = Command::new("cmd");
-            cmd.arg("/C").arg(&npm).arg("install").arg("-g").arg(&pkg);
+            let install_args: Vec<String> =
+                vec!["install".to_string(), "-g".to_string(), pkg.clone()];
+            let mut cmd = command_for(&npm, &install_args)?;
             cmd.current_dir(&cwd);
             // 同上：koffi 等原生依赖的 prebuild 脚本用裸 `node`，PATH 必须包含 node 目录
             cmd.env("PATH", detect::child_path_for(&[npm.as_str()]));

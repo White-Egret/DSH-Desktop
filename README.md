@@ -117,17 +117,30 @@ Open **⚙ 设置 (Settings)** from the toolbar. All fields support auto-detecti
 
 | Setting | Default | Notes |
 |---|---|---|
-| npm.cmd path | empty → auto-detected | used for update / version queries |
+| npm program path | empty → auto-detected | `npm.cmd` / `npm.exe`; used for update / version queries |
 | dsh path | empty → auto-detected | `dsh.cmd` / `dsh.exe` / `dsh.bat`; used to launch DSH |
 | DSH home dir | `%USERPROFILE%\.dsh` | passed to DSH as `DSH_HOME`; process cwd is its parent; not your workspace |
 | Port | `3080` | must be 1–65535; validated on save; takes effect on next DSH start |
 | Ready timeout | `300` seconds | cold start can take minutes; **0 = wait forever** (as long as the process lives) |
 | When clicking X | hide to tray | or "quit program" (stops the DSH process started by this session) |
-| Extra args | empty | appended after `dsh web --port N --no-open` |
+| Extra args | empty | appended after `dsh web --port N --no-open`; plain flags only (see below) |
 | Package name | `@deepseek-ai/dsh` | used by version check / update |
-| Update args | `install -g @deepseek-ai/dsh@latest` | appended after `cmd /C npm.cmd` |
+| Update args | `install -g @deepseek-ai/dsh@latest` | passed to npm as separate arguments; plain flags only (see below) |
 | Start with Windows | off | immediate effect, `HKCU\...\Run`, also toggleable from the tray menu |
 | Interface language | `zh` (中文) | `zh` / `en`; switches the whole launcher and syncs DSH's `settings.yaml` — see [Language](#language) |
+
+### Argument & path policy (enforced on save *and* at every use)
+
+These fields are capabilities, not text: `dsh_path` / `npm_path` are **executed**; `extra_args` / `update_args` / `package_name` become command-line arguments; and the **parent of the DSH home dir is the DSH process's working directory** (also where `npm` reads a `./.npmrc`). Because `config.json` is plain per-user JSON that autostart executes silently, validation runs on every use — not only when you press Save.
+
+- **Arguments**: shell metacharacters (`& | < > ^ % !` and quotes) are rejected, because `cmd.exe` re-parses the whole command line and would treat `a&calc.exe` as two commands. Ordinary flags (`--host=127.0.0.1`, `--port`, `--no-open`, paths) are unaffected.
+- **All paths**: absolute and drive-qualified only; `\\server\share` (UNC) rejected — writing there leaks credentials via NTLM auth, and executing from there trusts whatever answers the share; `..` segments rejected outright rather than folded away, so `C:\Windows\..\x` cannot be laundered into a valid path.
+- **Program paths**: extension must be `.exe` / `.cmd` / `.bat` (a `.ps1` or extension-less name would resolve through unpredictable file associations), must exist at launch time, and must not live under `%TEMP%`.
+- **Execution**: `.exe` is launched through `CreateProcess` directly — `cmd.exe` is nowhere on that path. `.cmd` / `.bat` shims *must* go through `cmd.exe`, so the launcher composes and quotes that command line itself (one pair of quotes per token) rather than relying on the standard library's automatic argument escaping, which `cmd.exe` then re-parses.
+- **Home dir**: not a drive root, not the user profile folder itself or any parent of it, and not inside `Windows` / `Program Files` / `ProgramData`. (Node.js itself may still legitimately live in `Program Files` — that restriction applies to the home dir only.)
+- Paths are normalized and written back, so the file on disk keeps the vetted form.
+
+If a check fails the app refuses to start or update and shows the reason in the status area; a hand-edited or tampered `config.json` cannot turn "press Start" into running some other binary.
 
 ## Language
 
@@ -154,7 +167,7 @@ The launcher UI is bilingual (Simplified Chinese / English).
 
 ## Update DSH
 
-Click **⤓ 更新 DSH (Update)** → confirm (exact command shown) → the service stops → `cmd /C "<npm>" install -g @deepseek-ai/dsh@latest` runs with output streamed to the log (source tag `update`) → success restarts DSH automatically. Buttons are disabled during the update. Use **检测全局包名** (`npm list -g --depth=0`) to confirm the package name. Version display: local `--version` vs latest `npm view`.
+Click **⤓ 更新 DSH (Update)** → confirm (exact command shown) → the service stops → `"<npm>" install -g @deepseek-ai/dsh@latest` runs (each argument passed as a separate token; see [Argument & path policy](#argument--path-policy-enforced-on-save-and-at-every-use)) with output streamed to the log (source tag `update`) → success restarts DSH automatically. Buttons are disabled during the update. Use **检测全局包名** (`npm list -g --depth=0`) to confirm the package name. Version display: local `--version` vs latest `npm view`.
 
 ## Logs
 

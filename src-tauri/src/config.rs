@@ -64,15 +64,197 @@ fn default_dsh_home_dir() -> String {
         .to_string()
 }
 
-/// DSH 进程的工作目录：家目录的上一级（如 C:\Users\<你>\.dsh -> C:\Users\<你>）
-pub fn workspace_cwd(cfg: &Config) -> String {
-    PathBuf::from(&cfg.dsh_home_dir)
+/// DSH / npm 进程的工作目录：家目录的上一级（如 C:\Users\<你>\.dsh -> C:\Users\<你>）。
+///
+/// 这里刻意做校验而不是返回裸字符串：cwd 决定 DSH（一个带文件/shell 工具的 Agent）
+/// 从哪一层开始观察，也决定 npm 去哪个目录读 `./.npmrc`（一个 `.npmrc` 里的
+/// `registry=` 就能把后续所有安装流量导向攻击者的源）。所以「家目录被改成别的盘/
+/// 别的目录」不只是路径难看，而是能改变执行语义 —— 校验失败必须报错，不能静默兜底。
+pub fn workspace_cwd(cfg: &Config) -> Result<String, String> {
+    cwd_of_home(&cfg.dsh_home_dir)
+}
+
+/// 同上，但输入已是家目录串（便于校验后复用同一个规范化值）。
+pub fn cwd_of_home(home_dir: &str) -> Result<String, String> {
+    let home = validate_home_dir(home_dir)?;
+    let parent = PathBuf::from(&home)
         .parent()
         .map(|p| p.to_string_lossy().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
-            std::env::var("USERPROFILE").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string())
-        })
+            std::env::var("USERPROFILE")
+                .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string())
+        });
+    // 家目录就贴在驱动器根下面（如 D:\dsh）时，父级就是驱动器根本身：
+    // 让 DSH / npm 的 cwd 落在 `D:\` 会白送整个盘根的文件清单，
+    // 但为此拒绝用户把家目录放在 `D:\dsh` 这种常见位置也不合理 —— 于是退一步，
+    // 用家目录自己当工作目录（比原行为严格更安全，也不打扰正常用法）。
+    if std::path::Path::new(&parent).components().count() <= 2 {
+        return Ok(home);
+    }
+    Ok(parent)
+}
+
+// ---------- 路径安全策略（MEDIUM-3） ----------
+//
+// 为什么必须校验：配置里的这几个路径不是「只是个字符串」，它们各自是一个能力：
+// - dsh_home_dir → DSH_HOME 环境变量、DSH 进程工作目录的父级（workspace_cwd）、
+//   create_dir_all + settings.yaml 写入位置（本文件 sync_dsh_locale）、
+//   以及 <home>\logs\dsh.log 的镜像写入位置（logger.rs）。
+//   合起来就是「在家目录之外没有任何约束的任意目录创建 + 写文件」原语，
+//   而且 cwd 落在哪里还决定了 DSH（一个有文件/shell 工具的 Agent）能看到什么。
+// - dsh_path / npm_path → 实际被执行的文件。
+// 而 config.json 是 %APPDATA% 下的明文文件，任何以本用户身份运行的进程都能写
+// （恶意 npm postinstall、被提示词注入诱导而改了文件的 DSH 自己……），
+// 程序又会在开机自启时静默按它执行 —— 所以「只在保存时校验」是不够的。
+//
+// 策略是黑名单式的（不是「必须在用户目录内」）：本仓库开发者的工作区就在 D:\，
+// 强行白名单会误伤。规则：绝对路径、非 UNC、无 `..`、不落进系统/程序目录、
+// 可执行文件还要「存在 + 扩展名白名单 + 不放临时目录」。
+
+/// 大小写无关地判断 `p`（已规范化、小写）是否等于 `root` 或位于其下。
+/// 按分隔符边界比较，避免 `C:\WEBSITE` 被判定在 `C:\W` 之下这类误判。
+fn is_under(p_lower: &str, root_lower: &str) -> bool {
+    if root_lower.is_empty() {
+        return false;
+    }
+    p_lower == root_lower
+        || (p_lower.starts_with(root_lower)
+            && p_lower.as_bytes().get(root_lower.len()) == Some(&b'\\'))
+}
+
+/// 取环境变量并规范化成小写、去尾分隔符的形式；缺失或为空返回 None。
+fn env_lower(var: &str) -> Option<String> {
+    std::env::var(var)
+        .ok()
+        .map(|v| v.trim_end_matches(|c| c == '\\' || c == '/').to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+}
+
+/// 不允许作为「家目录 / 日志与配置写入点」的系统位置。
+/// 注意：程序路径不受此限制 —— Node.js 官方就装在 `C:\Program Files\nodejs\`。
+fn system_roots() -> Vec<String> {
+    let mut v: Vec<String> = ["SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"]
+        .iter()
+        .filter_map(|k| env_lower(k))
+        .collect();
+    // 环境变量被清空/异常时的兜底：至少挡住最常识性的两个位置
+    if v.is_empty() {
+        v.push("c:\\windows".to_string());
+        v.push("c:\\program files".to_string());
+    }
+    v
+}
+
+/// 形状校验：绝对路径、非 UNC、无 `..`，并返回规范化（统一 `\`、去掉 `.` 与重复分隔符）
+/// 后的字符串。用 Path::components 完成，避免自己写字符串拼接出错的分支。
+fn path_shape(field: &str, raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(i18n::fmt("err_path_empty", &[&field]));
+    }
+    // UNC：\\ 或 // 开头。写向远程共享会带出 NTLM 认证（凭据外泄/中继面），
+    // 从远程共享加载可执行文件则在未强制 SMB 签名时等于把二进制交给网络对端。
+    let flat = trimmed.replace('/', "\\");
+    if flat.starts_with("\\\\") {
+        return Err(i18n::fmt("err_path_unc", &[&field]));
+    }
+    let path = std::path::Path::new(trimmed);
+    if !path.is_absolute() {
+        return Err(i18n::fmt("err_path_relative", &[&field]));
+    }
+    let mut out = String::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::Prefix(p) => {
+                out.push_str(&p.as_os_str().to_string_lossy().replace('/', "\\"))
+            }
+            std::path::Component::RootDir => out.push('\\'),
+            std::path::Component::CurDir => {} // 丢掉 `.`
+            std::path::Component::ParentDir => {
+                // `..` 在校验时不该出现：先规范化再判断才是可靠的，
+                // 所以这里直接拒绝，而不是折叠掉它（折叠会把 `C:\Windows\..\x` 洗白）
+                return Err(i18n::fmt("err_path_traversal", &[&field]));
+            }
+            std::path::Component::Normal(n) => {
+                // RootDir 已经补过一个 `\`，这里再无条件补就会得到 `C:\\Users` ——
+                // 多一个分隔符会让下面所有 is_under() 前缀比较整体失效（黑名单形同虚设），
+                // 所以必须先判断末尾再补。
+                if !out.ends_with('\\') {
+                    out.push('\\');
+                }
+                out.push_str(&n.to_string_lossy().replace('/', "\\"));
+            }
+        }
+    }
+    let norm = out.trim_end_matches('\\').to_string();
+    if norm.is_empty() || norm.chars().all(|c| c == '\\') {
+        return Err(i18n::fmt("err_path_root", &[&field]));
+    }
+    Ok(norm)
+}
+
+/// 校验「DSH 家目录」。返回规范化后的路径（调用方应使用返回值，不要再用原始串）。
+pub fn validate_home_dir(raw: &str) -> Result<String, String> {
+    let field = "dsh_home_dir";
+    let norm = path_shape(field, raw)?;
+    let lower = norm.to_ascii_lowercase();
+
+    // 驱动器根（`C:` / `C:\`）与用户目录本身：会让 cwd 退化成 C:\ 或 C:\Users，
+    // 等于把 DSH（一个带文件/shell 工具的 Agent）的工作目录推到能看见全体用户资料的位置。
+    if lower.len() <= 2 || !lower.contains('\\') {
+        return Err(i18n::fmt("err_path_root", &[&field]));
+    }
+    if let Some(prof) = env_lower("USERPROFILE") {
+        // is_under(prof, lower) == lower 是 USERPROFILE 本身或它的祖先目录
+        if is_under(&prof, &lower) {
+            return Err(i18n::fmt("err_path_root", &[&field]));
+        }
+    }
+    for root in system_roots() {
+        if is_under(&lower, &root) {
+            return Err(i18n::fmt("err_path_system", &[&field]));
+        }
+    }
+    Ok(norm)
+}
+
+/// 校验「要执行的程序路径」的形状与位置：绝对路径、非 UNC、无 `..`、
+/// 扩展名白名单、且不放在临时目录（临时目录是恶意软件的标准落点，
+/// 也是可预测路径竞争的现场）。**不要求文件存在** —— 允许用户先把路径填好、
+/// 之后再去装 Node/DSH（保存入口用这个，执行点用 validate_program_file）。
+/// `field` 只用于报错文案，让 dsh_path / npm_path 各自报自己的名字。
+pub fn validate_program_shape(field: &str, raw: &str) -> Result<String, String> {
+    let norm = path_shape(field, raw)?;
+    let ext = std::path::Path::new(&norm)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    // npm 还会生成同名无扩展 sh 脚本与 .ps1：.ps1 无法直接 CreateProcess，
+    // 且会走「文件关联 + 执行策略」这条不可控的路，所以一并排除在白名单外。
+    if !matches!(ext.as_str(), "exe" | "cmd" | "bat") {
+        return Err(i18n::fmt("err_prog_ext", &[&norm]));
+    }
+    let lower = norm.to_ascii_lowercase();
+    for var in ["TEMP", "TMP"] {
+        if let Some(t) = env_lower(var) {
+            if is_under(&lower, &t) {
+                return Err(i18n::fmt("err_path_temp", &[&norm]));
+            }
+        }
+    }
+    Ok(norm)
+}
+
+/// 执行点用：形状合法 + 确实是一个存在的普通文件。
+pub fn validate_program_file(field: &str, raw: &str) -> Result<String, String> {
+    let norm = validate_program_shape(field, raw)?;
+    let md = std::fs::metadata(&norm).map_err(|_| i18n::fmt("err_prog_missing", &[&norm]))?;
+    if !md.is_file() {
+        return Err(i18n::fmt("err_prog_missing", &[&norm]));
+    }
+    Ok(norm)
 }
 
 /// 把界面语言写入 `<DSH 家目录>\settings.yaml` 的 locale.preference（最小侵入式行编辑）。
@@ -83,7 +265,9 @@ pub fn workspace_cwd(cfg: &Config) -> String {
 /// 其余行原样保留，不引入 YAML 解析依赖。
 pub fn sync_dsh_locale(home_dir: &str, language: &str) -> Result<(), String> {
     let pref = if language.eq_ignore_ascii_case("en") { "en" } else { "zh" };
-    let dir = PathBuf::from(home_dir);
+    // 这里是一个真实的「建目录 + 写文件」出口，而且 set_language 命令会带着
+    // 磁盘上读来的 home_dir 直接走到这里（没经过保存入口），所以在此独立校验。
+    let dir = PathBuf::from(validate_home_dir(home_dir)?);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
     let path = dir.join("settings.yaml");
     let content = if path.is_file() {

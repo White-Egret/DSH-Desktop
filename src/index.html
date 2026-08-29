@@ -65,14 +65,14 @@
           <button id="btn-autodetect" class="btn small" data-i18n="btn_autodetect">自动检测 Node / npm / DSH 路径</button>
         </div>
         <label class="field">
-          <span><span data-i18n="lbl_npm_path">npm.cmd 路径</span> <em id="npm-exists-flag" class="flag"></em></span>
+          <span><span data-i18n="lbl_npm_path">npm 程序路径（npm.cmd / npm.exe）</span> <em id="npm-exists-flag" class="flag"></em></span>
           <div class="row">
             <input id="set-npm-path" type="text" spellcheck="false" />
             <button class="btn small" data-pick="exec" data-kind="npm" data-target="set-npm-path" data-i18n="btn_browse">浏览</button>
           </div>
         </label>
         <label class="field">
-          <span><span data-i18n="lbl_dsh_path">dsh.cmd 路径</span> <em id="dsh-exists-flag" class="flag"></em></span>
+          <span><span data-i18n="lbl_dsh_path">dsh 程序路径（dsh.cmd / dsh.exe / dsh.bat）</span> <em id="dsh-exists-flag" class="flag"></em></span>
           <div class="row">
             <input id="set-dsh-path" type="text" spellcheck="false" />
             <button class="btn small" data-pick="exec" data-kind="dsh" data-target="set-dsh-path" data-i18n="btn_browse">浏览</button>
@@ -124,7 +124,7 @@
           <input id="set-package-name" type="text" spellcheck="false" />
         </label>
         <label class="field">
-          <span data-i18n="lbl_update_args">更新参数（拼在 cmd /C npm.cmd 之后）</span>
+          <span data-i18n="lbl_update_args">更新参数（拼在 npm 程序路径之后；不接受 cmd 元字符）</span>
           <input id="set-update-args" type="text" spellcheck="false" />
         </label>
         <div class="hint" data-i18n-html="set_hint_html">

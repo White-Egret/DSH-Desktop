@@ -84,6 +84,16 @@ pub fn t(key: &str) -> &'static str {
         // 配置项里的 cmd 元字符（见 process.rs 的 command_for / validate_arg_token）
         "err_cfg_arg_danger" => if en { "Unsafe {0} value \"{1}\": the character \"{2}\" is not allowed. This field is passed to the npm / DSH command line, so shell metacharacters (& | < > ^ % ! and quotes) are rejected; ordinary flags such as --host=127.0.0.1 or --no-open are unaffected." } else { "{0} 的值「{1}」不安全：含有不允许的字符「{2}」。该字段会作为参数交给 npm / DSH 的命令行，因此拒绝 shell 元字符（& | < > ^ % ! 及引号）；普通参数如 --host=127.0.0.1、--no-open 不受影响。" },
         "err_cfg_prog_danger" => if en { "Unsafe program path \"{0}\": the character \"{1}\" is not allowed (cmd.exe could expand it or break the quoting). Please pick this file again in Settings." } else { "程序路径「{0}」不安全：含有不允许的字符「{1}」（可能被 cmd.exe 展开或破坏引号配对）。请在「设置」中重新选择该程序。" },
+        // ---------- 配置路径策略（MEDIUM-3，见 config.rs 的 validate_home_dir / validate_program_file） ----------
+        "err_path_empty" => if en { "{0}: the path is empty. Fill it in or click \"Auto-detect\" in Settings." } else { "{0}：路径为空。请在「设置」中填写，或点击「自动检测」。" },
+        "err_path_relative" => if en { "{0}: must be an absolute path (e.g. C:\\Users\\you\\.dsh); relative paths are rejected." } else { "{0}：必须是绝对路径（例如 C:\\Users\\你\\.dsh），不接受相对路径。" },
+        "err_path_unc" => if en { "{0}: network share paths (\\\\server\\share) are rejected — writing there leaks credentials via NTLM, and running a program from there hands the binary to whatever answers that share." } else { "{0}：不接受网络共享路径（\\\\服务器\\共享）。往共享写会触发 NTLM 认证而外泄凭据，从共享执行程序等于把可执行文件交给对端服务器。" },
+        "err_path_traversal" => if en { "{0}: the path contains \"..\" parent-directory segments and was rejected. Please pick the folder directly." } else { "{0}：路径中包含「..」上级跳转，已拒绝。请直接选择目标文件夹。" },
+        "err_path_root" => if en { "{0}: cannot be a drive root, the user profile folder itself, or one of its parents — otherwise the DSH process working directory would land somewhere that can see every user's files." } else { "{0}：不能是驱动器根目录、用户目录本身或其上层目录——否则 DSH 进程的工作目录会落在能看见所有用户文件的位置。" },
+        "err_path_system" => if en { "{0}: cannot be inside a system or program directory (Windows / Program Files / ProgramData)." } else { "{0}：不能位于系统或程序目录内（Windows / Program Files / ProgramData）。" },
+        "err_path_temp" => if en { "{0}: this program lives in a temp directory, which is rejected (trivial to hijack or pre-plant). Please install Node.js / DSH to a permanent location." } else { "{0}：该程序位于临时目录，已拒绝（临时目录极易被劫持或抢先植入）。请把 Node.js / DSH 安装到固定位置。" },
+        "err_prog_ext" => if en { "{0}: only .exe / .cmd / .bat can be launched (a .ps1 or extension-less file would go through unpredictable file associations). Re-select the program in Settings." } else { "{0}：只允许启动 .exe / .cmd / .bat 文件（.ps1 或无扩展名会走不可预测的文件关联）。请在「设置」中重新选择。" },
+        "err_prog_missing" => if en { "{0}: no such executable file. Click \"Auto-detect\" in Settings or pick the path again." } else { "{0}：找不到该可执行文件。请在「设置」中点「自动检测」或重新选择路径。" },
 
         // ---------- 版本 / 包检测 ----------
         "err_ver_flags" => if en { "Cannot read the local DSH version (--version / -v / -V all failed)" } else { "无法获取本地 DSH 版本（--version / -v / -V 均不可用）" },
@@ -98,8 +108,8 @@ pub fn t(key: &str) -> &'static str {
 
         // ---------- 更新 DSH ----------
         "err_update_busy" => if en { "An update task is already running; please wait" } else { "已有更新任务正在进行，请等待完成" },
-        "err_no_npm_update" => if en { "Cannot start npm: {0}. Fix the npm.cmd path in Settings." } else { "找不到 npm: {0}，请在「设置」中修改 npm.cmd 路径" },
-        "log_update_cmd" => if en { "[update] Running: cmd /C \"{0}\" {1} (process cwd: {2} — unrelated to DSH workspaces, PID: {3})" } else { "[update] 执行: cmd /C \"{0}\" {1}（进程工作目录: {2}，PID: {3}；DSH 工作区与此目录无关）" },
+        "err_no_npm_update" => if en { "Cannot start npm: {0}. Fix the npm program path in Settings." } else { "找不到 npm: {0}，请在「设置」中修改 npm 程序路径" },
+        "log_update_cmd" => if en { "[update] Running: \"{0}\" {1} (process cwd: {2} — unrelated to DSH workspaces, PID: {3})" } else { "[update] 执行: \"{0}\" {1}（进程工作目录: {2}，PID: {3}；DSH 工作区与此目录无关）" },
         "err_npm_spawn" => if en { "npm failed to start: {0}" } else { "npm 启动失败: {0}" },
         "err_npm_wait" => if en { "Failed to wait for npm to exit: {0}" } else { "等待 npm 退出失败: {0}" },
         "pick_filter_exec" => if en { "Command scripts / executables" } else { "命令脚本 / 可执行文件" },

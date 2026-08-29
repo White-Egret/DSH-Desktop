@@ -756,19 +756,47 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         set_status(app, "error", Some(msg.clone()));
         return Err(msg);
     }
+    // 完整的执行目标策略（绝对路径 / 非 UNC / 无 `..` / 存在 / 扩展名白名单 / 不在临时目录）。
+    // 只判 is_file() 是不够的：config.json 是明文且开机自启会静默执行它，
+    // 把 dsh_path 指到任何用户可写的 .exe/.cmd 就已经是「以本用户身份执行任意程序」。
+    let dsh_prog = match config::validate_program_file("dsh_path", &cfg.dsh_path) {
+        Ok(p) => p,
+        Err(e) => {
+            set_status(app, "error", Some(e.clone()));
+            return Err(e);
+        }
+    };
 
-    // 3) npm 缺失只影响更新 / 版本查询，不阻止启动
-    if cfg.npm_path.trim().is_empty() || !Path::new(&cfg.npm_path).is_file() {
-        emit_log(
-            app,
-            "launcher",
-            i18n::t("log_npm_missing_hint").to_string(),
-        );
-    }
+    // 3) npm 缺失只影响更新 / 版本查询，不阻止启动。但它的目录会被 child_path_for
+    //    拿去拼子进程 PATH（见 detect.rs）：一个被改坏的 npm_path 等于往 DSH 的 PATH
+    //    前面插入攻击者可控的目录，从而劫持 shim 里那个裸 `node`。
+    //    所以校验不通过时不是「照旧用」，而是让它彻底不参与 PATH 组装。
+    let npm_for_path = match config::validate_program_file("npm_path", &cfg.npm_path) {
+        Ok(p) => p,
+        Err(_) => {
+            emit_log(app, "launcher", i18n::t("log_npm_missing_hint").to_string());
+            String::new()
+        }
+    };
 
-    let cwd = config::workspace_cwd(&cfg);
+    // 4) 家目录：DSH_HOME、日志镜像目录都落在它里面，其上一级还是本进程的 cwd，
+    //    所以同样在使用点校验并改用规范化后的值
+    let home_dir = match config::validate_home_dir(&cfg.dsh_home_dir) {
+        Ok(h) => h,
+        Err(e) => {
+            set_status(app, "error", Some(e.clone()));
+            return Err(e);
+        }
+    };
+    let cwd = match config::cwd_of_home(&home_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            set_status(app, "error", Some(e.clone()));
+            return Err(e);
+        }
+    };
     if !Path::new(&cwd).is_dir() {
-        let msg = i18n::fmt("err_cwd_invalid", &[&cwd, &cfg.dsh_home_dir]);
+        let msg = i18n::fmt("err_cwd_invalid", &[&cwd, &home_dir]);
         set_status(app, "error", Some(msg.clone()));
         return Err(msg);
     }
@@ -799,7 +827,7 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         }
         launch_args.push(a.to_string());
     }
-    let mut cmd = match command_for(&cfg.dsh_path, &launch_args) {
+    let mut cmd = match command_for(&dsh_prog, &launch_args) {
         Ok(c) => c,
         Err(e) => {
             set_status(app, "error", Some(e.clone()));
@@ -808,11 +836,11 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
     };
     // 工作目录：DSH 家目录的上一级；DSH_HOME 指向家目录（DSH 在此读取配置）
     cmd.current_dir(&cwd);
-    cmd.env("DSH_HOME", &cfg.dsh_home_dir);
+    cmd.env("DSH_HOME", &home_dir);
     // dsh.cmd 是 npm 生成的 shim，回退分支同样依赖 PATH 里的 node
     cmd.env(
         "PATH",
-        detect::child_path_for(&[cfg.dsh_path.as_str(), cfg.npm_path.as_str()]),
+        detect::child_path_for(&[dsh_prog.as_str(), npm_for_path.as_str()]),
     );
     apply_no_window(&mut cmd);
     // stdin 不需要输入；stdout/stderr 必须 piped 转发到日志，绝不吞掉
@@ -823,11 +851,11 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
     let _ = state.take_last_stderr();
     let mut child = cmd
         .spawn()
-        .map_err(|e| i18n::fmt("err_spawn_fail", &[&e.to_string(), &cfg.dsh_path]))?;
+        .map_err(|e| i18n::fmt("err_spawn_fail", &[&e.to_string(), &dsh_prog]))?;
     let pid = child.id();
 
     // DSH 输出同时镜像写入 <DSH 家目录>\logs\dsh.log（要求四.2）
-    let dsh_log_file = logger::dsh_log_path(&cfg.dsh_home_dir);
+    let dsh_log_file = logger::dsh_log_path(&home_dir);
     if let Some(so) = child.stdout.take() {
         spawn_log_reader(app.clone(), so, "stdout", "dsh-log", false, Some(dsh_log_file.clone()), None);
     }
@@ -853,7 +881,7 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         i18n::fmt(
             "log_start_cmd",
             &[
-                &cfg.dsh_path,
+                &dsh_prog,
                 &cfg.port,
                 &if cfg.extra_args.trim().is_empty() {
                     String::new()
@@ -861,9 +889,9 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
                     format!(" {}", cfg.extra_args)
                 },
                 &cwd,
-                &cfg.dsh_home_dir,
+                &home_dir,
                 &pid,
-                &logger::dsh_log_path(&cfg.dsh_home_dir).display().to_string(),
+                &logger::dsh_log_path(&home_dir).display().to_string(),
             ],
         ),
     );
@@ -1074,6 +1102,14 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     validate_arg_field("package_name", &config.package_name)?;
     validate_program_path(&config.dsh_path)?;
     validate_program_path(&config.npm_path)?;
+    // 路径策略（MEDIUM-3）：绝对路径 / 非 UNC / 无 `..` / 不落系统目录与临时目录 /
+    // 扩展名白名单。保存入口刻意**不要求文件已存在**（允许先填路径后装程序），
+    // 存在性由执行点的 validate_program_file 把关。
+    // 顺手把规范化后的路径落盘：磁盘上留的就是安全形态，也避免同一路径多种写法。
+    let mut config = config;
+    config.dsh_home_dir = config::validate_home_dir(&config.dsh_home_dir)?;
+    config.dsh_path = config::validate_program_shape("dsh_path", &config.dsh_path)?;
+    config.npm_path = config::validate_program_shape("npm_path", &config.npm_path)?;
     let old_lang = config::load(&app).language;
     config::save(&app, &config)?;
 
@@ -1182,13 +1218,17 @@ pub async fn check_versions(app: AppHandle) -> Result<VersionInfo, String> {
     let cfg = config::load(&app);
     // package_name 会作为参数交给 `npm view`：先挡掉任何 cmd 元字符（宁可报错也不执行）
     validate_arg_field("package_name", &cfg.package_name)?;
-    let cwd = config::workspace_cwd(&cfg);
+    let cwd = config::workspace_cwd(&cfg)?;
     let mut info = VersionInfo { local: None, latest: None, error: None };
 
-    if Path::new(&cfg.dsh_path).is_file() {
+    // 执行前先过同一套路径策略（绝对 / 非 UNC / 无 `..` / 扩展名白名单 / 不在临时目录）。
+    // 这里刻意不硬失败：版本检测是只读功能，路径非法时走原有的「未安装」提示分支，
+    // 让本地版本仍能在只有一项坏掉时显示出来。
+    let dsh_prog = config::validate_program_file("dsh_path", &cfg.dsh_path).ok();
+    if let Some(dsh_prog) = dsh_prog {
         for flag in ["--version", "-v", "-V"] {
             match run_cmd_capture(
-                &cfg.dsh_path,
+                &dsh_prog,
                 &[flag.to_string()],
                 &cwd,
                 Duration::from_secs(20),
@@ -1214,9 +1254,10 @@ pub async fn check_versions(app: AppHandle) -> Result<VersionInfo, String> {
         info.error = Some(i18n::fmt("err_ver_no_dsh", &[&cfg.dsh_path]));
     }
 
-    if Path::new(&cfg.npm_path).is_file() {
+    let npm_prog = config::validate_program_file("npm_path", &cfg.npm_path).ok();
+    if let Some(npm_prog) = npm_prog {
         match run_cmd_capture(
-            &cfg.npm_path,
+            &npm_prog,
             &[
                 "view".to_string(),
                 cfg.package_name.clone(),
@@ -1262,12 +1303,20 @@ fn join_err(a: Option<String>, b: &str) -> String {
 #[tauri::command]
 pub async fn detect_npm_package(app: AppHandle) -> Result<String, String> {
     let cfg = config::load(&app);
-    if !Path::new(&cfg.npm_path).is_file() {
-        return Err(i18n::fmt("err_no_npm_detect", &[&cfg.npm_path]));
-    }
-    let cwd = config::workspace_cwd(&cfg);
+    // 路径策略 + 存在性（文件确实在、但被策略拦下时报策略原因；文件本身不在时
+    // 沿用原来那句「去设置里配 npm 路径」，更好操作）
+    let npm_prog = match config::validate_program_file("npm_path", &cfg.npm_path) {
+        Ok(p) => p,
+        Err(e) => {
+            if Path::new(&cfg.npm_path).is_file() {
+                return Err(e);
+            }
+            return Err(i18n::fmt("err_no_npm_detect", &[&cfg.npm_path]));
+        }
+    };
+    let cwd = config::workspace_cwd(&cfg)?;
     let (ok, out) = run_cmd_capture(
-        &cfg.npm_path,
+        &npm_prog,
         &["list".to_string(), "-g".to_string(), "--depth=0".to_string()],
         &cwd,
         Duration::from_secs(60),
@@ -1307,6 +1356,17 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
         return Err(msg);
     }
 
+    // 执行目标本身也要过策略（绝对 / 非 UNC / 无 `..` / 扩展名白名单 / 不在临时目录）。
+    // 上面的 is_file 已经确认文件在，所以这里失败一定是策略拦下，直接报原因。
+    let npm_prog = match config::validate_program_file("npm_path", &cfg.npm_path) {
+        Ok(p) => p,
+        Err(e) => {
+            state.updating.store(false, Ordering::SeqCst);
+            set_status(&app, "error", Some(e.clone()));
+            return Err(e);
+        }
+    };
+
     // 先校验将拼进 npm 命令行的参数：避免非法配置已经把 DSH 停掉了才报错
     if let Err(e) = validate_arg_field("update_args", &cfg.update_args) {
         state.updating.store(false, Ordering::SeqCst);
@@ -1324,7 +1384,17 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
     }
 
     set_status(&app, "updating", None);
-    let cwd = config::workspace_cwd(&cfg);
+    // 注意：workspace_cwd 现在会做路径策略校验并可能失败。
+    // 这里不能用 `?` 直接返回 —— updating 已经置为 true，
+    // 不显式复位就会把「正在更新」状态永久卡住（后续更新/引导安装全部被 err_update_busy 挡住）。
+    let cwd = match config::workspace_cwd(&cfg) {
+        Ok(c) => c,
+        Err(e) => {
+            state.updating.store(false, Ordering::SeqCst);
+            set_status(&app, "error", Some(e.clone()));
+            return Err(e);
+        }
+    };
     let args: Vec<String> = cfg
         .update_args
         .split_whitespace()
@@ -1334,10 +1404,10 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
     let app2 = app.clone();
     std::thread::spawn(move || {
         let result: Result<i32, String> = (|| {
-            let mut cmd = command_for(&cfg.npm_path, &args)?;
+            let mut cmd = command_for(&npm_prog, &args)?;
             cmd.current_dir(&cwd);
             // npm.cmd 自身能找到 node，但它派生的安装脚本调的是裸 `node`：必须给出补好的 PATH
-            cmd.env("PATH", detect::child_path_for(&[cfg.npm_path.as_str()]));
+            cmd.env("PATH", detect::child_path_for(&[npm_prog.as_str()]));
             apply_no_window(&mut cmd);
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -1362,7 +1432,7 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
                 "update",
                 i18n::fmt(
                     "log_update_cmd",
-                    &[&cfg.npm_path, &cfg.update_args, &cwd, &pid],
+                    &[&npm_prog, &cfg.update_args, &cwd, &pid],
                 ),
             );
 
@@ -2191,6 +2261,15 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
         app.state::<AppState>().updating.store(false, Ordering::SeqCst);
         return Err(i18n::fmt("setup_npm_missing", &[&cfg.npm_path]));
     }
+    // 执行 npm 之前过路径策略（绝对 / 非 UNC / 无 `..` / 扩展名白名单 / 不在临时目录）；
+    // 之后命令本身与子进程 PATH 都只用这个校验后的值
+    let npm = match config::validate_program_file("npm_path", &cfg.npm_path) {
+        Ok(p) => p,
+        Err(e) => {
+            app.state::<AppState>().updating.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+    };
     // 包名会作为参数交给 npm，同样必须是纯字面量
     if let Err(e) = validate_arg_field("package_name", &cfg.package_name) {
         app.state::<AppState>().updating.store(false, Ordering::SeqCst);
@@ -2198,9 +2277,16 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
     }
 
     let app2 = app.clone();
-    let npm = cfg.npm_path.clone();
     let pkg = cfg.package_name.clone();
-    let cwd = config::workspace_cwd(&cfg);
+    // 同 update_dsh：workspace_cwd 可能因路径策略失败，这里必须复位 updating，
+    // 否则「正在更新」状态会永久卡住（后续更新与引导安装全部被 busy 挡住）
+    let cwd = match config::workspace_cwd(&cfg) {
+        Ok(c) => c,
+        Err(e) => {
+            app.state::<AppState>().updating.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+    };
     std::thread::spawn(move || {
         emit_log(
             &app2,

@@ -480,13 +480,14 @@ body {
   gap: 12px;
 }
 
-/* 仅向导内的标题放大（settings/log/update 弹窗的 .modal-title 不受影响） */
-.setup-wizard .modal-title { font-size: 18px; }
+/* 仅向导内的标题放大（settings/log/update 弹窗的 .modal-title 不受影响）
+   第二轮：整个「DSH Desktop 安装向导」窗口（含选语言之前的那一屏）再统一大一号 */
+.setup-wizard .modal-title { font-size: 19px; }
 /* 向导内按钮同步放大 */
-.setup-wizard .btn { font-size: 14px; }
+.setup-wizard .btn { font-size: 15px; }
 
 .setup-desc {
-  font-size: 14.5px;
+  font-size: 15.5px;
   line-height: 1.8;
   color: var(--text);
   background: #f6f8fa;
@@ -503,7 +504,7 @@ body {
 .check-table {
   border-collapse: collapse;
   width: 100%;
-  font-size: 14px;
+  font-size: 15px;
 }
 .check-table th,
 .check-table td {
@@ -528,10 +529,10 @@ body {
   gap: 10px;
 }
 
-.wiz-step-title { font-weight: 600; font-size: 15.5px; }
+.wiz-step-title { font-weight: 600; font-size: 16.5px; }
 
 .wiz-step-body {
-  font-size: 14.5px;
+  font-size: 15.5px;
   line-height: 1.7;
   color: var(--text);
 }
@@ -544,7 +545,7 @@ body {
   padding: 8px 10px;
   margin-top: 6px;
   font-family: Consolas, monospace;
-  font-size: 13.5px;
+  font-size: 14.5px;
   word-break: break-all;
   user-select: text;
 }
@@ -553,7 +554,7 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 14px;
+  font-size: 15px;
   color: var(--text);
 }
 
@@ -563,7 +564,7 @@ body {
   background: #101418;
   color: #d5dbe2;
   font-family: Consolas, "Courier New", monospace;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.55;
   padding: 10px 14px;
   border-radius: 8px;
@@ -581,10 +582,10 @@ body {
   padding-top: 4px;
   border-top: 1px solid var(--toolbar-border);
 }
-#wiz-skip-note { font-size: 13px; color: var(--text-dim); }
+#wiz-skip-note { font-size: 14px; color: var(--text-dim); }
 
 /* ---------- 向导第一步：语言选择（固定双语，不随词典切换） ---------- */
-.lang-title { font-size: 17px; }
+.lang-title { font-size: 18px; }
 .lang-note { line-height: 1.9; }
 .lang-row { margin-top: 4px; }
 .lang-btn {
@@ -607,11 +608,11 @@ body {
   box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.12);
 }
 .lang-btn .lang-main {
-  font-size: 18px;
+  font-size: 19px;
   font-weight: 600;
   color: var(--text);
 }
 .lang-btn .lang-sub {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-dim);
 }

@@ -1599,12 +1599,212 @@ pub async fn setup_install_node(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Node.js 官方 x64 MSI 实际约 30MB：低于下限说明下载不完整，高于上限按异常处理
+/// （上限同时是读入内存前的一道保险，避免用任意大的文件把内存打满）。
+const NODE_MSI_MIN_BYTES: u64 = 10 * 1024 * 1024;
+const NODE_MSI_MAX_BYTES: u64 = 200 * 1024 * 1024;
+
+// ---------- 官方安装包的完整性校验（MEDIUM-2 修复） ----------
+//
+// 原逻辑：抓 SHASUMS256.txt 只为读版本号；MSI 下载后只判断「体积 ≥ 10MB」就交给
+// msiexec —— 于是中间人 / 镜像投毒 / 临时文件被替换，都会让攻击者的安装包
+// 带着一个正经的 UAC 弹窗被执行。现在：先按**最终要装的版本**从官方 dist 目录取
+// 清单里该文件的 SHA-256，比对通过才安装；拿不到清单或哈希不符一律中止
+// （宁可不装，也绝不做无校验安装）。
+//
+// 为什么手写 SHA-256，而不是加依赖或调外部工具：
+// - 只为算一次哈希就引入 sha2/ring 并不划算，而且要连带重新生成 Cargo.lock（需联网）；
+// - certutil / Get-FileHash 会把安全性寄托在可被 PATH 劫持的外部程序 + 本地化文本
+//   解析上（中文 Windows 的 certutil 输出行是本地化的），反而更脆。
+// 下面这份实现按 FIPS 180-4 的三个标准测试向量（""、"abc"、56 字节串）核对过。
+
+/// SHA-256 轮常量（FIPS 180-4 §4.2.2：前 64 个质数立方根小数部分的前 32 位）
+const SHA_K: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+/// 标准 SHA-256，返回 64 位小写十六进制。输入是一次性读入的整个文件（约 30MB）。
+fn sha256_hex(data: &[u8]) -> String {
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+
+    // 填充：追加 0x80、补零到「56 mod 64」，再拼 64 位大端比特长度
+    let bit_len = (data.len() as u64) << 3;
+    let mut msg = Vec::with_capacity(data.len() + 72);
+    msg.extend_from_slice(data);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0x00);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    let mut w = [0u32; 64];
+    for block in msg.chunks_exact(64) {
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                block[4 * i],
+                block[4 * i + 1],
+                block[4 * i + 2],
+                block[4 * i + 3],
+            ]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+
+        let mut a = h[0];
+        let mut b = h[1];
+        let mut c = h[2];
+        let mut d = h[3];
+        let mut e = h[4];
+        let mut f = h[5];
+        let mut g = h[6];
+        let mut hh = h[7];
+
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let t1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(SHA_K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+
+    let mut out = String::with_capacity(64);
+    for x in h.iter() {
+        out.push_str(&format!("{:08x}", x));
+    }
+    out
+}
+
+/// 不用 rand 依赖的随机后缀：纳秒时间戳 ^ 进程 ID ^ 计数，再经 xorshift64 打散。
+/// 目的是让「攻击者猜不到我们这次的落盘路径」，而不是做密码学用途。
+fn random_temp_suffix(counter: u32) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut x: u64 = nanos ^ ((std::process::id() as u64) << 32) ^ ((counter as u64) << 57);
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    format!("{:016x}", x)
+}
+
+/// 建一个一次性随机私有目录存放下载物。
+/// 原来直接写 `%TEMP%\node-v<版本>-x64.msi`：文件名完全可预测，同用户进程可以
+/// 抢先把该名字做成符号链接（curl 的 CREATE_ALWAYS 会顺着链接覆盖任意可写文件），
+/// 或抢先落一个自己的 MSI。随机目录 + create_dir 排他创建能同时挡住这两种。
+fn create_private_temp_dir() -> Result<PathBuf, String> {
+    let base = std::env::temp_dir();
+    for attempt in 0u32..5 {
+        let dir = base.join(format!("dsh-node-setup-{}", random_temp_suffix(attempt)));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            // 撞名（几乎不可能）就换个随机值重试；目录已存在说明有人在那儿放了东西，不复用
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(i18n::fmt("setup_tempdir_fail", &[&e.to_string()])),
+        }
+    }
+    Err(i18n::fmt("setup_tempdir_fail", &[&"random-name-collision".to_string()]))
+}
+
+/// 取官方清单里 `msi_name` 对应的 SHA-256（小写）。
+/// 每一步失败都返回 Err —— 调用方据此中止安装，绝不退化成「不校验继续装」。
+fn fetch_expected_sha256(dir: &Path, version: &str, msi_name: &str) -> Result<String, String> {
+    if !detect::is_safe_node_version(version) {
+        return Err(i18n::fmt("setup_verify_bad_version", &[&version]));
+    }
+    let page = detect::NODE_DOWNLOAD_PAGE.to_string();
+    let url = detect::node_shasums_url_for(version);
+    let dest = dir.join("SHASUMS256.txt");
+
+    let mut curl_err = String::new();
+    let downloaded = try_download_curl(&url, &dest, &mut curl_err, None)
+        || try_download_powershell(&url, &dest).is_ok();
+    if !downloaded {
+        let detail = if curl_err.trim().is_empty() {
+            i18n::t("setup_no_dl_tool").to_string()
+        } else {
+            curl_err
+        };
+        return Err(i18n::fmt("setup_verify_dl_fail", &[&detail, &page]));
+    }
+    let text = std::fs::read_to_string(&dest)
+        .map_err(|e| i18n::fmt("setup_verify_dl_fail", &[&e.to_string(), &page]))?;
+    // 去掉可能的 UTF-8 BOM：否则它会粘在第一行的哈希令牌前面，让 64 位长度校验误判
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text.as_str());
+
+    // 清单每行形如：`<64 位十六进制>  node-v24.20.0-x64.msi`（文件名不含空格，
+    // 所以按 (哈希, 名字) 成对取令牌即可；名字必须**整串相等**，不能只配前缀）
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        let hash = it.next().unwrap_or("");
+        let name = it.next().unwrap_or("");
+        if name != msi_name {
+            continue;
+        }
+        if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(i18n::fmt("setup_verify_bad_digest", &[&msi_name, &page]));
+        }
+        return Ok(hash.to_ascii_lowercase());
+    }
+    Err(i18n::fmt("setup_verify_no_entry", &[&msi_name, &page]))
+}
+
+/// 读文件并算 SHA-256；先按 metadata 卡上限，避免异常大的文件把内存打满。
+fn sha256_hex_of(path: &Path, max_bytes: u64) -> Result<String, String> {
+    let len = std::fs::metadata(path)
+        .map_err(|e| format!("{}: {}", path.display(), e))?
+        .len();
+    if len > max_bytes {
+        return Err(i18n::fmt("setup_dl_too_large", &[&len, &max_bytes]));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+    Ok(sha256_hex(&bytes))
+}
+
 /// 从官方 dist 的 SHASUMS256.txt 解析该 LTS 线最新补丁版本号（如 "22.23.2"）。
 /// 任何一步失败（无网络、镜像缺文件、格式意外）都返回 None，由调用方回退固定版本。
-fn resolve_latest_lts_version(last_err: &mut String) -> Option<String> {
+fn resolve_latest_lts_version(dir: &Path, last_err: &mut String) -> Option<String> {
     let url = detect::node_shasums_url();
-    let dest = std::env::temp_dir().join("dsh-node-shasums256.txt");
-    let _ = std::fs::remove_file(&dest);
+    let dest = dir.join("SHASUMS256-latest.txt");
 
     let mut curl_err = String::new();
     let downloaded =
@@ -1636,7 +1836,7 @@ fn resolve_latest_lts_version(last_err: &mut String) -> Option<String> {
         if !v.starts_with(line_prefix.as_str()) {
             continue; // 其它 LTS 线的条目，跳过
         }
-        if !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        if detect::is_safe_node_version(v) {
             return Some(v.to_string());
         }
     }
@@ -1644,10 +1844,19 @@ fn resolve_latest_lts_version(last_err: &mut String) -> Option<String> {
     None
 }
 
+/// 引导安装 Node.js 的入口：下载物一律放进一次性随机私有目录，返回前整目录删除
+/// （校验失败、安装失败、超时、用户取消等任何提前 return 的路径都不会留下安装包）。
 fn install_node_blocking(app: &AppHandle) -> Result<String, String> {
+    let dir = create_private_temp_dir()?;
+    let result = install_node_verified(&dir, app);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+fn install_node_verified(dir: &Path, app: &AppHandle) -> Result<String, String> {
     // 先解析该 LTS 线的最新补丁版本；失败就用固定回退版本（绝不因为探测失败而卡住安装）
     let mut probe_err = String::new();
-    let node_version = match resolve_latest_lts_version(&mut probe_err) {
+    let node_version = match resolve_latest_lts_version(dir, &mut probe_err) {
         Some(v) => {
             detect::record_node_version(&v);
             setup_progress(
@@ -1670,10 +1879,19 @@ fn install_node_blocking(app: &AppHandle) -> Result<String, String> {
         }
     };
 
-    let url = detect::node_msi_url();
-    let file_name = url.rsplit('/').next().unwrap_or("node-lts-x64.msi").to_string();
-    let dest = std::env::temp_dir().join(&file_name);
-    let _ = std::fs::remove_file(&dest);
+    // 下载地址、清单条目名、落盘文件名都由**最终选定的版本号**推导，三者不会分叉；
+    // 之前的写法是「拿全局状态的 node_msi_url 再反解文件名」，一旦两处版本不同步就会
+    // 校验一个文件、安装另一个文件。
+    let url = detect::node_msi_url_for(&node_version);
+    let msi_name = detect::node_msi_file_name_for(&node_version);
+    let dest = dir.join(&msi_name);
+    let page = detect::NODE_DOWNLOAD_PAGE.to_string();
+    // 让向导展示的下载地址与实际安装的版本保持一致
+    detect::record_node_version(&node_version);
+
+    // 先向官方要这个文件的 SHA-256（清单只有 2KB）：拿不到就立刻中止，
+    // 既省下一次 30MB 的无用下载，也绝不让「无校验安装」成为退路。
+    let expected = fetch_expected_sha256(dir, &node_version, &msi_name)?;
 
     setup_progress(
         app,
@@ -1694,23 +1912,33 @@ fn install_node_blocking(app: &AppHandle) -> Result<String, String> {
         try_download_powershell(&url, &dest)?;
     }
 
-    // 校验文件已落盘且大小合理（MSI 一般 ~30MB）
-    match std::fs::metadata(&dest) {
-        Ok(meta) if meta.len() >= 10 * 1024 * 1024 => {}
-        Ok(meta) => {
-            let _ = std::fs::remove_file(&dest);
-            return Err(i18n::fmt(
-                "setup_dl_incomplete",
-                &[&meta.len(), &detect::NODE_DOWNLOAD_PAGE.to_string()],
-            ));
-        }
-        Err(_) => {
-            return Err(i18n::fmt(
-                "setup_dl_missing",
-                &[&dest.display().to_string(), &detect::NODE_DOWNLOAD_PAGE.to_string()],
-            ));
-        }
+    // 体积只是一道粗筛（防下载被截断），真正的完整性判断在下面这次 SHA-256 比对。
+    // 出错路径不需要单独清理文件：外层 install_node_blocking 会删掉整个私有目录。
+    let meta = std::fs::metadata(&dest)
+        .map_err(|_| i18n::fmt("setup_dl_missing", &[&dest.display().to_string(), &page]))?;
+    if meta.len() < NODE_MSI_MIN_BYTES {
+        return Err(i18n::fmt("setup_dl_incomplete", &[&meta.len(), &page]));
     }
+    if meta.len() > NODE_MSI_MAX_BYTES {
+        return Err(i18n::fmt(
+            "setup_dl_too_large",
+            &[&meta.len(), &NODE_MSI_MAX_BYTES],
+        ));
+    }
+
+    // 核心校验：实际哈希与官方清单不一致就中止（不安装、不重试、不降级为无校验）
+    let actual = sha256_hex_of(&dest, NODE_MSI_MAX_BYTES)?;
+    if actual != expected {
+        return Err(i18n::fmt(
+            "setup_hash_mismatch",
+            &[&msi_name, &expected, &actual],
+        ));
+    }
+    setup_progress(
+        app,
+        "download",
+        &i18n::fmt("setup_hash_ok", &[&node_version, &actual]),
+    );
 
     setup_progress(app, "install", i18n::t("setup_install_launch"));
 

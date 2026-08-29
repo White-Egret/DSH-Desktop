@@ -125,6 +125,15 @@ pub fn t(key: &str) -> &'static str {
 
         // ---------- 首次运行引导：Node.js ----------
         "err_setup_busy" => if en { "A guided setup task is already running" } else { "已有引导安装任务正在进行" },
+        // ---------- 引导安装的下载完整性校验（SHA-256） ----------
+        "setup_tempdir_fail" => if en { "Cannot create the private temp directory for the download ({0}); installation aborted." } else { "无法为下载创建私有临时目录（{0}），已中止安装。" },
+        "setup_verify_bad_version" => if en { "Refusing to verify/install: the resolved Node.js version \"{0}\" is not a plain numeric version string." } else { "拒绝校验/安装：解析出的 Node.js 版本号「{0}」不是合法的纯数字版本串。" },
+        "setup_verify_dl_fail" => if en { "Cannot download the official SHASUMS256.txt checksum list ({0}). Refusing to install an unverified package — check your network and retry, or install manually from {1}." } else { "无法下载官方校验清单 SHASUMS256.txt（{0}）。为避免安装未经验证的文件，已中止——请检查网络后重试，或到 {1} 手动下载安装。" },
+        "setup_verify_no_entry" => if en { "The official SHASUMS256.txt has no entry for {0}; cannot verify the download, so installation aborted. Retry later or install manually from {1}." } else { "官方校验清单中没有 {0} 这一条目，无法验证下载文件，已中止安装。可稍后重试，或到 {1} 手动下载安装。" },
+        "setup_verify_bad_digest" => if en { "The official digest entry for {0} is malformed (expected 64 hex characters); installation aborted for safety. If this persists, download manually from {1}." } else { "官方清单中 {0} 的校验值格式异常（应为 64 位十六进制字符），出于安全已中止安装。若持续如此，请从 {1} 手动下载。" },
+        "setup_dl_too_large" => if en { "The downloaded file is implausibly large ({0} bytes, limit {1}); installation aborted." } else { "下载文件体积异常偏大（{0} 字节，上限 {1}），已中止安装。" },
+        "setup_hash_mismatch" => if en { "SHA-256 mismatch for {0}! Official list: {1} Downloaded: {2} The file was deleted and installation aborted — the download may have been tampered with (proxy/network interference). You can retry, or install manually from https://nodejs.org." } else { "{0} 的 SHA-256 与官方清单不一致！官方记录：{1} 实际下载：{2} 已删除该文件并中止安装——下载可能被篡改（代理/网络劫持）。可稍后重试，或到 https://nodejs.org 手动安装。" },
+        "setup_hash_ok" => if en { "v{0} installer verified (SHA-256 {1})" } else { "v{0} 安装包校验通过（SHA-256 {1}）" },
         "setup_dl_start" => if en { "Downloading the official Node.js v{0} LTS installer: {1}" } else { "开始下载官方 Node.js v{0} LTS 安装包：{1}" },
         "setup_lts_resolved" => if en { "[launcher] Resolved the newest LTS on the v{0} line: v{1}" } else { "[launcher] 已解析 v{0} 线当前最新 LTS：v{1}" },
         "setup_lts_fallback" => if en { "[launcher] Cannot resolve the newest LTS ({0}); using the pinned v{1} instead." } else { "[launcher] 未能解析最新 LTS（{0}），改用固定版本 v{1}。" },

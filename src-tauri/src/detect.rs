@@ -222,6 +222,30 @@ pub fn node_shasums_url() -> String {
     format!("https://nodejs.org/dist/latest-v{}/SHASUMS256.txt", NODE_LTS_LINE)
 }
 
+/// 某个**具体版本**目录下的官方清单（与 MSI 同目录，安装前取 SHA-256 用它）
+pub fn node_shasums_url_for(version: &str) -> String {
+    format!("https://nodejs.org/dist/v{}/SHASUMS256.txt", version)
+}
+
+/// 版本号白名单：形如 `24.20.0`（至少两段、每段非空纯数字）。
+/// 版本号会被拼进下载 URL、清单匹配名和落盘文件名，必须挡住 `..`、空段与任何路径片段。
+pub fn is_safe_node_version(v: &str) -> bool {
+    let mut parts = 0usize;
+    for p in v.split('.') {
+        if p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        parts += 1;
+    }
+    parts >= 2
+}
+
+/// 官方 MSI 的文件名（如 `node-v24.20.0-x64.msi`）。
+/// 下载地址、清单条目匹配、落盘文件名三处共用这一个来源，避免任何一处拼歪。
+pub fn node_msi_file_name_for(version: &str) -> String {
+    format!("node-v{}-x64.msi", version)
+}
+
 /// 本次运行内实际解析到的 Node 版本；未解析成功时用固定回退版本。
 static RESOLVED_NODE_VERSION: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
@@ -243,9 +267,17 @@ pub fn current_node_version() -> String {
         .unwrap_or_else(|| NODE_LTS_VERSION.to_string())
 }
 
+/// 某个具体版本的官方 MSI 下载地址（文件名由 node_msi_file_name_for 决定，两者不会分叉）
+pub fn node_msi_url_for(version: &str) -> String {
+    format!(
+        "https://nodejs.org/dist/v{0}/{1}",
+        version,
+        node_msi_file_name_for(version)
+    )
+}
+
 pub fn node_msi_url() -> String {
-    let v = current_node_version();
-    format!("https://nodejs.org/dist/v{0}/node-v{0}-x64.msi", v)
+    node_msi_url_for(&current_node_version())
 }
 
 // ---------- PATH 环境：注册表刷新与子进程 PATH 组装 ----------

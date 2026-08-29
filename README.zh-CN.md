@@ -136,6 +136,17 @@ DSH 启动命令示例:     dsh web --port 3080
 
 任一项不通过时，程序会拒绝启动/更新并在状态区显示原因 —— 被手改或被植入的 `config.json` 无法把「点一下启动」变成执行另一个程序。
 
+### Webview 隔离与 CSP
+
+DSH 网页界面属于不可信内容（它渲染模型输出），却以第二个原生 webview（label=`dsh`）的形式内嵌在主窗口的工具栏下方。有两条彼此独立的机制把它挡在特权面之外：
+
+- **capability 用 `webviews` 绑定，而不是 `windows`。** Tauri v2 中，`windows` 一旦命中窗口标签，就会对该窗口内的**每一个 webview** 生效 —— 所以写 `windows: ["main"]` 等于把 `core:*` 同时发给内嵌的 DSH 页面。因此 `capabilities/default.json` 只列 `"webviews": ["main"]`（启动器自身的 webview），并刻意不写 `windows`，这也是官方对多 webview 窗口的建议。
+- **它的 origin 属于 remote。** 内嵌页面加载的是 `http://127.0.0.1:<port>`，Tauri 将其判定为远程来源，而远程来源默认无法触达 `invoke_handler` 里的自定义命令，除非某个 capability 在 `remote.urls` 中显式放行。**永远不要给 `dsh` 这个 webview 加这种放行** —— 隔离成立靠的就是这一条加上面的作用域绑定。
+
+启动器自身页面运行在严格 CSP 下（`script-src 'self'`，不允许 `unsafe-inline`/`unsafe-eval`，`object-src 'none'`、`base-uri 'none'`、`form-action 'none'`、`frame-src 'none'`（不可信内容无法被拉进特权文档）），资源协议（asset protocol）关闭，并开启 `freezePrototype`（阻止通过原型链污染攻击被注入的 IPC 桥）。所有不可信字符串 —— DSH 输出、错误信息、检测到的路径 —— 一律用 `textContent` 渲染，绝不拼成 HTML。此外 Tauri 会在编译期为自身资源注入 nonce/hash，所以 `script-src 'self'` 无需放宽即可正常工作。
+
+> Tauri 是以「往构建后的 HTML 里注入 `<meta http-equiv="Content-Security-Policy">` 标签」的方式下发这份策略的（见 `tauri-utils/src/html.rs` 的 `create_csp_meta_tag`），而不是 HTTP 响应头。按 CSP 规范，`<meta>` 里的 `frame-ancestors`、`sandbox`、`report-uri` 会被浏览器忽略，所以上面刻意没有列它们 —— 列出的每一条都是真正生效的。若将来确实需要防内嵌，得改用 `app.security.headers` 以 HTTP 头下发。
+
 ## 界面语言（Language）
 
 启动器界面支持简体中文 / English 双语：

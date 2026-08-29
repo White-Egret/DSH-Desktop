@@ -1,9 +1,6 @@
 {
   "identifier": "default",
-  "description": "DSH Desktop 主窗口（控制台）默认权限：事件监听与自定义命令调用",
-  "windows": ["main"],
-  "permissions": [
-    "core:default",
-    "autostart:default"
-  ]
+  "description": "Minimal permissions for the launcher's own webview (label=main). Scoped by 'webviews', NOT 'windows': a matching 'windows' pattern enables the capability on every webview inside that window, which would hand core:* to the embedded DSH page (label=dsh, an untrusted http://127.0.0.1 origin). Never add that webview here and never add a 'remote' block for it.",
+  "webviews": ["main"],
+  "permissions": ["core:event:default"]
 }

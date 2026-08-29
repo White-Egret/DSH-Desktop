@@ -293,7 +293,9 @@
     wiz_installed: '✔ installed', wiz_notfound: '✘ not found', wiz_detecting_row: 'detecting…',
     wiz_step_node_title: 'Node.js is missing',
     wiz_step_node_body_html: 'The official Node.js LTS installer will be downloaded and run from the official site (nothing bundled, no portable runtime):<br /><code id="wiz-node-url" class="block-code"></code>One-click install opens the official installer / UAC prompt — just follow it. You can also install manually from <a href="#" id="wiz-open-node-page">nodejs.org</a>.',
-    wiz_btn_install_node: 'Download &amp; install (official LTS)',
+    // 注意：此文案经 data-i18n 走 textContent 注入，必须用字面 `&`；
+    // 写成 `&amp;` 会原样显示成 “Download &amp; install”。
+    wiz_btn_install_node: 'Download & install (official LTS)',
     wiz_btn_recheck: 'Re-check',
     wiz_btn_skip_node: 'Install later myself',
     wiz_step_dsh_title: 'DSH is missing',

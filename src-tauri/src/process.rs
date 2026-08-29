@@ -605,6 +605,13 @@ fn main_content_size(app: &AppHandle) -> (f64, f64) {
 
 /// 在主窗口内创建（或刷新）内嵌的 DSH Webview。
 /// `url` 由调用方决定：优先用从 DSH 输出解析到的实际地址，否则用配置端口构造。
+///
+/// 安全边界（MEDIUM-4）：这个 webview 的 label 是 `dsh`，而 capabilities/default.json
+/// 刻意只绑定 `webviews: ["main"]`，所以它拿不到任何 core/plugin 权限；同时它加载的是
+/// `http://127.0.0.1:<port>`，在 Tauri 眼里属于 remote origin（`Webview::is_local_url`
+/// 只认 tauri 自定义协议与 app 自身的 devUrl/frontendDist），而 remote origin 默认无法
+/// 触达 invoke_handler 里的自定义命令。两条独立机制都依赖「不给 dsh 配 capability」这一
+/// 前提：绝不要把这里的 label 加进任何 capability 的 `windows` 列表，也不要写 `remote.urls`。
 fn open_dsh_webview(app: &AppHandle, url: &str) {
     // 已存在：直接刷新到当前 URL（端口可能已变更）
     if let Some(wv) = app.get_webview("dsh") {

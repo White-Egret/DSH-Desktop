@@ -124,7 +124,7 @@
     toast_ver_latest: '已是最新版（{0}）',
     ver_unknown: '版本未知（{0}）',
     ver_query_fail: '版本查询失败',
-    ver_local_only: '{0}（最新: 未知）',
+    ver_local_only: '{0}（更新状态未知）',
     // 自动启动 / 检测
     toast_autostart_on: '已开启开机自动启动',
     toast_autostart_off: '已关闭开机自动启动',
@@ -288,7 +288,7 @@
     toast_ver_latest: 'Up to date ({0})',
     ver_unknown: 'version unknown ({0})',
     ver_query_fail: 'version query failed',
-    ver_local_only: '{0} (latest: unknown)',
+    ver_local_only: '{0} (update status unknown)',
     toast_autostart_on: 'Start with Windows enabled',
     toast_autostart_off: 'Start with Windows disabled',
     toast_autostart_fail: 'Failed to set autostart: {0}',

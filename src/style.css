@@ -157,10 +157,11 @@ body {
 }
 .stage-line.error { color: var(--danger); }
 
-/* 启动等待页诗行：固定在状态区上方正中，比状态行大一号并加粗 */
+/* 启动等待页诗行：固定在状态区上部正中——位于顶部工具栏与居中等待信息
+   （#stage-inner 中心即 50%）之间的中点（25%），比状态行大一号并加粗 */
 .poem-panel {
   position: absolute;
-  top: 24px;
+  top: 25%;
   left: 50%;
   transform: translateX(-50%);
   width: min(90%, 640px);

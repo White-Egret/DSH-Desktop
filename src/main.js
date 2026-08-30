@@ -541,10 +541,12 @@ function renderVersion(local, latest) {
       ? t('ver_latest_suffix', local)
       : t('ver_arrow', local, latest);
   } else if (local) {
-    el.textContent = local;
-  } else if (latest) {
-    el.textContent = t('ver_latest_only', latest);
+    // 能读到本地 DSH 版本但查不到最新版：明确提示更新状态未知，
+    // 避免用户把「只显示本地版本」误当成「已是最新」
+    el.textContent = t('ver_local_only', local);
   } else {
+    // 本地 DSH 版本未知时不再单独显示 npm 上的最新版本——那会被误读为
+    // 「npm 有新版本」；用户只关心 DSH 是否有新版本，此时无从比较，显示未知（原因在日志）
     el.textContent = t('ver_unknown2');
   }
 }

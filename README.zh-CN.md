@@ -62,6 +62,10 @@ dsh --version
 
 ## 安装（Installation）
 
+如果不想从源码安装，可以直接下载现成的 **Windows 10/11 安装包**：
+
+- <https://tfevx3uq.qwenwork.host/DSH-Desktop-windows-nsis>
+
 无需本地 Rust 环境——GitHub Actions 云端构建（见下一节）。取最新成功构建的产物：
 
 - `DSH-Desktop-windows-nsis` → 内含 `DSH Desktop_<版本>_x64-setup.exe`（NSIS 安装包，推荐）
@@ -92,7 +96,7 @@ npm run tauri build
    - 已装齐 → 点「完成，进入主界面」；
    - 有缺失 → 用引导按钮安装，或直接跳过进入主界面（之后启动会给出明确错误）。
 3. 点 **▶ 启动**（或让程序自动拉起）：状态区显示等待秒数，就绪后无缝切换为内嵌的 DSH 页面。
-4. 工具栏右侧始终显示：状态点 · 当前端口 · 版本。
+4. 工具栏右侧始终显示：状态点 · 当前端口 · 版本。版本在每次程序启动 / DSH 服务启动或重启时自动检测（本地 `dsh --version` + 远端 `npm view`），无需手动点击。
 5. 默认点 X 是隐藏到托盘（可在设置改为退出）；从托盘图标/菜单唤回窗口；托盘菜单「退出」才真正结束本程序及其启动的 DSH 进程树。
 
 程序实际执行的命令示例（以你的配置为准）：
@@ -171,7 +175,7 @@ DSH 网页界面属于不可信内容（它渲染模型输出），却以第二�
 
 ## 更新 DSH（Update DSH)
 
-工具栏点「⤓ 更新 DSH」→ 确认 → 自动停止服务 → 执行 `"<npm>" install -g @deepseek-ai/dsh@latest`（每个参数独立传递，见上方「参数与路径策略」；输出实时写入日志，来源标记 update）→ 成功后自动重启 DSH。「检测全局包名」（`npm list -g --depth=0`）可确认包名。版本栏显示本地 `--version` 与远端 `npm view` 结果对比。
+工具栏点「⤓ 更新 DSH」→ 确认 → 自动停止服务 → 执行 `"<npm>" install -g @deepseek-ai/dsh@latest`（每个参数独立传递，见上方「参数与路径策略」）→ 更新期间**页面中央实时显示进度**（「已获取 N 个包文件 / 用时」+ npm 输出滚动，同时写入日志，来源标记 update）→ 成功后自动重启 DSH。「检测全局包名」（`npm list -g --depth=0`）可确认包名。版本栏显示本地 `--version` 与远端 `npm view` 结果对比。
 
 ## 日志（Logs）
 

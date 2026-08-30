@@ -9,7 +9,7 @@
   const zh = {
     // 工具栏
     btn_start: '▶ 启动', btn_stop: '■ 停止', btn_restart: '⟳ 重启',
-    btn_refresh: '↻ 刷新页面', btn_update: '⤓ 更新 DSH', btn_check: '检查版本',
+    btn_refresh: '↻ 刷新页面', btn_update: '⤓ 更新 DSH',
     btn_log: '日志', btn_settings: '⚙ 设置',
     lbl_port: '端口', lbl_version: '版本', status_init: '初始化…',
     // 状态
@@ -25,7 +25,8 @@
     stage_running_ext: '已连接到现有服务（非本程序启动，关闭本程序不会停止它）',
     stage_stopping: '正在停止 DSH…',
     stage_updating: '正在更新 DSH，请勿关闭程序…',
-    hint_updating: '更新输出会实时写入「日志」（来源标记为 update）',
+    hint_updating: '更新进度实时显示在下方；完整输出同时写入「日志」（来源标记为 update）',
+    upd_prog_prepare: '正在停止当前 DSH 服务并启动 npm 更新…',
     stage_error_default: '启动失败，详见日志',
     hint_error: '点击「日志」查看 DSH 的完整输出；也可点击「启动」重试',
     stage_port_busy: '端口 {0} 已被占用',
@@ -33,6 +34,15 @@
     wait_prefix: '正在启动 DSH，',
     wait_tail_timeout: '（最长等待 {0} 秒）',
     wait_tail_infinite: '（一直等待直到就绪）',
+    // 启动等待页的诗行：每行显示 5 秒，最后一行一直保留到 DSH 页面就绪
+    poem_lines: [
+      '乘公车，乘拼车。',
+      '寓目明灯百万家，',
+      '夜寒归路赊。',
+      '二月花，三月花。',
+      '梦入新年感物华，',
+      '楼边残月斜。',
+    ],
     err_not_running: 'DSH 服务未在运行。',
     // 端口占用面板
     pb_prefix: '端口 ',
@@ -171,7 +181,7 @@
 
   const en = {
     btn_start: '▶ Start', btn_stop: '■ Stop', btn_restart: '⟳ Restart',
-    btn_refresh: '↻ Refresh Page', btn_update: '⤓ Update DSH', btn_check: 'Check Version',
+    btn_refresh: '↻ Refresh Page', btn_update: '⤓ Update DSH',
     btn_log: 'Log', btn_settings: '⚙ Settings',
     lbl_port: 'Port', lbl_version: 'Version', status_init: 'Initializing…',
     st_idle: 'Idle', st_starting: 'Starting', st_running: 'Running',
@@ -185,7 +195,8 @@
     stage_running_ext: 'Connected to the existing service (not started by this app; quitting will not stop it)',
     stage_stopping: 'Stopping DSH…',
     stage_updating: 'Updating DSH — do not close the app…',
-    hint_updating: 'Update output streams into the "Log" dialog (source tag: update)',
+    hint_updating: 'Progress streams below; full output is also written to the "Log" dialog (source tag: update)',
+    upd_prog_prepare: 'Stopping the current DSH service and starting the npm update…',
     stage_error_default: 'Start failed — see the log',
     hint_error: 'Open "Log" for DSH\'s full output, or click "Start" to retry',
     stage_port_busy: 'Port {0} is occupied',
@@ -193,6 +204,15 @@
     wait_prefix: 'Starting DSH — ',
     wait_tail_timeout: ' (up to {0} s)',
     wait_tail_infinite: ' (waiting until ready)',
+    // Startup waiting page poem lines: 5 s each; the last line stays until DSH is ready
+    poem_lines: [
+      'Tho’ much is taken, much abides; and tho’',
+      'We are not now that strength which in old days',
+      'Moved earth and heaven; that which we are, we are;',
+      'One equal temper of heroic hearts,',
+      'Made weak by time and fate, but strong in will',
+      'To strive, to seek, to find, and not to yield.',
+    ],
     err_not_running: 'DSH service is not running.',
     pb_prefix: 'Port ',
     pb_suffix: ' is occupied by another process (possibly an already-running DSH, or another program). This app does not force-kill unknown processes.',

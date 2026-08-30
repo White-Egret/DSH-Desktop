@@ -117,6 +117,8 @@ pub fn t(key: &str) -> &'static str {
         "msg_update_success" => if en { "Update succeeded" } else { "更新成功" },
         "log_update_fail_code" => if en { "[update] npm update failed (exit code {0}); DSH will not be restarted. Check the log." } else { "[update] npm 更新失败（退出码 {0}），不会自动启动 DSH。请查看日志。" },
         "msg_update_fail_code" => if en { "Update failed (exit code {0}); see the log" } else { "更新失败（退出码 {0}），详见日志" },
+        // 更新进行中的实时进度（页面进度区每秒刷新一次）
+        "update_npm_progress" => if en { "Downloading and installing the new DSH via npm… {0} package file(s) fetched ({1} s elapsed)" } else { "正在通过 npm 下载并安装新版 DSH… 已获取 {0} 个包文件（用时 {1} 秒）" },
 
         // ---------- 开机自启 ----------
         "log_autostart_on" => if en { "[launcher] Start-with-Windows enabled." } else { "[launcher] 已开启开机自动启动。" },

@@ -14,6 +14,7 @@ let config = null;        // ConfigReport（含 exists 标志 + 展平的 config
 let status = 'idle';      // idle|starting|running|running-external|stopping|error|port-busy|updating
 let updating = false;
 let checkingVersion = false;
+let lastVersionCheckAt = 0;      // 上次版本检查完成时刻（自动检查冷却 60 秒，避免重复请求 npm）
 let launchedByAutostart = false; // 本次进程是否由「开机自启」触发（决定静默+延迟策略）
 let statusMessage = null;        // 最近一次状态事件携带的附加消息（Rust 端已本地化）
 let lastErrorText = '';          // 最近一次错误文本（「复制错误信息」使用）
@@ -52,6 +53,17 @@ function appendLog(stream, line) {
       wizLog.textContent = wizLog.textContent.slice(wizLog.textContent.indexOf('\n') + 1);
     }
     wizLog.scrollTop = wizLog.scrollHeight;
+  }
+  // 更新输出同时镜像到状态区的「更新进度」面板（点击「更新 DSH」确认后可见）
+  if (stream === 'update') {
+    const updLog = $('update-progress-log');
+    if (updLog) {
+      updLog.textContent += line + '\n';
+      while (updLog.textContent.split('\n').length > 200) {
+        updLog.textContent = updLog.textContent.slice(updLog.textContent.indexOf('\n') + 1);
+      }
+      updLog.scrollTop = updLog.scrollHeight;
+    }
   }
 }
 
@@ -180,9 +192,63 @@ function stopWaitTimer() {
   waitTimer = null;
 }
 
+// ---------- 启动等待页诗行（每行显示 5 秒，最后一行保留到 DSH 页面就绪） ----------
+
+const POEM_LINE_MS = 5000;
+let poemTimer = null;
+let poemActive = false;
+let poemIndex = -1;
+
+function getPoemLines() {
+  const dict = I18N.dict[I18N.lang] || I18N.dict.zh;
+  return dict.poem_lines || [];
+}
+
+function showPoemLine() {
+  const lines = getPoemLines();
+  if (!lines.length || poemIndex < 0 || poemIndex >= lines.length) return;
+  $('poem-line').textContent = lines[poemIndex];
+}
+
+function scheduleNextPoemLine() {
+  clearTimeout(poemTimer);
+  const lines = getPoemLines();
+  // 最后一行不限时，一直保留到 DSH 页面就绪
+  if (!poemActive || poemIndex >= lines.length - 1) {
+    poemTimer = null;
+    return;
+  }
+  poemTimer = setTimeout(() => {
+    poemIndex++;
+    showPoemLine();
+    scheduleNextPoemLine();
+  }, POEM_LINE_MS);
+}
+
+function startPoem() {
+  stopPoem();
+  const lines = getPoemLines();
+  if (!lines.length) return;
+  poemActive = true;
+  poemIndex = 0;
+  $('poem-panel').classList.remove('hidden');
+  showPoemLine();
+  scheduleNextPoemLine();
+}
+
+function stopPoem() {
+  poemActive = false;
+  clearTimeout(poemTimer);
+  poemTimer = null;
+  poemIndex = -1;
+  $('poem-panel').classList.add('hidden');
+  $('poem-line').textContent = '';
+}
+
 // ---------- 状态 UI ----------
 
 function onStatus(p) {
+  const prev = status;
   status = p.status;
   statusMessage = p.message || null; // 供 renderWaitLine 显示开机自启延迟等提示（Rust 端已本地化）
   const map = STATUS_META[p.status] || { key: null, dot: 'gray' };
@@ -200,6 +266,8 @@ function onStatus(p) {
   hint.classList.add('hidden');
   busyPanel.classList.add('hidden');
   $('btn-copy-error').classList.add('hidden');
+  // 更新进度面板：进入 updating 状态（或更新流程尚未结束，覆盖「停止→更新」的中间态）时显示
+  $('update-progress').classList.toggle('hidden', !(p.status === 'updating' || updating));
 
   switch (p.status) {
     case 'idle':
@@ -207,6 +275,13 @@ function onStatus(p) {
       break;
     case 'starting':
       startWaitTimer(); // 内部会渲染等待行
+      // 启动等待页显示诗行；语言切换后仍停留在启动页时按新词典更新当前行，不重头开始
+      if (poemActive) {
+        $('poem-panel').classList.remove('hidden');
+        showPoemLine();
+      } else {
+        startPoem();
+      }
       hint.textContent = t('hint_starting');
       hint.classList.remove('hidden');
       break;
@@ -241,7 +316,19 @@ function onStatus(p) {
       break;
   }
 
-  if (p.status !== 'starting') stopWaitTimer();
+  if (p.status !== 'starting') {
+    stopWaitTimer();
+    stopPoem(); // 离开启动页即隐藏诗行（含“DSH 已就绪，页面即将显示”）
+  }
+
+  // DSH 服务启动/重启完成（进入运行态）时，自动刷新右上角的版本显示
+  if (
+    (p.status === 'running' || p.status === 'running-external') &&
+    prev !== 'running' && prev !== 'running-external'
+  ) {
+    autoCheckVersions();
+  }
+
   refreshButtons();
 }
 
@@ -251,16 +338,15 @@ function refreshButtons() {
   $('btn-stop').disabled = updating || ['idle', 'error', 'port-busy', 'stopping'].includes(status);
   $('btn-restart').disabled = busy || !['running', 'running-external'].includes(status);
   $('btn-update').disabled = busy || !config || !config.npm_exists;
-  $('btn-check-update').disabled = updating || checkingVersion;
   $('btn-settings').disabled = updating;
   $('btn-connect').disabled = updating;
 }
-
 // ---------- 事件监听 + 初始化 ----------
 
 async function init() {
   await listen('dsh-log', (e) => appendLog(e.payload.stream, e.payload.line));
   await listen('update-log', (e) => appendLog('update', e.payload.line));
+  await listen('update-progress', (e) => onUpdateProgress(e.payload));
   await listen('dsh-status', (e) => onStatus(e.payload));
   await listen('update-finished', (e) => onUpdateFinished(e.payload));
   await listen('path-picked', (e) => onPathPicked(e.payload));
@@ -327,6 +413,17 @@ async function postInit() {
         t('msg_install_dsh', config.package_name || '@deepseek-ai/dsh')),
     );
     showModal('settings-modal');
+  }
+
+  // 程序启动/重启时自动检查 DSH 版本，结果显示在右上角状态栏
+  // （原工具栏「检查版本」按钮已移除；服务随后进入运行态时 onStatus 还会再触发一次，
+  //   由 autoCheckVersions 的 60 秒冷却保证不会重复请求 npm registry）。
+  // 开机自启时同样要错开系统冷启动高峰（与 Rust 端「DSH 延迟 12 秒启动」同一考量）：
+  // 这里把版本查询推迟 30 秒，避免开机瞬间和系统抢 CPU / 网络。
+  if (launchedByAutostart) {
+    setTimeout(() => autoCheckVersions(), 30_000);
+  } else {
+    autoCheckVersions();
   }
 }
 
@@ -452,10 +549,17 @@ function renderVersion(local, latest) {
   }
 }
 
+// 自动检查入口：程序启动/重启、DSH 服务启动/重启完成、连接外部服务时触发；
+// 检查进行中或处于 60 秒冷却期内时直接跳过，避免重复请求 npm registry
+function autoCheckVersions() {
+  if (checkingVersion) return;
+  if (Date.now() - lastVersionCheckAt < 60_000) return;
+  checkVersions();
+}
+
 async function checkVersions() {
   if (checkingVersion) return;
   checkingVersion = true;
-  refreshButtons();
   $('ver-val').textContent = t('ver_querying');
   appendLog('launcher', t('log_ver_querying'));
   try {
@@ -469,14 +573,12 @@ async function checkVersions() {
     }
     if (info.error) appendLog('launcher', t('log_ver_error', info.error));
     renderVersion(info.local, info.latest);
-    if (info.error && !info.local && !info.latest) toast(info.error, true);
   } catch (err) {
     renderVersion(null, null);
     appendLog('launcher', t('log_ver_fail', err));
-    toast(t('toast_ver_fail', err), true);
   } finally {
     checkingVersion = false;
-    refreshButtons();
+    lastVersionCheckAt = Date.now();
   }
 }
 
@@ -493,25 +595,42 @@ async function doUpdate() {
   if (updating) return;
   updating = true;
   refreshButtons();
+  // 立刻在页面上显示更新进度面板并清空上次输出：
+  // 后端在真正进入 updating 状态前还要先停掉 DSH（会先经过 stopping/idle），
+  // 靠状态事件显示会闪一下；update-log 事件的输出由 appendLog 实时镜像到这里。
+  const panel = $('update-progress');
+  $('update-progress-log').textContent = '';
+  $('update-progress-text').textContent = t('upd_prog_prepare');
+  panel.classList.remove('hidden');
   appendLog('update', t('log_update_begin'));
   try {
     await invoke('update_dsh');
   } catch (err) {
     updating = false;
     refreshButtons();
+    panel.classList.add('hidden');
     toast(t('toast_update_fail_start', err), true);
     appendLog('update', t('log_update_start_fail', err));
   }
 }
 
+/// 更新进行中的实时进度（Rust 端每秒回报一次，文案已按界面语言本地化）
+function onUpdateProgress(p) {
+  const el = $('update-progress-text');
+  if (el) el.textContent = p.message;
+}
+
 async function onUpdateFinished(p) {
   updating = false;
   refreshButtons();
+  // 更新结束（无论成败）收起页面进度面板；完整输出仍保留在「日志」里
+  $('update-progress').classList.add('hidden');
   if (p.success) {
     appendLog('update', t('log_update_done_restart'));
     toast(t('toast_update_restarting'));
     try {
       await invoke('start_dsh');
+      // 更新后强制刷新一次版本显示（不走冷却，状态栏立即反映新版本）
       await checkVersions();
     } catch (err) {
       appendLog('launcher', t('log_restart_fail', err));
@@ -660,7 +779,6 @@ function bindUI() {
   $('btn-stop').onclick = () => invoke('stop_dsh').catch((e) => toast(String(e), true));
   $('btn-restart').onclick = () => invoke('restart_dsh').catch((e) => toast(String(e), true));
   $('btn-refresh').onclick = refreshPage;
-  $('btn-check-update').onclick = checkVersions;
   $('btn-update').onclick = confirmUpdate;
   $('btn-log').onclick = () => showModal('log-modal');
   $('btn-settings').onclick = openSettings;

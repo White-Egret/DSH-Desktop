@@ -16,7 +16,6 @@
       <button id="btn-restart" class="btn" data-i18n="btn_restart">⟳ 重启</button>
       <button id="btn-refresh" class="btn" data-i18n="btn_refresh">↻ 刷新页面</button>
       <button id="btn-update" class="btn" data-i18n="btn_update">⤓ 更新 DSH</button>
-      <button id="btn-check-update" class="btn" data-i18n="btn_check">检查版本</button>
       <button id="btn-log" class="btn" data-i18n="btn_log">日志</button>
       <button id="btn-settings" class="btn" data-i18n="btn_settings">⚙ 设置</button>
     </div>
@@ -32,10 +31,23 @@
 
   <!-- 状态区：启动等待 / 错误 / 端口占用 提示（就绪后整块被内嵌的 DSH 页面覆盖） -->
   <main id="stage">
+    <!-- 启动等待页诗行：中英文按词典逐行显示，最后一行保留到 DSH 页面就绪 -->
+    <div id="poem-panel" class="poem-panel hidden">
+      <div id="poem-line" class="poem-line"></div>
+    </div>
     <div id="stage-inner">
       <div id="spinner" class="spinner hidden"></div>
       <div id="stage-line" class="stage-line" data-i18n="stage_init">正在初始化…</div>
       <div id="stage-hint" class="stage-hint hidden" data-i18n="stage_hint">点击「日志」查看 DSH 的完整输出</div>
+      <!-- 更新进度面板：点击「更新 DSH」→「开始更新」后显示在状态区，
+           标题行每秒刷新「已获取 N 个包文件 / 用时」，下方实时滚动 npm 输出。 -->
+      <div id="update-progress" class="update-progress hidden">
+        <div class="update-progress-head">
+          <div class="spinner small"></div>
+          <div id="update-progress-text" class="update-progress-text"></div>
+        </div>
+        <pre id="update-progress-log" class="update-progress-log"></pre>
+      </div>
       <div id="port-busy-panel" class="port-busy hidden">
         <div><span data-i18n="pb_prefix">端口 </span><b id="busy-port">—</b><span data-i18n="pb_suffix"> 已被其他进程占用（可能是已在运行的 DSH，也可能是其他程序）。本程序不会强制结束未知进程。</span></div>
         <div class="row gap">

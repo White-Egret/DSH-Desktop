@@ -129,6 +129,7 @@ body {
 /* ---------- 状态区（启动等待 / 错误 / 端口占用；就绪后被内嵌 DSH 页面覆盖） ---------- */
 
 #stage {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -156,6 +157,24 @@ body {
 }
 .stage-line.error { color: var(--danger); }
 
+/* 启动等待页诗行：固定在状态区上方正中，比状态行大一号并加粗 */
+.poem-panel {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(90%, 640px);
+  text-align: center;
+}
+.poem-line {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.8;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .stage-hint {
   font-size: 12px;
   color: var(--text-dim);
@@ -173,6 +192,45 @@ body {
   padding: 16px 20px;
   color: var(--text);
   line-height: 1.6;
+}
+
+/* 更新进度面板：点击「更新 DSH」确认后显示在状态区，标题行显示实时进度，下方滚动 npm 输出 */
+.update-progress {
+  width: 560px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+}
+.update-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text);
+}
+.update-progress-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.update-progress-log {
+  width: 100%;
+  height: 200px;
+  overflow-y: auto;
+  background: #101418;
+  color: #d5dbe2;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  padding: 10px 14px;
+  border-radius: 8px;
+  user-select: text;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
 }
 
 /* 旋转加载指示 */

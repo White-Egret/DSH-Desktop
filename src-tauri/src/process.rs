@@ -177,6 +177,14 @@ pub struct UpdateFinished {
     pub message: String,
 }
 
+/// 「更新 DSH」进行中的实时进度（每秒回报一次，供页面进度区显示）
+#[derive(Clone, Serialize)]
+pub struct UpdateProgress {
+    pub fetched: usize, // 已获取的 npm 包文件数（按 npm http fetch 日志行计数）
+    pub secs: u64,      // 已用时（秒）
+    pub message: String, // 已本地化的完整进度文案
+}
+
 /// 首次运行引导安装：阶段性进度（download | install | verify）
 #[derive(Clone, Serialize)]
 pub struct SetupStatus {
@@ -1410,11 +1418,41 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
 
     let app2 = app.clone();
     std::thread::spawn(move || {
+        // 下载进度：计数 npm 的 http fetch 日志行，每秒向页面进度区回报一次
+        let fetch_counter = Arc::new(AtomicUsize::new(0));
+        let npm_done = Arc::new(AtomicBool::new(false));
+        {
+            let app_tick = app2.clone();
+            let counter = fetch_counter.clone();
+            let done_flag = npm_done.clone();
+            let started = Instant::now();
+            std::thread::spawn(move || {
+                while !done_flag.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(1000));
+                    if done_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let fetched = counter.load(Ordering::Relaxed);
+                    let secs = started.elapsed().as_secs();
+                    let _ = app_tick.emit(
+                        "update-progress",
+                        UpdateProgress {
+                            fetched,
+                            secs,
+                            message: i18n::fmt("update_npm_progress", &[&fetched, &secs]),
+                        },
+                    );
+                }
+            });
+        }
+
         let result: Result<i32, String> = (|| {
             let mut cmd = command_for(&npm_prog, &args)?;
             cmd.current_dir(&cwd);
             // npm.cmd 自身能找到 node，但它派生的安装脚本调的是裸 `node`：必须给出补好的 PATH
             cmd.env("PATH", detect::child_path_for(&[npm_prog.as_str()]));
+            // loglevel=http：npm 会把每次 registry 请求打成一行日志，据此统计「已获取 N 个包文件」
+            cmd.env("npm_config_loglevel", "http");
             apply_no_window(&mut cmd);
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -1444,10 +1482,26 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
             );
 
             if let Some(so) = child.stdout.take() {
-                spawn_log_reader(app2.clone(), so, "update", "update-log", false, None, None);
+                spawn_log_reader(
+                    app2.clone(),
+                    so,
+                    "update",
+                    "update-log",
+                    false,
+                    None,
+                    Some(fetch_counter.clone()),
+                );
             }
             if let Some(se) = child.stderr.take() {
-                spawn_log_reader(app2.clone(), se, "update", "update-log", false, None, None);
+                spawn_log_reader(
+                    app2.clone(),
+                    se,
+                    "update",
+                    "update-log",
+                    false,
+                    None,
+                    Some(fetch_counter.clone()),
+                );
             }
 
             child
@@ -1455,6 +1509,8 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
                 .map(|s| s.code().unwrap_or(-1))
                 .map_err(|e| i18n::fmt("err_npm_wait", &[&e.to_string()]))
         })();
+        // npm 进程已退出：停止上面的进度回报线程
+        npm_done.store(true, Ordering::Relaxed);
 
         let state = app2.state::<AppState>();
         state.close_update_job();

@@ -20,16 +20,17 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 ## Features
 
 - Single-window design with embedded DSH web UI (multi-webview), auto-resizing with the window
-- Configurable port (default **3080**), paths auto-detected with manual override in Settings
+- Configurable port (default **3080**), paths auto-detected with manual override in Preferences
 - Port-in-use protection: prompts instead of killing unknown processes — connect to the existing service, change port, or re-check
 - Actual-address detection: if DSH prints its real listen URL (e.g. `dsh web: http://127.0.0.1:3080`), the app loads that address preferentially
 - File logging: Desktop log at `%APPDATA%\com.dsh.desktop\desktop.log`, DSH output log at `%USERPROFILE%\.dsh\logs\dsh.log`; UI buttons to open the log folder and copy errors/log text
 - Refresh Page: reloads only the embedded DSH page without restarting the backend service (`F5` / `Ctrl+R`)
-- One-click update of DSH via npm, live output streaming
+- One-click update of DSH via npm, live output streaming; choose the `latest` **or** `next` channel in the confirmation dialog (upgrade *and* downgrade are offered regardless of what is installed), with a backup reminder for the DSH home dir
+- Version check against both npm dist-tags (`npm view <pkg> dist-tags`); the toolbar flags "update available" when your install trails the newest channel
 - Close-to-tray or quit-on-close behavior (configurable); tray menu with Show Main Window / Start with Windows / Exit; tray restore does show + unminimize + set_focus
 - Start with Windows (official autostart plugin, HKCU registry only, no admin rights); autostart runs silently in tray and delays DSH launch by 12 s to avoid the boot-time IO spike
 - First-run setup wizard: detects Node.js/npm/DSH and can guide installation (official nodejs.org LTS installer download or `npm install -g @deepseek-ai/dsh`) — fully skippable
-- **Bilingual UI (Chinese / English)**: choose a language in Settings; the whole launcher (toolbar, status, dialogs, logs, tray menu) switches, and DSH's own web UI follows via its `settings.yaml`
+- **Bilingual UI (Chinese / English)**: choose a language in Preferences; the whole launcher (toolbar, status, dialogs, logs, tray menu) switches, and DSH's own web UI follows via its `settings.yaml`
 - Single-instance lock: launching a second copy just focuses the existing window
 
 ## Requirements
@@ -102,7 +103,7 @@ Artifacts land in `src-tauri/target/release/bundle/nsis/`, `.../msi/`, and the r
    - Everything installed → click "完成，进入主界面" (done).
    - Something missing → use the guided buttons or skip and continue to the main UI anyway.
 3. Click **▶ 启动 (Start)** (or let the app auto-start DSH): status shows "starting… waited X s", then the DSH page embeds seamlessly once ready.
-4. Toolbar right side always shows: status dot · current port · version info.
+4. Toolbar right side always shows: status dot · current port · version info (with an "update available" badge when a newer `latest` / `next` exists — see [Version check](#version-check-latest-vs-next)).
 5. Closing the window hides to tray by default (configurable); use the tray icon or menu to bring it back; tray menu **退出 (Exit)** truly quits and stops the DSH process tree this app started.
 
 Example commands the app effectively runs (using your configured values):
@@ -117,7 +118,7 @@ Example global install:    npm install -g @deepseek-ai/dsh
 
 Config file: `%APPDATA%\com.dsh.desktop\config.json` (per-user; never written to Program Files or the install directory).
 
-Open **⚙ 设置 (Settings)** from the toolbar. All fields support auto-detection: leave them empty/broken and the app finds Node.js, npm, and dsh automatically (`where` lookup + common install directories such as `%ProgramFiles%\nodejs` and `%APPDATA%\npm`). Detected results fill the form automatically.
+Open **⚙ 首选项 (Preferences)** from the toolbar. All fields support auto-detection: leave them empty/broken and the app finds Node.js, npm, and dsh automatically (`where` lookup + common install directories such as `%ProgramFiles%\nodejs` and `%APPDATA%\npm`). Detected results fill the form automatically.
 
 | Setting | Default | Notes |
 |---|---|---|
@@ -128,14 +129,15 @@ Open **⚙ 设置 (Settings)** from the toolbar. All fields support auto-detecti
 | Ready timeout | `300` seconds | cold start can take minutes; **0 = wait forever** (as long as the process lives) |
 | When clicking X | hide to tray | or "quit program" (stops the DSH process started by this session) |
 | Extra args | empty | appended after `dsh web --port N --no-open`; plain flags only (see below) |
-| Package name | `@deepseek-ai/dsh` | used by version check / update |
-| Update args | `install -g @deepseek-ai/dsh@latest` | passed to npm as separate arguments; plain flags only (see below) |
+| Package name | `@deepseek-ai/dsh` | used for the `dist-tags` version query **and** to build the update command |
 | Start with Windows | off | immediate effect, `HKCU\...\Run`, also toggleable from the tray menu |
 | Interface language | `zh` (中文) | `zh` / `en`; switches the whole launcher and syncs DSH's `settings.yaml` — see [Language](#language) |
 
+> There is deliberately **no "update args" setting any more**: the update command is always `npm install -g <package name>@<channel>`, and the channel (`latest` / `next`) is chosen in the **⤓ 更新 DSH** dialog itself — see [Update DSH](#update-dsh). Extra npm knobs (registry, proxy) belong in an `.npmrc` next to the DSH home dir.
+
 ### Argument & path policy (enforced on save *and* at every use)
 
-These fields are capabilities, not text: `dsh_path` / `npm_path` are **executed**; `extra_args` / `update_args` / `package_name` become command-line arguments; and the **parent of the DSH home dir is the DSH process's working directory** (also where `npm` reads a `./.npmrc`). Because `config.json` is plain per-user JSON that autostart executes silently, validation runs on every use — not only when you press Save.
+These fields are capabilities, not text: `dsh_path` / `npm_path` are **executed**; `extra_args` / `package_name` become command-line arguments; and the **parent of the DSH home dir is the DSH process's working directory** (also where `npm` reads a `./.npmrc`). Because `config.json` is plain per-user JSON that autostart executes silently, validation runs on every use — not only when you press Save.
 
 - **Arguments**: shell metacharacters (`& | < > ^ % !` and quotes) are rejected, because `cmd.exe` re-parses the whole command line and would treat `a&calc.exe` as two commands. Ordinary flags (`--host=127.0.0.1`, `--port`, `--no-open`, paths) are unaffected.
 - **All paths**: absolute and drive-qualified only; `\\server\share` (UNC) rejected — writing there leaks credentials via NTLM auth, and executing from there trusts whatever answers the share; `..` segments rejected outright rather than folded away, so `C:\Windows\..\x` cannot be laundered into a valid path.
@@ -161,7 +163,7 @@ The launcher document itself is served under a strict CSP (`script-src 'self'`, 
 
 The launcher UI is bilingual (Simplified Chinese / English).
 
-- Pick **语言 / Language → English** in **⚙ Settings** and save. The toolbar, status area, dialogs, tray menu and every launcher-generated log line switch to English; choosing **中文** switches everything back. A restart is not required (and after restarting Desktop everything stays in your chosen language, read from `config.json`).
+- Pick **语言 / Language → English** in **⚙ Preferences** and save. The toolbar, status area, dialogs, tray menu and every launcher-generated log line switch to English; choosing **中文** switches everything back. A restart is not required (and after restarting Desktop everything stays in your chosen language, read from `config.json`).
 - **DSH's own web interface**: on save, the app also writes the matching value into `<DSH home dir>\settings.yaml`:
 
   ```yaml
@@ -170,19 +172,53 @@ The launcher UI is bilingual (Simplified Chinese / English).
   ```
 
   This is done as a minimal, targeted line edit — any other keys you keep in `settings.yaml` are preserved. DSH reads this file when it starts, so **restart DSH** (toolbar ⟳ Restart, or Stop + Start) for its interface language to change. If DSH is running when you change the language, the app logs a hint telling you a DSH restart is needed.
-- The first-run setup wizard follows the same rule: it renders in Chinese by default; switch to English any time in Settings.
+- The first-run setup wizard follows the same rule: it renders in Chinese by default; switch to English any time in Preferences.
 - DSH's raw `stdout`/`stderr` and npm's output are third-party program output — they appear verbatim in the log (never rewritten).
 
 ## Default port
 
 - The default port is **3080**.
-- You can change it in Settings; startup command, health polling, and the embedded WebView URL all follow the configured value.
+- You can change it in Preferences; startup command, health polling, and the embedded WebView URL all follow the configured value.
 - Example URLs/commands: `http://127.0.0.1:3080`, `dsh web --port 3080`.
 - Before each launch the app checks whether the configured port is free. If it is occupied (possibly by an already-running DSH, possibly by another program) the app **never force-kills** it; it shows a panel offering *Connect to existing service*, *Change port*, and *Re-check*. If DSH's own output announces a different actual address (e.g. `dsh web: http://127.0.0.1:3080`), that real address wins for embedding.
 
+## Version check: `latest` vs `next`
+
+The app queries **both** npm dist-tags in one call:
+
+```text
+npm view @deepseek-ai/dsh dist-tags
+→ { next: '0.2.0-rc.1', latest: '0.1.0', … }
+```
+
+`latest` is the **stable** release currently published for everyone; `next` is the **beta of the next version** — a *newer* number than `latest`, shipped for early testing. The dialog itself spells this out above the two options, so the meaning of the channels is never left implicit. The launcher compares your installed version against the **newest** of the two (i.e. `next` when `next` differs from `latest`, otherwise `latest`):
+
+| Toolbar shows | Meaning |
+|---|---|
+| `0.2.0-rc.1 (up to date)` | you already have the newest version of either channel |
+| `0.1.0 → 0.2.0-rc.1` + **next update** badge | something newer than your install exists (on the `next` channel) |
+| `0.1.0 → 0.1.5` + **update available** badge | newer on `latest`; no separate `next` channel |
+| `0.1.0 (update status unknown)` | local version read, registry query failed (reason in the log) |
+| `unknown` | local version unreadable — no comparison possible |
+
+Checking happens automatically on program start and whenever the DSH service (re)starts, with a 60 s cooldown so it can't stampede the registry — there is no manual "Check Version" button. The raw values for both channels are always written to the log.
+
 ## Update DSH
 
-Click **⤓ 更新 DSH (Update)** → confirm (exact command shown) → the service stops → `"<npm>" install -g @deepseek-ai/dsh@latest` runs (each argument passed as a separate token; see [Argument & path policy](#argument--path-policy-enforced-on-save-and-at-every-use)). While updating, the **page shows live progress** — a "package files fetched / elapsed" counter plus scrolling npm output, also mirrored into the log (source tag `update`) → success restarts DSH automatically. Buttons are disabled during the update. Use **检测全局包名** (`npm list -g --depth=0`) to confirm the package name. Version display: local `--version` vs latest `npm view`, refreshed automatically on every program start and whenever the DSH service (re)starts — there is no manual "Check Version" button.
+Click **⤓ 更新 DSH (Update)** → the dialog lists **both channels with their current version numbers** → pick one → confirm → the service stops → the install runs → success restarts DSH automatically.
+
+**You may choose either channel regardless of what is installed right now.** Someone who wants to try the newer build picks `next`; someone who wants to fall back to the older stable release picks `latest`. The dialog never disables an option because of your current version — the only thing that decides the command is your selection:
+
+| Channel | Command that runs |
+|---|---|
+| `latest` (stable release) | `"<npm>" install -g @deepseek-ai/dsh@latest` |
+| `next` (beta of the next version, newer) | `"<npm>" install -g @deepseek-ai/dsh@next` |
+
+- The dialog pre-selects the **newest** channel (the one the status bar pointed at), because that's the usual intent of an "Update" click. It deliberately does *not* pre-select the other one when you already have the newest: pre-choosing a downgrade you didn't ask for is worse than a harmless re-install. The other channel is one click away and labelled with its own version number and an "installed / newest / older" tag.
+- Each argument is passed to npm as a separate token (see [Argument & path policy](#argument--path-policy-enforced-on-save-and-at-every-use)). The channel itself is **not** a configurable field: the backend accepts only the literal strings `latest` and `next` and rejects anything else, so the picker cannot be turned into an argument-injection vector. The concrete version is resolved by npm at install time, which is why you can still pick a channel while its version number is displayed as "unknown" (registry unreachable).
+- **⚠ Back up the DSH home dir (`%USERPROFILE%\.dsh` by default) before either direction.** The dialog shows your *actual configured* path, and the reminder is repeated in the log when the run starts: a newer version may rewrite the config/session format, and rolling back to an older one can just as well fail to read what the newer one wrote.
+- While installing, the **page shows live progress** — a "package files fetched / elapsed" counter plus scrolling npm output, also mirrored into the log (source tag `update`). Buttons are disabled during the update.
+- Use **检测全局包名** (`npm list -g --depth=0`) to confirm the package name.
 
 ## Logs
 
@@ -204,16 +240,16 @@ DSH stdout/stderr are never hidden: they stream live to the log dialog and to bo
 
 ## Troubleshooting
 
-- **未找到 Node.js (Node.js not found)** — install Node.js LTS from <https://nodejs.org>, reopen Settings → 自动检测, or browse to `node.exe`'s directory manually.
+- **未找到 Node.js (Node.js not found)** — install Node.js LTS from <https://nodejs.org>, reopen Preferences → 自动检测, or browse to `node.exe`'s directory manually.
 - **未找到 npm** — usually fixed by installing Node.js; npm.cmd sits in the same directory as node.exe (e.g. `C:\Program Files\nodejs\npm.cmd`).
-- **未找到 DSH** — run `npm install -g @deepseek-ai/dsh` (see wizard), or point Settings to the existing `dsh.cmd` (typically `%APPDATA%\npm\dsh.cmd`).
-- **端口被占用 (Port busy)** — choose Connect to existing service (if it's another DSH instance), change the port in Settings, or handle the occupying process yourself in Task Manager. This app never kills unknown processes.
-- **DSH 启动超时 (Start timeout)** — cold starts can be slow; raise the timeout in Settings or set it to `0` (wait indefinitely while the process is alive).
+- **未找到 DSH** — run `npm install -g @deepseek-ai/dsh` (see wizard), or point Preferences to the existing `dsh.cmd` (typically `%APPDATA%\npm\dsh.cmd`).
+- **端口被占用 (Port busy)** — choose Connect to existing service (if it's another DSH instance), change the port in Preferences, or handle the occupying process yourself in Task Manager. This app never kills unknown processes.
+- **DSH 启动超时 (Start timeout)** — cold starts can be slow; raise the timeout in Preferences or set it to `0` (wait indefinitely while the process is alive).
 - **DSH 启动后立即退出 (Exits immediately)** — see the red error line (last stderr) and full log output; common causes: wrong home dir, broken global npm install, port conflicts inside DSH config.
-- **配置路径无效 (Invalid path)** — the error names the exact path; fix it in Settings (auto-detect usually repairs it).
-- **Closed the window but it's still running** — X hides to tray by default; use tray → Exit to quit. Change this in Settings ("点击窗口 X 时").
+- **配置路径无效 (Invalid path)** — the error names the exact path; fix it in Preferences (auto-detect usually repairs it).
+- **Closed the window but it's still running** — X hides to tray by default; use tray → Exit to quit. Change this in Preferences ("点击窗口 X 时").
 - **Tray icon doesn't reopen the window** — fixed pattern already implemented (show/unminimize/set-focus on main thread + WebView repaint nudge); if you still hit it, report with the desktop.log attached.
-- **Update failed** — check the npm output in the log; typically network issues or global-directory permissions (this app never requests admin).
+- **Update failed** — check the npm output in the log; typically network issues or global-directory permissions (this app never requests admin). If the install succeeded but DSH misbehaves, that usually means config written by a *different* version — restore the DSH home dir backup you took before switching channels, then retry.
 - **WebView2 missing** — the NSIS/MSI installers guide you through installing the WebView2 runtime (usually preinstalled with Edge).
 
 ## FAQ
@@ -224,14 +260,17 @@ No. Nothing is bundled or embedded, and no portable runtime is deployed. The app
 **Where is my configuration stored?**
 `%APPDATA%\com.dsh.desktop\config.json` — per-user, no admin rights required, never inside Program Files.
 
+**What is the difference between `latest` and `next`, and which should I install?**
+They are npm dist-tags, not versions. `latest` is the **stable** release — what a bare `npm install -g @deepseek-ai/dsh` targets. `next` is the **beta of the next version**: a newer number than `latest`, published for early testing, and it may contain breaking changes. The launcher reads both in one `npm view <pkg> dist-tags` call and, when the two differ, treats `next` as the newest version — so the toolbar reports an update unless what you have installed already *is* `next`. The dialog lets you install either channel no matter what you currently run, because trying the newer build and rolling back to the older stable release are both legitimate moves. Back up `%USERPROFILE%\.dsh` first either way. See [Update DSH](#update-dsh).
+
 **Which port does it use?**
-3080 by default; changeable in Settings (1–65535, validated). See [Default port](#default-port).
+3080 by default; changeable in Preferences (1–65535, validated). See [Default port](#default-port).
 
 **Does it manage DSH processes it didn't start?**
 No. It only stops the DSH tree it launched itself (by PID + Job Object). External services can be *connected to* read-only; quitting leaves them running.
 
 **Does closing the window quit the app?**
-By default no — it hides to the tray. You can switch the close button to "quit program" in Settings.
+By default no — it hides to the tray. You can switch the close button to "quit program" in Preferences.
 
 **Why does autostart wait 12 seconds?**
 Right after login, disk IO spikes and Node/network may not be ready; the delay avoids most timeout failures. Cancel it anytime by clicking Stop during the wait.

@@ -444,7 +444,12 @@ async function refreshConfig() {
 function applyLanguage(lang) {
   I18N.setLang(lang);
   I18N.applyDom();
-  // 重新渲染依赖语言的动态区域
+  // applyDom 会把 #ver-val 重置成词典默认值（「未知」），而「可更新」标记没有挂
+  // data-i18n（它是动态文案）：这里用缓存的检测结果按新语言重绘，避免切语言后
+  // 版本栏退回「未知」或残留旧语言的标记。
+  const v = lastVersionInfo || {};
+  renderVersion(v.local, v.latest, v.next);
+  if (!$('update-modal').classList.contains('hidden')) renderUpdateModal(false);
   invoke('get_status').then(onStatus).catch(() => {});
   if (wiz.active) renderWiz();
 }
@@ -462,7 +467,6 @@ function openSettings() {
   $('set-language').value = config.language === 'en' ? 'en' : 'zh';
   $('set-extra-args').value = config.extra_args;
   $('set-package-name').value = config.package_name;
-  $('set-update-args').value = config.update_args;
   $('set-config-path').textContent = config.config_path;
   markFlag('npm-exists-flag', config.npm_exists);
   markFlag('dsh-exists-flag', config.dsh_exists);
@@ -495,7 +499,8 @@ async function saveSettings() {
     health_timeout_secs: Number.isFinite(timeout) && timeout >= 0 ? timeout : 300,
     extra_args: $('set-extra-args').value.trim(),
     package_name: $('set-package-name').value.trim() || '@deepseek-ai/dsh',
-    update_args: $('set-update-args').value.trim() || 'install -g @deepseek-ai/dsh@latest',
+    // 更新命令不再有可配置参数：固定 install -g <包名>@<频道>，
+    // 频道由「更新 DSH」弹窗里的 latest / next 单选决定（见 renderUpdateModal）
   };
   const langChanged = cfg.language !== I18N.lang;
   try {
@@ -532,18 +537,48 @@ function onPathPicked(p) {
   }
 }
 
-// ---------- 版本（显示在工具栏右侧：本地 → 最新） ----------
+// ---------- 版本（显示在工具栏右侧：本地 → 最新，并在有新版本时挂「可更新」标记） ----------
 
-function renderVersion(local, latest) {
+// 最近一次 check_versions 的结果（{ local, latest, next }）；
+// 状态栏重绘（语言切换后）与「更新 DSH」弹窗里的频道版本号都取这里，不重新查 registry。
+let lastVersionInfo = null;
+
+// npm dist-tag 里的「最新可用版本」：next 频道比 latest 更新，所以只要 next 存在且
+// 与 latest 不同，就以 next 为准；否则（没有 next 标签，或两个标签指向同一版本）用 latest。
+function newestVersion(latest, next) {
+  const l = latest ? latest.trim() : null;
+  const n = next ? next.trim() : null;
+  if (n && n !== l) return { version: n, tag: 'next' };
+  if (l) return { version: l, tag: 'latest' };
+  if (n) return { version: n, tag: 'next' };
+  return null;
+}
+
+// 状态栏版本显示。三种形态：
+//   本地 == 最新        → 「0.1.1（已是最新）」
+//   本地 != 最新        → 「0.1.1 → 0.2.0」+ 高亮，并挂「可更新」/「可更新 next」标记
+//   拿不到远端版本号     → 「0.1.1（更新状态未知）」；本地版本都没有时显示「未知」
+// 比较只用字符串相等（与旧版一致）：注册表给出的就是这两个频道的准确值。
+function renderVersion(local, latest, next) {
   const el = $('ver-val');
-  if (local && latest) {
-    el.textContent = local.trim() === latest.trim()
-      ? t('ver_latest_suffix', local)
-      : t('ver_arrow', local, latest);
-  } else if (local) {
+  const badge = $('ver-badge');
+  badge.classList.add('hidden');
+  badge.textContent = '';
+  const newest = newestVersion(latest, next);
+  const loc = local ? local.trim() : null;
+  if (loc && newest) {
+    if (loc === newest.version) {
+      el.textContent = t('ver_latest_suffix', loc);
+    } else {
+      el.textContent = t('ver_arrow', loc, newest.version);
+      badge.textContent = newest.tag === 'next' ? t('ver_badge_next') : t('ver_badge_update');
+      badge.classList.remove('hidden');
+      badge.classList.toggle('badge-next', newest.tag === 'next');
+    }
+  } else if (loc) {
     // 能读到本地 DSH 版本但查不到最新版：明确提示更新状态未知，
     // 避免用户把「只显示本地版本」误当成「已是最新」
-    el.textContent = t('ver_local_only', local);
+    el.textContent = t('ver_local_only', loc);
   } else {
     // 本地 DSH 版本未知时不再单独显示 npm 上的最新版本——那会被误读为
     // 「npm 有新版本」；用户只关心 DSH 是否有新版本，此时无从比较，显示未知（原因在日志）
@@ -566,17 +601,22 @@ async function checkVersions() {
   appendLog('launcher', t('log_ver_querying'));
   try {
     const info = await invoke('check_versions');
+    lastVersionInfo = info;
     if (info.local) appendLog('launcher', t('log_ver_local', info.local));
-    if (info.latest) {
-      appendLog('launcher', t('log_ver_latest', info.latest));
-      if (info.local && info.local.trim() !== info.latest.trim()) {
-        appendLog('launcher', t('log_ver_update_avail', info.local.trim(), info.latest.trim()));
-      }
+    if (info.latest) appendLog('launcher', t('log_ver_latest', info.latest));
+    if (info.next) appendLog('launcher', t('log_ver_next', info.next));
+    const newest = newestVersion(info.latest, info.next);
+    if (newest && info.local && info.local.trim() !== newest.version) {
+      appendLog(
+        'launcher',
+        t(newest.tag === 'next' ? 'log_ver_update_avail_next' : 'log_ver_update_avail',
+          info.local.trim(), newest.version),
+      );
     }
     if (info.error) appendLog('launcher', t('log_ver_error', info.error));
-    renderVersion(info.local, info.latest);
+    renderVersion(info.local, info.latest, info.next);
   } catch (err) {
-    renderVersion(null, null);
+    renderVersion(null, null, null);
     appendLog('launcher', t('log_ver_fail', err));
   } finally {
     checkingVersion = false;
@@ -584,15 +624,76 @@ async function checkVersions() {
   }
 }
 
-// ---------- 更新 ----------
+// ---------- 更新 / 切换版本频道 ----------
+
+// 当前弹窗里选中的频道（'latest' | 'next'）
+function selectedTag() {
+  const el = document.querySelector('input[name="upd-channel"]:checked');
+  return el && el.value === 'next' ? 'next' : 'latest';
+}
+
+// npm 侧真正被安装的规格：<包名>@<频道>，由 registry 解析成具体版本号
+function updateCmdText(tag) {
+  return `"${config.npm_path}" install -g ${config.package_name}@${tag}`;
+}
+
+function renderUpdateCmd() {
+  $('update-cmd-preview').textContent = updateCmdText(selectedTag());
+}
+
+// 单个频道行的版本号 + 说明标记。拿不到该频道的版本号时显示「—」，
+// 但仍允许选择：装的是标签，具体版本由 npm 在安装时向 registry 解析。
+// 标记按「版本号」判断而不是按「频道名」判断：两个频道指向同一版本时，
+// 两边都不能说对方「较旧」（next === latest 是很常见的状态）。
+function fillChannel(tag, version, newestVer, local) {
+  const verEl = $('upd-ver-' + tag);
+  const flag = $('upd-flag-' + tag);
+  flag.textContent = '';
+  const v = version ? version.trim() : null;
+  verEl.textContent = v || t('upd_ver_unknown');
+  let key = null;
+  if (v) {
+    if (local && v === local) key = 'upd_flag_current';
+    else if (newestVer && v === newestVer) key = 'upd_flag_newest';
+    else if (newestVer) key = 'upd_flag_older';
+  }
+  if (key) {
+    flag.textContent = t(key);
+    flag.className = 'upd-ch-flag ' + (key === 'upd_flag_current' ? 'cur' : key === 'upd_flag_newest' ? 'new' : 'old');
+  } else {
+    flag.className = 'upd-ch-flag hidden';
+  }
+}
+
+// 填充弹窗内所有动态文案。resetSelection = true 时按「更新的频道」预选单选项
+// （打开弹窗时）；false 只按当前选择重绘文字（语言切换时），不覆盖用户已经点选的频道。
+function renderUpdateModal(resetSelection) {
+  if (!config) return;
+  const v = lastVersionInfo || {};
+  const local = v.local ? v.local.trim() : null;
+  const newest = newestVersion(v.latest, v.next);
+  const newestTag = newest ? newest.tag : null;
+  if (resetSelection) {
+    // 两个频道始终可选（有人想试更新的东西，也有人想退回旧的稳定版），
+    // 默认选中「更新的那个」
+    const preferred = newestTag || 'latest';
+    $('upd-tag-latest').checked = preferred === 'latest';
+    $('upd-tag-next').checked = preferred === 'next';
+  }
+  fillChannel('latest', v.latest, newest ? newest.version : null, local);
+  fillChannel('next', v.next, newest ? newest.version : null, local);
+  // 备份提醒：无论哪个方向都建议备份，这里显示当前实际生效的家目录路径
+  $('upd-backup-dir').textContent = config.dsh_home_dir || t('upd_backup_dir_unknown');
+  renderUpdateCmd();
+}
 
 function confirmUpdate() {
-  if (!config) return;
-  $('update-cmd-preview').textContent = `"${config.npm_path}" ${config.update_args}`;
+  renderUpdateModal(true);
   showModal('update-modal');
 }
 
 async function doUpdate() {
+  const tag = selectedTag();
   hideModal('update-modal');
   if (updating) return;
   updating = true;
@@ -604,9 +705,9 @@ async function doUpdate() {
   $('update-progress-log').textContent = '';
   $('update-progress-text').textContent = t('upd_prog_prepare');
   panel.classList.remove('hidden');
-  appendLog('update', t('log_update_begin'));
+  appendLog('update', t('log_update_begin', tag));
   try {
-    await invoke('update_dsh');
+    await invoke('update_dsh', { tag });
   } catch (err) {
     updating = false;
     refreshButtons();
@@ -790,6 +891,10 @@ function bindUI() {
   $('btn-clear-log').onclick = () => { logBody.innerHTML = ''; };
   $('btn-cancel-update').onclick = () => hideModal('update-modal');
   $('btn-confirm-update').onclick = doUpdate;
+  // 切换频道时同步刷新「将执行」的命令预览
+  document.querySelectorAll('input[name="upd-channel"]').forEach((r) => {
+    r.onchange = renderUpdateCmd;
+  });
   $('btn-connect').onclick = () => invoke('connect_existing').catch((e) => toast(String(e), true));
   $('btn-change-port').onclick = openSettings;
 

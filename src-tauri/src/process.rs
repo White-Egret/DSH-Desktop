@@ -207,10 +207,15 @@ pub struct PortCheck {
     pub in_use: bool,
 }
 
+/// 版本检测结果（来自 `npm view <pkg> dist-tags`，不是单个版本号）
 #[derive(Serialize, Clone)]
 pub struct VersionInfo {
+    /// 本地 `dsh --version` 读到的版本
     pub local: Option<String>,
+    /// dist-tag `latest`：稳定版频道
     pub latest: Option<String>,
+    /// dist-tag `next`：比 latest 更新的预览频道；注册表里没有该标签时为 None
+    pub next: Option<String>,
     pub error: Option<String>,
 }
 
@@ -1110,10 +1115,11 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     if config.dsh_path.trim().is_empty() || config.npm_path.trim().is_empty() {
         return Err(i18n::t("err_paths_empty").to_string());
     }
-    // 这三个字段最终会拼成子进程的命令行，在保存入口就把 cmd 元字符挡掉，
+    // 这两个字段最终会拼成子进程的命令行，在保存入口就把 cmd 元字符挡掉，
     // 用户能立刻在设置页看到原因（使用点还有第二道校验，手改的配置文件绕不过去）。
+    // 更新命令本身不再有可配置字段：它固定由 package_name + 页面上选定的
+    // dist-tag（latest / next）拼成 `install -g <包名>@<标签>`，见 update_dsh。
     validate_arg_field("extra_args", &config.extra_args)?;
-    validate_arg_field("update_args", &config.update_args)?;
     validate_arg_field("package_name", &config.package_name)?;
     validate_program_path(&config.dsh_path)?;
     validate_program_path(&config.npm_path)?;
@@ -1227,14 +1233,64 @@ pub async fn connect_existing(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 版本检测：本地依次尝试 --version / -v / -V；最新版本用 npm view <pkg> version
+/// 解析 `npm view <pkg> dist-tags` 的输出，取出 latest / next 两个标签的版本号。
+///
+/// npm 在这里打印的是 Node `util.inspect` 形态，**不是 JSON**，所以不能交给 JSON 解析器：
+/// 单行时是 `{ latest: '0.1.0', next: '0.2.0-rc.1' }`，标签一多就会折成多行：
+///
+/// ```text
+/// {
+///   alpha: '0.2.0-alpha.1',
+///   latest: '0.1.0',
+///   next: '0.2.0-rc.1'
+/// }
+/// ```
+///
+/// 于是按 `,` `{` `}` 切成片段，每片段取 `key: 'value'`（键也可能被引号包住，
+/// 那种形态就是标准 JSON）；只认 latest / next 两个键，其余频道忽略。
+/// 值要求「非空、不含空白、不太长」，避免把 npm 顺带打到 stderr 的告警文字当成版本号。
+fn parse_dist_tags(raw: &str) -> (Option<String>, Option<String>) {
+    let mut latest: Option<String> = None;
+    let mut next: Option<String> = None;
+    let unquote = |s: &str| -> String {
+        s.trim().trim_matches(|c| c == '\'' || c == '"').trim().to_string()
+    };
+    for chunk in raw.split(|c| c == ',' || c == '{' || c == '}') {
+        let Some((k, v)) = chunk.split_once(':') else {
+            continue;
+        };
+        let key = unquote(k);
+        let val = unquote(v);
+        if val.is_empty() || val.len() >= 64 || val.chars().any(char::is_whitespace) {
+            continue;
+        }
+        if key.eq_ignore_ascii_case("latest") {
+            if latest.is_none() {
+                latest = Some(val);
+            }
+        } else if key.eq_ignore_ascii_case("next") {
+            if next.is_none() {
+                next = Some(val);
+            }
+        }
+    }
+    (latest, next)
+}
+
+/// 版本检测：本地依次尝试 --version / -v / -V；远端用 `npm view <pkg> dist-tags`
+/// 一次拿齐 latest（稳定频道）与 next（预览频道，比 latest 更新）。
 #[tauri::command]
 pub async fn check_versions(app: AppHandle) -> Result<VersionInfo, String> {
     let cfg = config::load(&app);
     // package_name 会作为参数交给 `npm view`：先挡掉任何 cmd 元字符（宁可报错也不执行）
     validate_arg_field("package_name", &cfg.package_name)?;
     let cwd = config::workspace_cwd(&cfg)?;
-    let mut info = VersionInfo { local: None, latest: None, error: None };
+    let mut info = VersionInfo {
+        local: None,
+        latest: None,
+        next: None,
+        error: None,
+    };
 
     // 执行前先过同一套路径策略（绝对 / 非 UNC / 无 `..` / 扩展名白名单 / 不在临时目录）。
     // 这里刻意不硬失败：版本检测是只读功能，路径非法时走原有的「未安装」提示分支，
@@ -1276,18 +1332,27 @@ pub async fn check_versions(app: AppHandle) -> Result<VersionInfo, String> {
             &[
                 "view".to_string(),
                 cfg.package_name.clone(),
-                "version".to_string(),
+                "dist-tags".to_string(),
             ],
             &cwd,
             Duration::from_secs(60),
         ) {
             Ok((true, out)) => {
-                let v = out.trim();
-                if !v.is_empty() {
-                    info.latest = Some(v.to_string());
+                let (latest, next) = parse_dist_tags(&out);
+                if latest.is_some() || next.is_some() {
+                    info.latest = latest;
+                    info.next = next;
                 } else {
-                    let e = i18n::fmt("err_ver_view_empty", &[&cfg.package_name]);
-                    info.error = Some(join_err(info.error, &e));
+                    // 一个标签都没解析出来：多半是这个 npm 版本改了输出形态。
+                    // 退一步把整段输出当 latest 版本号（老形态本来就是单个版本号串）；
+                    // 连单个 token 都不像的（空白 / 带空格 / 超长）就报解析失败，不硬猜。
+                    let v = out.trim();
+                    if !v.is_empty() && v.len() < 64 && !v.chars().any(char::is_whitespace) {
+                        info.latest = Some(v.trim_matches(|c| c == '\'' || c == '"').to_string());
+                    } else {
+                        let e = i18n::fmt("err_ver_parse", &[&cfg.package_name, &v]);
+                        info.error = Some(join_err(info.error, &e));
+                    }
                 }
             }
             Ok((false, out)) => {
@@ -1355,9 +1420,20 @@ pub async fn detect_npm_package(app: AppHandle) -> Result<String, String> {
     }
 }
 
-/// 更新 DSH：先停止本程序启动的 DSH → 执行 npm install -g <pkg>@latest → 实时转发输出 → 按退出码报告结果
+/// 更新 / 换频道安装 DSH：先停止本程序启动的 DSH → 执行 npm install -g <pkg>@<tag>
+/// → 实时转发输出 → 按退出码报告结果。
+///
+/// `tag` 是页面上选定的 npm dist-tag，只接受 `latest` / `next` 两个值。
+/// 之所以是白名单而不是配置项：它会被拼进 npm 的命令行，交给调用方自由发挥
+/// 就等于把「选频道」变成「注入任意参数」的入口。
+/// 两个方向都允许（升级或退回稳定版），因此不做任何版本高低判断。
 #[tauri::command]
-pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
+pub async fn update_dsh(app: AppHandle, tag: String) -> Result<(), String> {
+    let tag = tag.trim().to_ascii_lowercase();
+    if tag != "latest" && tag != "next" {
+        return Err(i18n::t("err_update_bad_tag").to_string());
+    }
+
     let state = app.state::<AppState>();
     if state.updating.swap(true, Ordering::SeqCst) {
         return Err(i18n::t("err_update_busy").to_string());
@@ -1383,7 +1459,7 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
     };
 
     // 先校验将拼进 npm 命令行的参数：避免非法配置已经把 DSH 停掉了才报错
-    if let Err(e) = validate_arg_field("update_args", &cfg.update_args) {
+    if let Err(e) = validate_arg_field("package_name", &cfg.package_name) {
         state.updating.store(false, Ordering::SeqCst);
         set_status(&app, "error", Some(e.clone()));
         return Err(e);
@@ -1399,6 +1475,13 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
     }
 
     set_status(&app, "updating", None);
+    // 无论升级还是退回，配置格式的兼容性都可能变化：先把备份提醒写进日志
+    // （页面上的确认框里已经写过一次，这里落盘留痕）
+    emit_log(
+        &app,
+        "update",
+        i18n::fmt("log_update_backup_remind", &[&cfg.dsh_home_dir]),
+    );
     // 注意：workspace_cwd 现在会做路径策略校验并可能失败。
     // 这里不能用 `?` 直接返回 —— updating 已经置为 true，
     // 不显式复位就会把「正在更新」状态永久卡住（后续更新/引导安装全部被 err_update_busy 挡住）。
@@ -1410,11 +1493,12 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
             return Err(e);
         }
     };
-    let args: Vec<String> = cfg
-        .update_args
-        .split_whitespace()
-        .map(std::string::ToString::to_string)
-        .collect();
+    let args: Vec<String> = vec![
+        "install".to_string(),
+        "-g".to_string(),
+        format!("{}@{}", cfg.package_name, tag),
+    ];
+    let args_display = args.join(" ");
 
     let app2 = app.clone();
     std::thread::spawn(move || {
@@ -1477,7 +1561,7 @@ pub async fn update_dsh(app: AppHandle) -> Result<(), String> {
                 "update",
                 i18n::fmt(
                     "log_update_cmd",
-                    &[&npm_prog, &cfg.update_args, &cwd, &pid],
+                    &[&npm_prog, &args_display, &cwd, &pid],
                 ),
             );
 

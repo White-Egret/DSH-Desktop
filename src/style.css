@@ -450,13 +450,36 @@ body {
 .log-line.launcher { color: #8fd0ff; }
 .log-line.update { color: #ffd479; }
 
-/* ---------- 更新确认 ---------- */
+/* ---------- 工具栏「可更新」标记 ---------- */
+
+/* 版本检测发现本地版本落后于最新频道（latest 与 next 不同时以 next 为准）时挂在版本号后面。
+   用 em 而非 data-i18n：文案是动态的，切换语言后由 renderVersion 重绘。 */
+.ver-badge {
+  font-style: normal;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: #7a4a00;
+  background: #ffe9bf;
+  border: 1px solid #f0c874;
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+.ver-badge.badge-next { color: #3d2a75; background: #e8ddff; border-color: #c6b0f0; }
+
+/* ---------- 更新 / 切换版本确认 ---------- */
 
 .update-desc {
-  padding: 4px 18px 8px;
+  padding: 4px 18px 10px;
   font-size: 12.5px;
   line-height: 1.7;
   color: var(--text);
+  /* 弹窗内容变多（两个频道 + 命令预览 + 备份提醒）：小窗口下允许内部滚动，
+     否则确认/取消按钮会被挤出可视区 */
+  overflow-y: auto;
 }
 .update-desc code {
   display: block;
@@ -469,6 +492,77 @@ body {
   user-select: text;
   margin-top: 6px;
 }
+
+.upd-lead { margin-bottom: 4px; }
+
+/* 频道含义说明：说清楚 latest = 稳定版、next = 下一版的 beta，
+   放在两个选项之上，用户点选之前一定会先看到 */
+.upd-ch-note {
+  margin: 0 0 8px;
+  padding: 7px 10px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+  background: #f2f6ff;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text);
+}
+
+/* 频道单选：整行可点（label 包住 radio），两个方向永远都允许选 */
+.upd-channels {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.upd-channel {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+}
+.upd-channel:hover { border-color: var(--accent); background: #f7faff; }
+.upd-channel input[type="radio"] { margin-top: 3px; flex: none; accent-color: var(--accent); }
+.upd-channel:has(input:checked) {
+  border-color: var(--accent);
+  background: #eef4ff;
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.upd-ch-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.upd-ch-top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.upd-ch-name { font-family: Consolas, monospace; font-size: 12.5px; }
+.upd-ch-ver { font-family: Consolas, monospace; font-size: 12px; color: var(--text-dim); }
+.upd-ch-desc { font-size: 11.5px; color: var(--text-dim); line-height: 1.5; }
+.upd-ch-flag {
+  font-style: normal;
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+.upd-ch-flag.cur { color: #0d5c33; background: #dcf5e7; border-color: #a5dcc0; }
+.upd-ch-flag.new { color: #7a4a00; background: #ffe9bf; border-color: #f0c874; }
+.upd-ch-flag.old { color: #3d2a75; background: #ece5fb; border-color: #c6b0f0; }
+
+.upd-cmd-label { margin-bottom: 2px; }
+.upd-note { margin-top: 8px; }
+
+/* 备份提醒：升级与降级同等重要，视觉上必须跳出正文 */
+.upd-backup {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid #f0c874;
+  border-left: 3px solid #e6a817;
+  border-radius: 6px;
+  background: #fff9ec;
+}
+.upd-backup-title { font-weight: 600; }
+.upd-backup code { background: #fff; border: 1px solid #ecd9ae; }
+.upd-backup-note { font-size: 11.5px; color: var(--text-dim); margin-top: 4px; line-height: 1.6; }
 
 /* ---------- Toast ---------- */
 

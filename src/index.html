@@ -17,7 +17,7 @@
       <button id="btn-refresh" class="btn" data-i18n="btn_refresh">↻ 刷新页面</button>
       <button id="btn-update" class="btn" data-i18n="btn_update">⤓ 更新 DSH</button>
       <button id="btn-log" class="btn" data-i18n="btn_log">日志</button>
-      <button id="btn-settings" class="btn" data-i18n="btn_settings">⚙ 设置</button>
+      <button id="btn-settings" class="btn" data-i18n="btn_settings">⚙ 首选项</button>
     </div>
     <div class="tb-right">
       <span id="status-dot" class="dot gray"></span>
@@ -25,7 +25,7 @@
       <span class="sep">·</span>
       <span><span data-i18n="lbl_port">端口</span> <b id="port-val">—</b></span>
       <span class="sep">·</span>
-      <span id="ver-wrap"><span data-i18n="lbl_version">版本</span> <b id="ver-val" data-i18n="ver_unknown2">未知</b></span>
+      <span id="ver-wrap"><span data-i18n="lbl_version">版本</span> <b id="ver-val" data-i18n="ver_unknown2">未知</b><em id="ver-badge" class="ver-badge hidden"></em></span>
     </div>
   </header>
 
@@ -39,7 +39,7 @@
       <div id="spinner" class="spinner hidden"></div>
       <div id="stage-line" class="stage-line" data-i18n="stage_init">正在初始化…</div>
       <div id="stage-hint" class="stage-hint hidden" data-i18n="stage_hint">点击「日志」查看 DSH 的完整输出</div>
-      <!-- 更新进度面板：点击「更新 DSH」→「开始更新」后显示在状态区，
+      <!-- 更新进度面板：点击「更新 DSH」→ 选定 latest / next 频道 →「开始安装」后显示在状态区，
            标题行每秒刷新「已获取 N 个包文件 / 用时」，下方实时滚动 npm 输出。 -->
       <div id="update-progress" class="update-progress hidden">
         <div class="update-progress-head">
@@ -71,7 +71,7 @@
   <!-- 设置模态框 -->
   <div id="settings-modal" class="modal hidden">
     <div class="modal-box">
-      <div class="modal-title" data-i18n="set_title">设置</div>
+      <div class="modal-title" data-i18n="set_title">首选项</div>
       <div class="form">
         <div class="row left">
           <button id="btn-autodetect" class="btn small" data-i18n="btn_autodetect">自动检测 Node / npm / DSH 路径</button>
@@ -132,13 +132,12 @@
           <input id="set-extra-args" type="text" spellcheck="false" data-i18n-placeholder="ph_extra" placeholder="例如: --trusted-host example.com" />
         </label>
         <label class="field">
-          <span data-i18n="lbl_pkg_name">DSH 的 npm 包名（用于查询最新版本）</span>
+          <span data-i18n="lbl_pkg_name">DSH 的 npm 包名（用于查询 dist-tags 与拼装更新命令）</span>
           <input id="set-package-name" type="text" spellcheck="false" />
         </label>
-        <label class="field">
-          <span data-i18n="lbl_update_args">更新参数（拼在 npm 程序路径之后；不接受 cmd 元字符）</span>
-          <input id="set-update-args" type="text" spellcheck="false" />
-        </label>
+        <div class="hint" data-i18n="lbl_update_cmd_fixed">
+          更新命令固定为 npm install -g &lt;包名&gt;@&lt;频道&gt;；频道（latest / next）在点「更新 DSH」时选择，不再单独设置参数。
+        </div>
         <div class="hint" data-i18n-html="set_hint_html">
           配置保存于：<span id="set-config-path"></span><br />
           路径留空或失效时会自动检测本机的 Node / npm / DSH；也可点上方「自动检测」或手动浏览选择。<br />
@@ -172,18 +171,54 @@
     </div>
   </div>
 
-  <!-- 更新确认模态框 -->
+  <!-- 更新确认模态框：latest / next 两个频道都可任选（升级或退回稳定版都合理），
+       所以选项不按「当前已装版本」禁用；页脚固定提醒备份 DSH 家目录。 -->
   <div id="update-modal" class="modal hidden">
     <div class="modal-box narrow">
-      <div class="modal-title" data-i18n="upd_title">更新 DSH</div>
-      <div class="update-desc" data-i18n-html="upd_desc_html">
-        将执行：<code id="update-cmd-preview"></code><br /><br />
-        更新前会<b>停止当前 DSH 服务</b>；更新成功后会自动重新启动。<br />
-        如担心大版本不兼容，建议先备份 DSH 配置目录。
+      <div class="modal-title" data-i18n="upd_title">更新 / 切换 DSH 版本</div>
+      <div class="update-desc">
+        <div class="upd-lead" data-i18n="upd_lead">选择要安装的版本频道：</div>
+        <div class="upd-ch-note" data-i18n-html="upd_channel_note_html">
+          两个选项都是 npm 的发行频道（dist-tag），不是具体版本号：<b>latest</b> 是当前对外发布的<b>稳定版</b>；<b>next</b> 是<b>下一版的 beta</b>，版本号比 latest 更新，用于提前试用，可能带不兼容改动。
+        </div>
+        <div class="upd-channels">
+          <label class="upd-channel" id="upd-channel-latest">
+            <input type="radio" name="upd-channel" id="upd-tag-latest" value="latest" checked />
+            <span class="upd-ch-body">
+              <span class="upd-ch-top">
+                <b class="upd-ch-name">latest</b>
+                <span class="upd-ch-ver" id="upd-ver-latest">—</span>
+                <em class="upd-ch-flag" id="upd-flag-latest"></em>
+              </span>
+              <span class="upd-ch-desc" data-i18n="upd_channel_latest">稳定版：当前正式对外发布的版本</span>
+            </span>
+          </label>
+          <label class="upd-channel" id="upd-channel-next">
+            <input type="radio" name="upd-channel" id="upd-tag-next" value="next" />
+            <span class="upd-ch-body">
+              <span class="upd-ch-top">
+                <b class="upd-ch-name">next</b>
+                <span class="upd-ch-ver" id="upd-ver-next">—</span>
+                <em class="upd-ch-flag" id="upd-flag-next"></em>
+              </span>
+              <span class="upd-ch-desc" data-i18n="upd_channel_next">下一版的 beta：比 latest 更新，可能不稳定</span>
+            </span>
+          </label>
+        </div>
+        <div class="upd-cmd-label" data-i18n="upd_will_run">将执行：</div>
+        <code id="update-cmd-preview"></code>
+        <div class="upd-note" data-i18n-html="upd_desc_html">
+          执行前会<b>停止当前 DSH 服务</b>；完成后自动重新启动。
+        </div>
+        <div class="upd-backup">
+          <div class="upd-backup-title" data-i18n="upd_backup_title">⚠ 请先备份 DSH 家目录</div>
+          <code id="upd-backup-dir"></code>
+          <div class="upd-backup-note" data-i18n="upd_backup_note">无论升级还是退回旧版本都建议备份：配置、密钥与会话数据都在这里，另一个版本可能改写其格式。</div>
+        </div>
       </div>
       <div class="modal-actions">
         <button id="btn-cancel-update" class="btn" data-i18n="btn_cancel">取消</button>
-        <button id="btn-confirm-update" class="btn primary" data-i18n="btn_start_update">开始更新</button>
+        <button id="btn-confirm-update" class="btn primary" data-i18n="btn_start_update">开始安装</button>
       </div>
     </div>
   </div>
@@ -200,7 +235,7 @@
         <div class="wiz-step-title lang-title">Language / 语言</div>
         <div class="wiz-step-body lang-note">
           Please choose your language to proceed.<br />
-          请选择您要使用的语言，再进入下一步。（之后可随时在「设置 ⚙」里修改 / You can change it anytime in Settings.）
+          请选择您要使用的语言，再进入下一步。（之后可随时在「首选项 ⚙」里修改 / You can change it anytime in Preferences.）
         </div>
         <div class="row gap left lang-row">
           <button id="wiz-btn-lang-en" class="btn lang-btn" type="button">

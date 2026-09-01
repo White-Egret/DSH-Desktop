@@ -19,10 +19,8 @@ pub struct Config {
     pub port: u16,
     /// 附加启动参数（空格分隔，追加在 `dsh web --port <port> --no-open` 之后）
     pub extra_args: String,
-    /// DSH 的 npm 包名（用于 `npm view <name> version` 与提示）
+    /// DSH 的 npm 包名（用于 `npm view <name> dist-tags` 与更新命令）
     pub package_name: String,
-    /// 更新参数（拼在 `cmd /C <npm_path>` 之后）
-    pub update_args: String,
     /// 等待 DSH 就绪的超时时间（秒）；0 = 一直等待（只要 DSH 进程还活着）
     pub health_timeout_secs: u64,
     /// 点击主窗口 X 时的行为："tray" = 隐藏到托盘（默认），"quit" = 退出程序
@@ -43,7 +41,6 @@ impl Default for Config {
             port: 3080,
             extra_args: String::new(),
             package_name: "@deepseek-ai/dsh".to_string(),
-            update_args: "install -g @deepseek-ai/dsh@latest".to_string(),
             // DSH 冷启动（尤其重启电脑后首次）可能需要 1~2 分钟以上，默认给足 5 分钟
             health_timeout_secs: 300,
             // 默认点 X 隐藏到托盘（后台继续运行）；可在设置页改为退出程序

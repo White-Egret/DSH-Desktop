@@ -183,6 +183,7 @@ body {
 }
 .poem-source {
   align-self: flex-end;   /* 出处右端对齐最后一行行末 */
+  transform: translateX(3em); /* 再向右挪 3 个出处字宽（14px×3=42px），不影响布局 */
   margin-top: 4px;
   font-size: 14px;
   font-weight: 400;       /* 出处不加粗（诗行本身加粗，出处保持常规字重） */

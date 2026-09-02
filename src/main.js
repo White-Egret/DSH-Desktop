@@ -211,7 +211,7 @@ function showPoemLine() {
   // 出处只显示在最后一行（不限时、一直保留到就绪）的行末下方
   const src = $('poem-source');
   if (poemIndex === lines.length - 1) {
-    src.innerHTML = L.t('poem_source');
+    src.innerHTML = t('poem_source');
   } else {
     src.innerHTML = '';
   }

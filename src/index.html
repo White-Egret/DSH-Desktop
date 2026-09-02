@@ -31,9 +31,13 @@
 
   <!-- 状态区：启动等待 / 错误 / 端口占用 提示（就绪后整块被内嵌的 DSH 页面覆盖） -->
   <main id="stage">
-    <!-- 启动等待页诗行：中英文按词典逐行显示，最后一行保留到 DSH 页面就绪 -->
+    <!-- 启动等待页诗行：中英文按词典逐行显示，最后一行保留到 DSH 页面就绪，
+         并在行末下方显示诗句出处 -->
     <div id="poem-panel" class="poem-panel hidden">
-      <div id="poem-line" class="poem-line"></div>
+      <div class="poem-block">
+        <div id="poem-line" class="poem-line"></div>
+        <div id="poem-source" class="poem-source"></div>
+      </div>
     </div>
     <div id="stage-inner">
       <div id="spinner" class="spinner hidden"></div>

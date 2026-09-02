@@ -167,6 +167,12 @@ body {
   width: min(90%, 640px);
   text-align: center;
 }
+/* 诗行与出处置于同一内联列：整列居中，出处右对齐到行末（即最后两个字/词的正下方） */
+.poem-block {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
 .poem-line {
   font-size: 20px;
   font-weight: 700;
@@ -174,6 +180,14 @@ body {
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
+}
+.poem-source {
+  align-self: flex-end;   /* 出处右端对齐最后一行行末 */
+  margin-top: 4px;
+  font-size: 14px;
+  font-weight: 400;       /* 出处不加粗（诗行本身加粗，出处保持常规字重） */
+  color: var(--text-dim);
+  white-space: nowrap;
 }
 
 .stage-hint {

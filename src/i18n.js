@@ -43,6 +43,8 @@
       '梦入新年感物华，',
       '楼边残月斜。',
     ],
+    // 最后一行（不限时）在行末下方显示的诗句出处
+    poem_source: '戴玨 《长相思》',
     err_not_running: 'DSH 服务未在运行。',
     // 端口占用面板
     pb_prefix: '端口 ',
@@ -229,6 +231,8 @@
       'Made weak by time and fate, but strong in will',
       'To strive, to seek, to find, and not to yield.',
     ],
+    // Source shown under the end of the last (untimed) line; only the work title is italicized
+    poem_source: 'from Tennyson\'s <i>Ulysses</i>',
     err_not_running: 'DSH service is not running.',
     pb_prefix: 'Port ',
     pb_suffix: ' is occupied by another process (possibly an already-running DSH, or another program). This app does not force-kill unknown processes.',

@@ -208,6 +208,13 @@ function showPoemLine() {
   const lines = getPoemLines();
   if (!lines.length || poemIndex < 0 || poemIndex >= lines.length) return;
   $('poem-line').textContent = lines[poemIndex];
+  // 出处只显示在最后一行（不限时、一直保留到就绪）的行末下方
+  const src = $('poem-source');
+  if (poemIndex === lines.length - 1) {
+    src.innerHTML = L.t('poem_source');
+  } else {
+    src.innerHTML = '';
+  }
 }
 
 function scheduleNextPoemLine() {
@@ -243,6 +250,7 @@ function stopPoem() {
   poemIndex = -1;
   $('poem-panel').classList.add('hidden');
   $('poem-line').textContent = '';
+  $('poem-source').innerHTML = '';
 }
 
 // ---------- 状态 UI ----------

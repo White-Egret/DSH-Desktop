@@ -411,7 +411,7 @@ fn spawn_log_reader(
             if track_stderr && stream == "stderr" {
                 state.set_last_stderr(&l);
             }
-            // 从 DSH 输出中解析实际监听地址（如 "dsh web: http://127.0.0.1:3080"），
+            // 从 DSH 输出中解析实际监听地址（如 "dsh web: http://127.0.0.1:3080/?token=..."），
             // 就绪后优先按实际地址加载页面（要求一.8）
             if matches!(stream, "stdout" | "stderr") {
                 if let Some((url, port)) = extract_local_url(&l) {
@@ -428,6 +428,15 @@ fn spawn_log_reader(
                             "launcher",
                             i18n::fmt("log_detected_url", &[&url]),
                         );
+                    }
+                    // 兜底重导航：若这行输出晚于 HTTP 就绪判定（next 频道 loader
+                    // 就绪后才打印 URL 行，可能超过就绪后的宽限期），页面已按裸地址
+                    // 内嵌并显示 401——用带令牌的完整地址重新导航一次。
+                    // last_url 在 open_dsh_webview 每次加载时更新，地址相同则跳过。
+                    if matches!(current_status(&app).as_str(), "running" | "running-external") {
+                        if config::last_url(&app) != url {
+                            open_dsh_webview(&app, &url);
+                        }
                     }
                 }
             }
@@ -1036,6 +1045,35 @@ fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
 
         // 2) HTTP 就绪检查
         if http_ready(&addr) {
+            // DSH（next 频道 0.1.2+）在 loader 就绪后才打印带 token 的实际地址行，
+            // 会晚于 HTTP 就绪判定（那时裸地址返回 401 也算「就绪」）。就绪后先给
+            // 一小段宽限期等这行输出：拿到就按完整地址内嵌；拿不到（旧版/不打印）
+            // 按当前目标内嵌；宽限期内进程退出也立即结束等待。
+            if state.detected_url.lock().unwrap().is_none() {
+                let grace_deadline = Instant::now() + Duration::from_secs(6);
+                loop {
+                    if state.detected_url.lock().unwrap().is_some() {
+                        break;
+                    }
+                    let dead = {
+                        let mut guard = state.child.lock().unwrap();
+                        match guard.as_mut() {
+                            Some(child) => matches!(child.try_wait(), Ok(Some(_))),
+                            None => true,
+                        }
+                    };
+                    if dead || Instant::now() >= grace_deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+            // 重新取一次目标：宽限期内可能刚拿到实际地址（含 token）
+            let detected = state.detected_url.lock().unwrap().clone();
+            let (target_url, _) = match &detected {
+                Some((url, dp)) => (url.clone(), *dp),
+                None => (local_url(port), port),
+            };
             emit_log(
                 app,
                 "launcher",

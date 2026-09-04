@@ -20,6 +20,7 @@ Windows 10/11 轻量桌面端（Tauri v2 + Rust + 原生 HTML/CSS/JS），用于
 - 端口可配置（默认 **3080**），路径自动检测 + 首选项页手动选择
 - 端口占用保护：提示而非强杀——可连接现有服务、修改端口、重新检测
 - 实际地址识别：DSH 输出中打印了真实监听地址时（如 `dsh web: http://127.0.0.1:3080`），优先按该地址加载
+- **next 频道的浏览器会话令牌（token）**：DSH `next`（0.1.2+）用每次进程随机生成的启动令牌保护网页——打印的地址形如 `dsh web: http://127.0.0.1:3080?token=...`，裸地址访问会收到 `401 authentication required`。启动器内嵌页面时保留打印的完整地址（含 `?token=...`）；首次带令牌加载后 DSH 会签发签名 cookie（HttpOnly，默认 30 天），刷新与后续启动不再需要令牌。最近一次加载的页面地址也会被记住（config.json 的 `last_url`，每次使用前校验形状与端口），「连接现有服务」与页面重开同样会带上令牌
 - 文件日志：Desktop 日志 `%APPDATA%\com.dsh.desktop\desktop.log`；DSH 输出日志 `%USERPROFILE%\.dsh\logs\dsh.log`；UI 提供「打开日志目录」「复制错误信息」「复制日志」
 - 刷新页面：只重载内嵌网页，不重启后台服务（`F5` / `Ctrl+R`）
 - 一键更新 DSH（npm 全局安装，输出实时可见）：确认弹窗可在 `latest` / `next` 两个频道间任选，升级与退回稳定版同等对待，并提醒先备份 `~/.dsh`
@@ -63,7 +64,11 @@ dsh --version
 
 ## 安装（Installation）
 
-如果不想从源码安装，可以直接下载现成的 **Windows 10/11 安装包**：
+如果不想从源码安装，可以直接从以下链接下载现成的 **Windows 10/11 安装包**：
+
+- <https://github.com/White-Egret/DSH-Desktop/releases>
+
+或
 
 - <https://tfevx3uq.qwenwork.host/DSH-Desktop-windows-nsis>
 

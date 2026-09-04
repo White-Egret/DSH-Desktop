@@ -281,6 +281,9 @@ fn local_url(port: u16) -> String {
 /// 从 DSH 输出行中提取本机监听地址，如：
 ///   `dsh web: http://127.0.0.1:3080`、`Local: http://localhost:3000/`
 /// 返回 (规范化URL, 端口)。只接受 127.0.0.1 / localhost。
+/// next 频道（0.1.2+）打印的地址带 `?token=<base64url>`（浏览器会话认证），
+/// 必须整串保留，否则加载裸地址会收到 401。base64url 不含空白/引号，
+/// 现有截断逻辑天然安全。
 fn extract_local_url(line: &str) -> Option<(String, u16)> {
     const NEEDLE: &str = "http://";
     let mut rest = line;
@@ -297,7 +300,8 @@ fn extract_local_url(line: &str) -> Option<(String, u16)> {
         let port_str = it.next().unwrap_or("");
         if let Ok(p) = port_str.parse::<u16>() {
             if p > 0 && (hostname == "127.0.0.1" || hostname.eq_ignore_ascii_case("localhost")) {
-                return Some((local_url(p), p));
+                // 保留 DSH 打印的完整地址（可能带 ?token=...），不要丢掉查询串
+                return Some((format!("http://{}", host), p));
             }
         }
         rest = &rest[i + NEEDLE.len()..];
@@ -626,6 +630,13 @@ fn main_content_size(app: &AppHandle) -> (f64, f64) {
 /// 触达 invoke_handler 里的自定义命令。两条独立机制都依赖「不给 dsh 配 capability」这一
 /// 前提：绝不要把这里的 label 加进任何 capability 的 `windows` 列表，也不要写 `remote.urls`。
 fn open_dsh_webview(app: &AppHandle, url: &str) {
+    // 记录最近一次交给 WebView 的地址（next 频道带 ?token=... 会话令牌），
+    // 供没有进程输出的场景（连接现有服务 / 页面重开）复用；只写 last_url 一个键。
+    if let Ok(parsed) = url.parse::<tauri::Url>() {
+        if parsed.scheme() == "http" {
+            config::set_last_url(app, parsed.as_str());
+        }
+    }
     // 已存在：直接刷新到当前 URL（端口可能已变更）
     if let Some(wv) = app.get_webview("dsh") {
         sync_dsh_webview_size(app);
@@ -671,6 +682,28 @@ pub fn sync_dsh_webview_size(app: &AppHandle) {
     }
 }
 
+/// 取上次记录的 DSH 页面地址，仅当形状合法且端口与给定端口一致时才返回。
+/// 形状：`http://127.0.0.1:<port>` 或 `http://localhost:<port>`（可带路径/查询串）。
+/// 被手改、损坏或指向别的端口的记录一律忽略，调用方回退到按配置端口构造的裸地址。
+fn remembered_url_for(app: &AppHandle, port: u16) -> Option<String> {
+    let raw = config::last_url(app);
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parsed = tauri::Url::parse(trimmed).ok()?;
+    if parsed.scheme() != "http" {
+        return None;
+    }
+    if !matches!(parsed.host_str(), Some("127.0.0.1") | Some("localhost")) {
+        return None;
+    }
+    if parsed.port() != Some(port) {
+        return None;
+    }
+    Some(parsed.as_str().to_string())
+}
+
 /// 销毁内嵌的 DSH Webview（服务停止后露出状态区）
 fn destroy_dsh_webview(app: &AppHandle) {
     if let Some(wv) = app.get_webview("dsh") {
@@ -704,9 +737,14 @@ pub fn refresh_dsh_page(app: AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    // 服务在运行但页面不存在（例如之前被销毁）：按当前配置端口重新打开页面（不重启服务）
+    // 服务在运行但页面不存在（例如之前被销毁）：优先复用上次记录的完整地址
+    // （可能带会话令牌，next 频道裸地址会 401），否则按配置端口重新打开页面
     let cfg = config::load(&app);
-    open_dsh_webview(&app, &local_url(cfg.port));
+    let remembered = remembered_url_for(&app, cfg.port);
+    if remembered.is_some() {
+        emit_log(&app, "launcher", i18n::fmt("log_using_last_url", &[]));
+    }
+    open_dsh_webview(&app, &remembered.unwrap_or_else(|| local_url(cfg.port)));
     emit_log(&app, "launcher", i18n::t("log_reopened_page").to_string());
     Ok(())
 }
@@ -1229,7 +1267,12 @@ pub async fn connect_existing(app: AppHandle) -> Result<(), String> {
         i18n::fmt("log_connect_existing", &[&cfg.port]),
     );
     set_status(&app, "running-external", None);
-    open_dsh_webview(&app, &local_url(cfg.port));
+    // 复用上次记录的完整地址（可能带会话令牌）；没有则按配置端口加载裸地址
+    let remembered = remembered_url_for(&app, cfg.port);
+    if remembered.is_some() {
+        emit_log(&app, "launcher", i18n::fmt("log_using_last_url", &[]));
+    }
+    open_dsh_webview(&app, &remembered.unwrap_or_else(|| local_url(cfg.port)));
     Ok(())
 }
 

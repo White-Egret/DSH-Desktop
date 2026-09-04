@@ -23,6 +23,7 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 - Configurable port (default **3080**), paths auto-detected with manual override in Preferences
 - Port-in-use protection: prompts instead of killing unknown processes — connect to the existing service, change port, or re-check
 - Actual-address detection: if DSH prints its real listen URL (e.g. `dsh web: http://127.0.0.1:3080`), the app loads that address preferentially
+- **next-channel browser-session token**: DSH `next` (0.1.2+) protects the Web page with a per-process launch token — it prints e.g. `dsh web: http://127.0.0.1:3080?token=...`, and a bare URL gets `401 authentication required`. The launcher keeps the full printed address (including `?token=...`) when embedding the page; the first authenticated load makes DSH mint a signed cookie (HttpOnly, 30 days by default) that keeps refreshes and subsequent launches working. The last loaded page address is remembered too (`last_url` in config.json, shape/port-validated before every use), so "connect to existing service" and page re-open also carry the token
 - File logging: Desktop log at `%APPDATA%\com.dsh.desktop\desktop.log`, DSH output log at `%USERPROFILE%\.dsh\logs\dsh.log`; UI buttons to open the log folder and copy errors/log text
 - Refresh Page: reloads only the embedded DSH page without restarting the backend service (`F5` / `Ctrl+R`)
 - One-click update of DSH via npm, live output streaming; choose the `latest` **or** `next` channel in the confirmation dialog (upgrade *and* downgrade are offered regardless of what is installed), with a backup reminder for the DSH home dir
@@ -67,7 +68,11 @@ If anything is missing when the app starts, it shows a clear error (which compon
 
 ## Installation
 
-If you'd rather not build from source, you can download a ready-made **Windows 10/11 installer** directly:
+If you'd rather not build from source, you can download a ready-made **Windows 10/11 installer** directly from:
+
+- <https://github.com/White-Egret/DSH-Desktop/releases>
+
+or
 
 - <https://tfevx3uq.qwenwork.host/DSH-Desktop-windows-nsis>
 

@@ -29,6 +29,10 @@ pub struct Config {
     /// 保存时同步写入 DSH 家目录 settings.yaml 的 locale.preference，
     /// 让 DSH 自身的 Web 界面跟随中英文切换。
     pub language: String,
+    /// 最近一次交给内嵌 WebView 的 DSH 页面完整地址（next 频道带 `?token=...`）。
+    /// 这是程序自己写的运行时记忆（不是用户设置），只用于「连接现有服务 / 页面重开」
+    /// 这类没有新进程输出的场景；读取侧（process.rs）每次使用前重新校验形状与端口。
+    pub last_url: String,
 }
 
 impl Default for Config {
@@ -47,6 +51,7 @@ impl Default for Config {
             close_action: "tray".to_string(),
             // 默认中文界面
             language: "zh".to_string(),
+            last_url: String::new(),
         }
     }
 }
@@ -410,6 +415,34 @@ pub fn save(app: &AppHandle, cfg: &Config) -> Result<(), String> {
     // config.json 一旦存在，语言以其中的 language 字段为准，sidecar 完成使命
     let _ = std::fs::remove_file(ui_language_sidecar_path(app));
     Ok(())
+}
+
+// ---------- 最近加载地址记忆（last_url） ----------
+//
+// last_url 只记录「最近一次成功交给内嵌 WebView 的 DSH 完整地址」（可能带
+// `?token=...` 会话令牌）。它不走 Config 结构体：不经过自动检测填充、不随
+// 用户保存整体写盘，避免把内存态路径固化；写入采用读取-修改-写回，只动这一个
+// 键。读取侧每次使用前在 process.rs 里重新校验形状与端口，被手改/损坏的
+// 记录会被忽略——它最多影响「连接现有服务 / 页面重开」时加载哪个本机地址，
+// 那个 webview 没有任何 capability（remote origin + 无权限），不存在提权面。
+
+/// 只更新 config.json 里的 last_url 字段（读取-修改-写回），失败静默。
+pub fn set_last_url(app: &AppHandle, url: &str) {
+    let path = config_path(app);
+    let Ok(s) = std::fs::read_to_string(&path) else { return };
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&s) else { return };
+    root["last_url"] = serde_json::Value::String(url.to_string());
+    if let Ok(text) = serde_json::to_string_pretty(&root) {
+        let _ = std::fs::write(&path, text);
+    }
+}
+
+/// 读取 last_url 原始字符串；缺失/非字符串/文件异常一律返回空串（校验在 process.rs）。
+pub fn last_url(app: &AppHandle) -> String {
+    let path = config_path(app);
+    let Ok(s) = std::fs::read_to_string(&path) else { return String::new() };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&s) else { return String::new() };
+    root["last_url"].as_str().unwrap_or("").to_string()
 }
 
 // ---------- 界面语言 sidecar（首次运行向导专用） ----------

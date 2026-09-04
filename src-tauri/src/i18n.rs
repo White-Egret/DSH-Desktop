@@ -63,6 +63,7 @@ pub fn t(key: &str) -> &'static str {
         "err_not_running_refresh" => if en { "DSH service is not running." } else { "DSH 服务未在运行。" },
         "log_refreshed_page" => if en { "[launcher] Refreshed the DSH page (service not restarted)." } else { "[launcher] 已刷新 DSH 页面（DSH 服务未重启）。" },
         "log_reopened_page" => if en { "[launcher] Re-opened the DSH page (service not restarted)." } else { "[launcher] 已重新打开 DSH 页面（DSH 服务未重启）。" },
+        "log_using_last_url" => if en { "[launcher] Using the last recorded DSH page address (includes the session token if the service requires one)." } else { "[launcher] 复用上次记录的 DSH 页面地址（若服务需要会话令牌，已一并带上）。" },
 
         // ---------- 配置 / 通用命令错误 ----------
         "err_cfg_dir" => if en { "Cannot create config dir {0}: {1}" } else { "无法创建配置目录 {0}: {1}" },

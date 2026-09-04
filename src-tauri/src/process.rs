@@ -638,6 +638,17 @@ fn main_content_size(app: &AppHandle) -> (f64, f64) {
 /// 只认 tauri 自定义协议与 app 自身的 devUrl/frontendDist），而 remote origin 默认无法
 /// 触达 invoke_handler 里的自定义命令。两条独立机制都依赖「不给 dsh 配 capability」这一
 /// 前提：绝不要把这里的 label 加进任何 capability 的 `windows` 列表，也不要写 `remote.urls`。
+///
+/// 注意（1.2.3 修复）：tauri.conf.json 的 `security.freezePrototype` 已置为 false。
+/// 该加固会给**所有** webview（包括这个加载远程 DSH 页面的子 webview）注入冻结
+/// `Object.prototype` 的初始化脚本；DSH 前端（Monaco 主题服务 createFromParsedTheme →
+/// insert）在 strict mode 下会对继承属性做赋值（`target.constructor = …`），原型冻结后
+/// 抛 `TypeError: Cannot assign to read only property 'constructor'`，把
+/// `conversation.chat.node` 渲染槽整体打崩——表现为「AI 回复闪一下然后消失」，
+/// 而普通浏览器（原型未冻结）完全正常。freezePrototype 的本义是防原型污染攻击 Tauri IPC 桥，
+/// 但 dsh webview 没有任何 capability、主窗口又是全本地静态页（动态文本一律 textContent），
+/// 冻结在这里只有副作用没有防护价值，故全局关闭。请勿重新打开；若未来 Tauri 提供
+/// 按 webview 豁免该脚本的 API，可再评估只对 `dsh` 关闭。
 fn open_dsh_webview(app: &AppHandle, url: &str) {
     // 记录最近一次交给 WebView 的地址（next 频道带 ?token=... 会话令牌），
     // 供没有进程输出的场景（连接现有服务 / 页面重开）复用；只写 last_url 一个键。

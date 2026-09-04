@@ -1,6 +1,6 @@
 [package]
 name = "dsh-launcher"
-version = "1.2.2"
+version = "1.2.3"
 description = "DSH Desktop - 启动并管理本机全局安装的 DSH Web 服务"
 authors = ["DSH Desktop"]
 license = "MIT"

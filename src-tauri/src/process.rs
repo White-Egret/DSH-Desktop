@@ -1682,6 +1682,12 @@ pub async fn update_dsh(app: AppHandle, tag: String) -> Result<(), String> {
         match result {
             Ok(0) => {
                 emit_log(&app2, "update", i18n::t("log_update_ok").to_string());
+                // 关键：必须在发出 update-finished **之前**把状态从「updating」复位为「idle」。
+                // 前端收到该事件会立刻 invoke start_dsh，而 start_internal 看到
+                // status=="updating" 会以 err_status_locked 拒绝启动 —— 之前这里漏了复位，
+                // 导致「npm 更新成功但自动重启失败」，页面永久卡在「正在更新DSH」。
+                set_status(&app2, "idle", None);
+                state.updating.store(false, Ordering::SeqCst);
                 let _ = app2.emit(
                     "update-finished",
                     UpdateFinished { success: true, message: i18n::t("msg_update_success").to_string() },

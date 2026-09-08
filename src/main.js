@@ -366,6 +366,8 @@ async function init() {
   await listen('setup-result', (e) => onSetupResult(e.payload));
 
   await refreshConfig();
+  // 应用外观（浅色/深色/跟随系统；theme-boot.js 已按缓存预设过，这里以配置为准纠正）
+  applyAppearance(config && config.appearance);
   // 应用界面语言（中英文），随后渲染的静态文案全部走词典
   I18N.setLang(config && config.language);
   I18N.applyDom();
@@ -447,6 +449,36 @@ async function refreshConfig() {
   $('port-val').textContent = config.port;
 }
 
+// ---------- 外观（浅色 / 深色 / 跟随系统；与 DSH 的 ui-theme.preference 同源联动） ----------
+// data-theme 只承载解析后的 light/dark 两个值：「跟随系统」由 prefers-color-scheme 解析，
+// 并订阅系统深浅反转实时重解析（仅当配置为 system 时生效）。
+// 解析结果缓存进 localStorage，供 theme-boot.js 在下次启动首帧前预设，防「先白一下」；
+// 真相来源始终是 config.appearance（localStorage 只是防闪缓存）。
+// DSH 页面一侧由 Rust 后端把同一值写入 settings.yaml（ui-theme.preference），实时跟随。
+const darkMq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+
+function resolveDark(pref) {
+  if (pref === 'dark') return true;
+  if (pref === 'light') return false;
+  return !!(darkMq && darkMq.matches); // system（含非法值的兜底）
+}
+
+function applyAppearance(pref) {
+  const p = (pref === 'light' || pref === 'dark') ? pref : 'system';
+  const dark = resolveDark(p);
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  try { localStorage.setItem('dsh-desktop-theme', dark ? 'dark' : 'light'); } catch (_) { /* 忽略 */ }
+}
+
+if (darkMq) {
+  const onSchemeFlip = () => {
+    if (config && config.appearance === 'system') applyAppearance('system');
+  };
+  // Safari<14 只有 addListener；WebView2 支持 addEventListener，双保险
+  if (darkMq.addEventListener) darkMq.addEventListener('change', onSchemeFlip);
+  else if (darkMq.addListener) darkMq.addListener(onSchemeFlip);
+}
+
 // ---------- 语言切换（保存后立即应用；重启 Desktop 同样生效） ----------
 
 function applyLanguage(lang) {
@@ -473,6 +505,7 @@ function openSettings() {
   $('set-timeout').value = config.health_timeout_secs;
   $('set-close-action').value = config.close_action === 'quit' ? 'quit' : 'tray';
   $('set-language').value = config.language === 'en' ? 'en' : 'zh';
+  $('set-appearance').value = ['light', 'dark', 'system'].includes(config.appearance) ? config.appearance : 'system';
   $('set-extra-args').value = config.extra_args;
   $('set-package-name').value = config.package_name;
   $('set-config-path').textContent = config.config_path;
@@ -496,6 +529,8 @@ async function saveSettings() {
     return;
   }
   const timeout = parseInt($('set-timeout').value, 10);
+  const appearance = ['light', 'dark', 'system'].includes($('set-appearance').value)
+    ? $('set-appearance').value : 'system';
   const cfg = {
     npm_path: $('set-npm-path').value.trim(),
     dsh_path: $('set-dsh-path').value.trim(),
@@ -503,6 +538,7 @@ async function saveSettings() {
     port,
     close_action: $('set-close-action').value === 'quit' ? 'quit' : 'tray',
     language: $('set-language').value === 'en' ? 'en' : 'zh',
+    appearance,
     // 0 = 一直等待，是合法值，不能用 || 兜底
     health_timeout_secs: Number.isFinite(timeout) && timeout >= 0 ? timeout : 300,
     extra_args: $('set-extra-args').value.trim(),
@@ -511,8 +547,13 @@ async function saveSettings() {
     // 频道由「更新 DSH」弹窗里的 latest / next 单选决定（见 renderUpdateModal）
   };
   const langChanged = cfg.language !== I18N.lang;
+  const appearanceChanged = appearance !== (config && config.appearance);
   try {
     config = await invoke('save_config', { config: cfg });
+    if (appearanceChanged) {
+      // 桌面端即时换肤；DSH 页面由后端写入 settings.yaml 后经文件监视实时跟随
+      applyAppearance(cfg.appearance);
+    }
     if (langChanged) {
       // 先切语言再刷新弹窗内文案（词典 + 静态标签）
       applyLanguage(cfg.language);
@@ -873,6 +914,7 @@ function wizFinish() {
     .then(async (report) => {
       config = report;
       $('port-val').textContent = config.port;
+      applyAppearance(config.appearance);
       I18N.setLang(config.language);
       I18N.applyDom();
     })

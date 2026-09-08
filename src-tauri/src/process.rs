@@ -1218,7 +1218,11 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     config.dsh_home_dir = config::validate_home_dir(&config.dsh_home_dir)?;
     config.dsh_path = config::validate_program_shape("dsh_path", &config.dsh_path)?;
     config.npm_path = config::validate_program_shape("npm_path", &config.npm_path)?;
-    let old_lang = config::load(&app).language;
+    // 外观只认 light / dark / system（非法值归一为 system，与前端下拉框互为防线）
+    config.appearance = config::normalize_appearance(&config.appearance).to_string();
+    let old_cfg = config::load(&app);
+    let old_lang = old_cfg.language;
+    let old_appearance = old_cfg.appearance;
     config::save(&app, &config)?;
 
     // 语言切换即时生效：本会话后续的 launcher 日志、托盘菜单文字（前端自行切换界面文案）。
@@ -1237,6 +1241,30 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
             "launcher",
             i18n::fmt("err_locale_sync_fail", &[&e]),
         ),
+    }
+    // 同步 DSH 家目录 settings.yaml → ui-theme.preference。
+    // DSH 的 settings-file 提供器监视该文件并把变化实时推送到已打开的页面，
+    // 因此 DSH 端无需重启即可跟随换肤（区别于语言需要重启才生效）。
+    match config::sync_dsh_theme(&config.dsh_home_dir, &config.appearance) {
+        Ok(()) => emit_log(
+            &app,
+            "launcher",
+            i18n::fmt("log_theme_synced", &[&config.appearance]),
+        ),
+        Err(e) => emit_log(
+            &app,
+            "launcher",
+            i18n::fmt("err_theme_sync_fail", &[&e]),
+        ),
+    }
+    // 原生标题栏（系统窗口边框深浅）同样跟随外观；system → 不强制、随系统。
+    crate::apply_window_theme(&app, &config.appearance);
+    if old_appearance != config.appearance {
+        emit_log(
+            &app,
+            "launcher",
+            i18n::fmt("log_appearance_changed", &[&config.appearance]),
+        );
     }
     if old_lang != config.language {
         emit_log(
@@ -2686,8 +2714,10 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
 pub fn finish_setup(app: AppHandle) -> Result<ConfigReport, String> {
     let cfg = config::load(&app);
     config::save(&app, &cfg)?;
-    // 引导完成后按用户配置同步一次 DSH 界面语言（默认 zh）
+    // 引导完成后按用户配置同步一次 DSH 界面语言与外观（外观值此时已继承自
+    // settings.yaml 或默认 system，写回等价于确认，不会覆盖 DSH 现有主题）
     let _ = config::sync_dsh_locale(&cfg.dsh_home_dir, &cfg.language);
+    let _ = config::sync_dsh_theme(&cfg.dsh_home_dir, &cfg.appearance);
     log_launcher(&app, i18n::t("log_setup_done"));
     Ok(get_config(app))
 }

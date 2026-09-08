@@ -29,6 +29,12 @@ pub struct Config {
     /// 保存时同步写入 DSH 家目录 settings.yaml 的 locale.preference，
     /// 让 DSH 自身的 Web 界面跟随中英文切换。
     pub language: String,
+    /// 外观："light" = 浅色，"dark" = 深色，"system" = 跟随系统（默认）。
+    /// 同时控制桌面端界面（前端 data-theme + 原生标题栏 set_theme）与 DSH Web 界面：
+    /// 保存时写入 settings.yaml 的 ui-theme.preference，DSH 的 settings-file 提供器
+    /// 监视该文件并把变化实时推送到已打开的页面，无需重启 DSH。
+    /// 老配置（无此字段）首次加载时继承 DSH settings.yaml 里的现有主题，避免升级即覆盖。
+    pub appearance: String,
     /// 最近一次交给内嵌 WebView 的 DSH 页面完整地址（next 频道带 `?token=...`）。
     /// 这是程序自己写的运行时记忆（不是用户设置），只用于「连接现有服务 / 页面重开」
     /// 这类没有新进程输出的场景；读取侧（process.rs）每次使用前重新校验形状与端口。
@@ -51,6 +57,8 @@ impl Default for Config {
             close_action: "tray".to_string(),
             // 默认中文界面
             language: "zh".to_string(),
+            // 默认跟随系统外观（DSH 的 ui-theme 默认值也是 system，两边一致）
+            appearance: "system".to_string(),
             last_url: String::new(),
         }
     }
@@ -259,14 +267,36 @@ pub fn validate_program_file(field: &str, raw: &str) -> Result<String, String> {
     Ok(norm)
 }
 
-/// 把界面语言写入 `<DSH 家目录>\settings.yaml` 的 locale.preference（最小侵入式行编辑）。
-/// - 已有 `locale:` 块与 `preference:` 行 → 仅替换该行；
-/// - 有 `locale:` 块但没有 preference → 在块首插入；
-/// - 完全没有 → 文件末尾追加 `locale:\n  preference: <zh|en>` 块；
-/// - 文件不存在 → 创建仅含该块的新文件。
-/// 其余行原样保留，不引入 YAML 解析依赖。
+/// 外观值归一化：只接受 light / dark / system，其余（含手改的非法值）回落 system。
+pub fn normalize_appearance(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "light" => "light",
+        "dark" => "dark",
+        _ => "system",
+    }
+}
+
+/// 把界面语言写入 `<DSH 家目录>\settings.yaml` 的 locale.preference。
 pub fn sync_dsh_locale(home_dir: &str, language: &str) -> Result<(), String> {
     let pref = if language.eq_ignore_ascii_case("en") { "en" } else { "zh" };
+    sync_dsh_setting(home_dir, "locale", pref)
+}
+
+/// 把外观写入 `<DSH 家目录>\settings.yaml` 的 ui-theme.preference。
+/// DSH 的 settings-file 提供器用文件监视器热加载该文件并把变化推送给已打开的
+/// 页面（客户端 ThemeRuntime 订阅 settings scope），因此无需重启 DSH 即可换肤。
+pub fn sync_dsh_theme(home_dir: &str, appearance: &str) -> Result<(), String> {
+    sync_dsh_setting(home_dir, "ui-theme", normalize_appearance(appearance))
+}
+
+/// 把 `preference: <pref>` 写入 `<DSH 家目录>\settings.yaml` 的 `<block>:` 块
+/// （最小侵入式行编辑，locale 与 ui-theme 共用）。
+/// - 已有 `<block>:` 块与 `preference:` 行 → 仅替换该行；
+/// - 有 `<block>:` 块但没有 preference → 在块首插入；
+/// - 完全没有 → 文件末尾追加 `<block>:\n  preference: <pref>` 块；
+/// - 文件不存在 → 创建仅含该块的新文件。
+/// 其余行（含 ui-theme 块的 fontSize 等同级键）原样保留，不引入 YAML 解析依赖。
+fn sync_dsh_setting(home_dir: &str, block: &str, pref: &str) -> Result<(), String> {
     // 这里是一个真实的「建目录 + 写文件」出口，而且 set_language 命令会带着
     // 磁盘上读来的 home_dir 直接走到这里（没经过保存入口），所以在此独立校验。
     let dir = PathBuf::from(validate_home_dir(home_dir)?);
@@ -278,24 +308,25 @@ pub fn sync_dsh_locale(home_dir: &str, language: &str) -> Result<(), String> {
         String::new()
     };
 
+    let block_key = format!("{block}:");
     let lines: Vec<&str> = content.lines().collect();
     let mut out: Vec<String> = Vec::with_capacity(lines.len() + 4);
-    let mut found_locale = false;
+    let mut found_block = false;
     let mut i = 0usize;
     while i < lines.len() {
         let line = lines[i];
-        // 顶层 locale: 键（行首无缩进、去掉尾部空白后恰为 "locale:"）
-        if line.trim_end() == "locale:" && !line.starts_with(' ') && !line.starts_with('\t') {
-            found_locale = true;
+        // 顶层 `<block>:` 键（行首无缩进、去掉尾部空白后恰为该键）
+        if line.trim_end() == block_key.as_str() && !line.starts_with(' ') && !line.starts_with('\t') {
+            found_block = true;
             out.push(line.to_string());
             i += 1;
             // 收集该键的缩进子块（含空行/注释），并在其中替换/插入 preference
-            let mut block: Vec<String> = Vec::new();
+            let mut sub: Vec<String> = Vec::new();
             let mut replaced = false;
             while i < lines.len() {
                 let bl = lines[i];
                 if bl.trim().is_empty() {
-                    block.push(bl.to_string());
+                    sub.push(bl.to_string());
                     i += 1;
                     continue;
                 }
@@ -303,27 +334,27 @@ pub fn sync_dsh_locale(home_dir: &str, language: &str) -> Result<(), String> {
                     break; // 到达下一个顶层键
                 }
                 if bl.trim_start().starts_with("preference:") {
-                    block.push(format!("  preference: {}", pref));
+                    sub.push(format!("  preference: {}", pref));
                     replaced = true;
                 } else {
-                    block.push(bl.to_string());
+                    sub.push(bl.to_string());
                 }
                 i += 1;
             }
             if !replaced {
-                block.insert(0, format!("  preference: {}", pref));
+                sub.insert(0, format!("  preference: {}", pref));
             }
-            out.extend(block);
+            out.extend(sub);
             continue;
         }
         out.push(line.to_string());
         i += 1;
     }
-    if !found_locale {
+    if !found_block {
         if !out.is_empty() && !out.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
             out.push(String::new());
         }
-        out.push("locale:".to_string());
+        out.push(block_key);
         out.push(format!("  preference: {}", pref));
     }
     let mut text = out.join("\n");
@@ -332,6 +363,38 @@ pub fn sync_dsh_locale(home_dir: &str, language: &str) -> Result<(), String> {
     }
     std::fs::write(&path, text).map_err(|e| format!("{}: {}", path.display(), e))?;
     Ok(())
+}
+
+/// 从 `<DSH 家目录>\settings.yaml` 的 ui-theme 块读取 preference（light/dark/system）。
+/// 仅用于「老配置没有 appearance 字段时继承 DSH 现有主题」：文件缺失、块缺失、
+/// 值非法一律返回 None（调用方保持自己的默认值），绝不在此处写盘。
+pub fn read_dsh_theme(home_dir: &str) -> Option<String> {
+    let home = home_dir.trim();
+    if home.is_empty() {
+        return None; // 未配置家目录：绝不回退到相对路径去读进程 CWD 里的同名文件
+    }
+    let path = PathBuf::from(home).join("settings.yaml");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let mut in_block = false;
+    for line in content.lines() {
+        let trimmed = line.trim_end();
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            in_block = trimmed == "ui-theme:";
+            continue;
+        }
+        if !in_block {
+            continue;
+        }
+        if let Some(rest) = line.trim().strip_prefix("preference:") {
+            let value = rest.trim().trim_matches(|c| c == '\'' || c == '"').trim();
+            return match normalize_appearance(value) {
+                // settings.yaml 里写了认不出的值：按无现有主题处理，不继承
+                "system" if !value.eq_ignore_ascii_case("system") => None,
+                v => Some(v.to_string()),
+            };
+        }
+    }
+    None
 }
 
 /// 用自动检测结果补全缺失/失效的路径。
@@ -371,7 +434,14 @@ fn legacy_config_path() -> Option<PathBuf> {
 pub fn load(app: &AppHandle) -> Config {
     let path = config_path(app);
     let mut first_run = false;
+    let mut has_appearance = false;
     let mut cfg = if let Ok(s) = std::fs::read_to_string(&path) {
+        // 老版本 config.json 没有 appearance 字段：先探一下键是否存在（合法字符串值），
+        // 缺失时下面再从 DSH settings.yaml 继承现有主题，避免升级即把 DSH 页面改色。
+        has_appearance = serde_json::from_str::<serde_json::Value>(&s)
+            .ok()
+            .map(|v| v.get("appearance").and_then(|a| a.as_str()).is_some())
+            .unwrap_or(false);
         serde_json::from_str::<Config>(&s).unwrap_or_default()
     } else {
         // 自动迁移旧目录 com.dsh.launcher → com.dsh.desktop，避免升级后配置丢失
@@ -381,13 +451,25 @@ pub fn load(app: &AppHandle) -> Config {
             if old != path {
                 if let Ok(s) = std::fs::read_to_string(&old) {
                     if let Ok(c) = serde_json::from_str::<Config>(&s) {
-                        let _ = save(app, &c);
                         migrated = Some(c);
                     }
                 }
             }
         }
-        migrated.unwrap_or_default()
+        match migrated {
+            // 迁移：旧配置必然没有 appearance 字段——先从 DSH settings.yaml 继承
+            // 现有主题，再写盘，保证磁盘与内存一致（否则下次加载读到 system 会翻回去）
+            Some(mut c) => {
+                if let Some(t) = read_dsh_theme(&c.dsh_home_dir) {
+                    c.appearance = t;
+                }
+                let _ = save(app, &c);
+                has_appearance = true;
+                c
+            }
+            // 全新环境：不写盘（向导 finish_setup 负责落盘），继承逻辑走下方统一分支
+            None => Config::default(),
+        }
     };
     // 首次运行（config.json 尚未生成）时，向导「选择语言」一步的选择存在
     // ui-language sidecar 里；这里取它作为界面语言，等 finish_setup 真正
@@ -399,6 +481,14 @@ pub fn load(app: &AppHandle) -> Config {
     }
     // 缺失/失效的路径用本机检测结果补齐（不写盘，写盘仍由用户「保存」触发）
     autofill_from_detection(&mut cfg);
+    // 升级兼容：config.json 里没有 appearance 字段（老版本首次升级、或首次运行
+    // 尚未走完向导）时，继承 DSH settings.yaml 的现有主题；读不到则保持默认 system。
+    // 这样升级桌面端不会把用户已经在 DSH 页面里选好的外观改掉。
+    if !has_appearance {
+        if let Some(t) = read_dsh_theme(&cfg.dsh_home_dir) {
+            cfg.appearance = t;
+        }
+    }
     cfg
 }
 

@@ -30,6 +30,7 @@ Windows 10/11 轻量桌面端（Tauri v2 + Rust + 原生 HTML/CSS/JS），用于
 - 首次运行向导：检测 Node/npm/DSH 并引导安装（nodejs.org 官方 LTS 安装包在线下载，或代为执行 `npm install -g @deepseek-ai/dsh`），全程可跳过
 - **安装包完整性校验**：调用 `msiexec` 之前，先把下载的 MSI 与该版本官方 `SHASUMS256.txt` 中记录的 SHA-256 逐字节比对；下载落在一次性随机命名的私有临时目录中，用完即删（原先可预测的 `%TEMP%\node-vX.Y.Z-x64.msi` 路径可能被抢先做成符号链接或被替换）。清单取不到、没有该文件条目、或哈希不一致时**直接中止安装，不提供「仍然安装」选项**，请改用手动下载链接
 - **中英双语界面**：首选项页可切换「语言 / Language」；工具栏、状态区、弹窗、托盘菜单与启动器日志全部跟随切换，并通过 DSH 的 `settings.yaml` 联动 DSH 自身界面语言
+- **浅色 / 深色 / 跟随系统外观**：首选项页「外观」三选一；桌面端（工具栏、弹窗、原生标题栏）与内嵌 DSH 页面同步换肤，通过 `settings.yaml` 的 `ui-theme.preference` 联动，**DSH 页面实时跟随、无需重启**
 - 单实例锁：重复双击只聚焦已有窗口
 
 ## 环境要求（Requirements）
@@ -64,7 +65,7 @@ dsh --version
 
 ## 安装（Installation）
 
-如果不想从源码安装，可以直接从以下链接下载现成的 **Windows 10/11 安装包**：
+如果不想从源码安装，可以直接从以下链接下载现成的 **Windows 10/11 安装包**（DSH-Desktop-windows-nsis.zip）：
 
 - <https://github.com/White-Egret/DSH-Desktop/releases>
 
@@ -131,6 +132,7 @@ DSH 启动命令示例:     dsh web --port 3080
 | 包名 | `@deepseek-ai/dsh` | 用于 `npm view <包名> dist-tags` 版本查询，并据此拼装更新命令 |
 | 开机自动启动 | 关 | 即时生效，写 HKCU\...\Run，无需管理员 |
 | 界面语言 | `zh`（中文） | `zh` / `en` 可选；见下方「界面语言」 |
+| 外观 | `system`（跟随系统） | `light` / `dark` / `system` 可选；见下方「外观」；老配置首次加载时自动继承 DSH 现有主题 |
 
 > 「更新参数」这一配置项已取消：更新命令固定为 `npm install -g <包名>@<频道>`，频道（`latest` / `next`）在点「⤓ 更新 DSH」时当场选择，见「更新 DSH」一节。需要定制 registry / 代理等 npm 行为，请写在 DSH 家目录**上一级**的 `.npmrc` 里（npm 的工作目录就是那里）。
 
@@ -172,6 +174,23 @@ DSH 网页界面属于不可信内容（它渲染模型输出），却以第二�
 
   写入采用最小改动方式，只增改 `locale.preference`，不会破坏该文件中的其他配置。DSH 启动时读取此文件，因此**需重启 DSH**（工具栏「⟳ 重启」）其界面语言才会变化；DSH 正在运行时切换语言，日志中会给出提示。
 - DSH 的原始 stdout/stderr 与 npm 输出属于第三方程序内容，日志中原样呈现、不做翻译。
+
+## 外观（Appearance：浅色 / 深色 / 跟随系统）
+
+与 DSH 设置页「通用设置 → 外观」同一套语义，桌面端与 DSH 页面联动：
+
+- 在 **⚙ 首选项 → 外观** 选择后保存：工具栏、状态区、弹窗、向导与原生标题栏即时换肤；「跟随系统」会订阅系统的深浅反转并实时响应（无需重启 Desktop；重启后同样按配置生效）。
+- **DSH 页面实时跟随**：保存时程序把对应值写入 `<DSH 家目录>\settings.yaml`：
+
+  ```yaml
+  ui-theme:
+    preference: light   # 或 dark / system（同级的 fontSize 等其他键原样保留）
+  ```
+
+  DSH 的 settings-file 提供器监视该文件并把变化推送给已打开的页面，因此**无需重启 DSH**，页面即刻换肤（区别于界面语言需要重启才变化）。
+- 写入同样是最小改动方式，只增改 `ui-theme.preference`，不破坏其他配置。
+- 升级兼容：老版本 `config.json` 没有外观字段时，首次加载会读取 DSH `settings.yaml` 的现有主题作为桌面端初值，升级本身不会改变 DSH 页面的外观；此后在桌面端保存即接管该值。
+- 在 DSH 页面自己的设置里改外观只影响 DSH 端；桌面端以上一次「保存」的选择为准。
 
 ## 默认端口（Default port）
 

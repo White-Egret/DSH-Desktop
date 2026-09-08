@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="style.css" />
+  <!-- 外观引导：在首帧前按上次缓存把 data-theme 设为 dark，防「先白一下」（见 theme-boot.js） -->
+  <script src="theme-boot.js"></script>
   <title>DSH Desktop</title>
 </head>
 <body>
@@ -127,6 +129,17 @@
             </select>
           </label>
         </div>
+        <div class="row two">
+          <label class="field">
+            <span data-i18n="lbl_appearance">外观（保存后立即生效，桌面与 DSH 页面同步切换）</span>
+            <select id="set-appearance">
+              <option value="light" data-i18n="opt_app_light">浅色</option>
+              <option value="dark" data-i18n="opt_app_dark">深色</option>
+              <option value="system" data-i18n="opt_app_system">跟随系统</option>
+            </select>
+          </label>
+          <div class="field" aria-hidden="true"></div>
+        </div>
         <label class="field field-switch">
           <span data-i18n="lbl_autostart">开机自动启动（系统登录后静默拉起，可在托盘恢复窗口；首启先延迟 12 秒错开冷启动高峰）</span>
           <input type="checkbox" id="set-autostart" />
@@ -145,7 +158,7 @@
         <div class="hint" data-i18n-html="set_hint_html">
           配置保存于：<span id="set-config-path"></span><br />
           路径留空或失效时会自动检测本机的 Node / npm / DSH；也可点上方「自动检测」或手动浏览选择。<br />
-          家目录是 DSH 摆放配置文件的地方（通过 DSH_HOME 传给 DSH）；进程工作目录自动取其上一级，DSH 的工作区在网页内随意指定。端口 / 参数修改在<b>下次启动 DSH</b> 时生效；语言切换即时生效，并同步写入 DSH 的 settings.yaml（DSH 界面语言在其重启后变化）。<br />Desktop 日志：同目录 desktop.log；DSH 输出日志：&lt;家目录&gt;\logs\dsh.log。
+          家目录是 DSH 摆放配置文件的地方（通过 DSH_HOME 传给 DSH）；进程工作目录自动取其上一级，DSH 的工作区在网页内随意指定。端口 / 参数修改在<b>下次启动 DSH</b> 时生效；语言切换即时生效，并同步写入 DSH 的 settings.yaml（DSH 界面语言在其重启后变化）；外观同样写入 settings.yaml（ui-theme.preference），DSH 页面<b>实时</b>跟随切换。<br />Desktop 日志：同目录 desktop.log；DSH 输出日志：&lt;家目录&gt;\logs\dsh.log。
         </div>
         <div class="row gap">
           <button id="btn-detect-package" class="btn small" data-i18n="btn_detect_pkg">检测全局包名（npm list -g）</button>

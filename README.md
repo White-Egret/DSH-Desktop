@@ -32,6 +32,7 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 - Start with Windows (official autostart plugin, HKCU registry only, no admin rights); autostart runs silently in tray and delays DSH launch by 12 s to avoid the boot-time IO spike
 - First-run setup wizard: detects Node.js/npm/DSH and can guide installation (official nodejs.org LTS installer download or `npm install -g @deepseek-ai/dsh`) — fully skippable
 - **Bilingual UI (Chinese / English)**: choose a language in Preferences; the whole launcher (toolbar, status, dialogs, logs, tray menu) switches, and DSH's own web UI follows via its `settings.yaml`
+- **Light / Dark / Follow-system appearance**: pick it in Preferences; the launcher (toolbar, dialogs, wizard, native title bar) and the embedded DSH page switch together through `ui-theme.preference` in DSH's `settings.yaml` — open DSH pages follow **live, no DSH restart needed**
 - Single-instance lock: launching a second copy just focuses the existing window
 
 ## Requirements
@@ -68,7 +69,7 @@ If anything is missing when the app starts, it shows a clear error (which compon
 
 ## Installation
 
-If you'd rather not build from source, you can download a ready-made **Windows 10/11 installer** directly from:
+If you'd rather not build from source, you can download a ready-made **Windows 10/11 installer** (DSH-Desktop-windows-nsis.zip) directly from:
 
 - <https://github.com/White-Egret/DSH-Desktop/releases>
 
@@ -137,6 +138,7 @@ Open **⚙ 首选项 (Preferences)** from the toolbar. All fields support auto-d
 | Package name | `@deepseek-ai/dsh` | used for the `dist-tags` version query **and** to build the update command |
 | Start with Windows | off | immediate effect, `HKCU\...\Run`, also toggleable from the tray menu |
 | Interface language | `zh` (中文) | `zh` / `en`; switches the whole launcher and syncs DSH's `settings.yaml` — see [Language](#language) |
+| Appearance | `system` (follow system) | `light` / `dark` / `system`; switches the launcher and syncs DSH's `ui-theme.preference` — see [Appearance](#appearance) |
 
 > There is deliberately **no "update args" setting any more**: the update command is always `npm install -g <package name>@<channel>`, and the channel (`latest` / `next`) is chosen in the **⤓ 更新 DSH** dialog itself — see [Update DSH](#update-dsh). Extra npm knobs (registry, proxy) belong in an `.npmrc` next to the DSH home dir.
 
@@ -179,6 +181,23 @@ The launcher UI is bilingual (Simplified Chinese / English).
   This is done as a minimal, targeted line edit — any other keys you keep in `settings.yaml` are preserved. DSH reads this file when it starts, so **restart DSH** (toolbar ⟳ Restart, or Stop + Start) for its interface language to change. If DSH is running when you change the language, the app logs a hint telling you a DSH restart is needed.
 - The first-run setup wizard follows the same rule: it renders in Chinese by default; switch to English any time in Preferences.
 - DSH's raw `stdout`/`stderr` and npm's output are third-party program output — they appear verbatim in the log (never rewritten).
+
+## Appearance
+
+Same three-way semantics as DSH's own "General settings → Appearance", with the launcher and the DSH page kept in sync:
+
+- Pick **⚙ Preferences → Appearance** and save. The toolbar, status area, dialogs, first-run wizard and the native title bar re-skin immediately; **Follow system** subscribes to the OS light/dark flip and reacts in real time. No Desktop restart required (and after restarting, the choice is read from `config.json`).
+- **The DSH page follows live**: on save, the app writes the matching value into `<DSH home dir>\settings.yaml`:
+
+  ```yaml
+  ui-theme:
+    preference: dark   # or: light / system (sibling keys like fontSize are preserved)
+  ```
+
+  DSH's settings-file provider watches this file and pushes the change to already-open pages, so **no DSH restart is needed** — the page re-skins instantly (unlike the interface language, which needs a restart).
+- Like the language sync, this is a minimal, targeted line edit: only `ui-theme.preference` is added/changed; everything else in `settings.yaml` is preserved.
+- Upgrade compatibility: an old `config.json` without the appearance field inherits DSH's current theme on first load (reading `settings.yaml`), so upgrading the launcher never re-skins your DSH page by itself. From then on, saving in Preferences takes over the value.
+- Changing the appearance inside DSH's own settings affects the DSH page only; the launcher keeps whatever was last saved in its Preferences.
 
 ## Default port
 

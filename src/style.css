@@ -1,10 +1,15 @@
-/* DSH Desktop —— 浅色主题
+/* DSH Desktop —— 浅色 / 深色双主题
+   主题机制：所有颜色收敛为 :root 上的 CSS 变量；深色通过 html[data-theme="dark"] 覆盖同名变量。
+   「跟随系统」由 main.js 用 prefers-color-scheme 解析成 light/dark 后写入 data-theme，
+   启动时由 theme-boot.js 用上次结果同步预设，避免深色用户「先白一下」。
    注意：#toolbar 的 height 必须精确等于 43.2px，
    Rust 端 TOOLBAR_H 常量（逻辑像素）依赖此值来定位内嵌的 DSH Webview。 */
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root {
+  color-scheme: light;
+
   --toolbar-bg: #f1f3f5;      /* 浅灰工具栏底 */
   --toolbar-border: #d6dade;
   --text: #1a1c1e;            /* 黑色文字 */
@@ -18,6 +23,104 @@
   --border: #c9ced6;
   --modal-bg: #ffffff;
   --overlay: rgba(0, 0, 0, 0.42);
+
+  /* 以下均为从各规则中提取的可主题化颜色（浅色值与历史硬编码一致） */
+  --sep: #9aa1a9;                       /* 状态栏分隔点 */
+  --btn-bg: #ffffff;
+  --btn-hover: #f0f2f5;
+  --btn-active: #e4e7eb;
+  --danger-btn-hover: #fdf0f0;          /* 危险按钮 hover 的浅红底 */
+  --input-bg: #ffffff;
+  --surface-bg: #f6f8fa;                /* hint / 开关行 / 向导说明块的浅底 */
+  --code-bg: #f0f2f5;                   /* 代码块 / 命令预览底 */
+  --inline-code-bg: #eceff3;            /* 行内 code 底 */
+  --spinner-ring: #e2e5e9;
+  --refresh-overlay-bg: rgba(255, 255, 255, 0.86);
+  --busy-bg: #fff8f0;                   /* 端口占用面板 */
+  --busy-border: #f0d9b8;
+  --note-bg: #f2f6ff;                   /* 更新弹窗频道说明条 */
+  --card-bg: #ffffff;                   /* 单选频道行 / 语言按钮 */
+  --card-hover: #f7faff;
+  --card-checked: #eef4ff;
+  --badge-fg: #7a4a00;                  /* 「可更新」标记 */
+  --badge-bg: #ffe9bf;
+  --badge-border: #f0c874;
+  --badge-next-fg: #3d2a75;
+  --badge-next-bg: #e8ddff;
+  --badge-next-border: #c6b0f0;
+  --flag-cur-fg: #0d5c33;               /* 频道「当前已装」 */
+  --flag-cur-bg: #dcf5e7;
+  --flag-cur-border: #a5dcc0;
+  --flag-old-fg: #3d2a75;               /* 频道「较旧」 */
+  --flag-old-bg: #ece5fb;
+  --flag-old-border: #c6b0f0;
+  --backup-bg: #fff9ec;                 /* 备份提醒块 */
+  --backup-border: #f0c874;
+  --backup-accent: #e6a817;
+  --backup-code-bg: #ffffff;
+  --backup-code-border: #ecd9ae;
+  --wiz-step-bg: #fffdf5;               /* 向导步骤块 */
+  --wiz-step-border: #f0e3b8;
+  --toast-bg: #24292f;
+  --focus-ring: rgba(31, 111, 235, 0.15);
+}
+
+/* ---------- 深色主题：仅覆盖颜色变量，结构规则与浅色完全共用 ---------- */
+html[data-theme="dark"] {
+  color-scheme: dark;
+
+  --toolbar-bg: #1e222a;
+  --toolbar-border: #343a46;
+  --text: #e8eaef;
+  --text-dim: #98a1ad;
+  --stage-bg: #14161a;
+  --accent: #679efe;
+  --accent-hover: #85b3ff;
+  --danger: #f25c5c;
+  --danger-hover: #ff7b7b;
+  --ok: #4ed17e;
+  --border: #414957;
+  --modal-bg: #1f232b;
+  --overlay: rgba(0, 0, 0, 0.62);
+
+  --sep: #6b7482;
+  --btn-bg: #2a2f39;
+  --btn-hover: #343b47;
+  --btn-active: #3d4452;
+  --danger-btn-hover: #3a272d;
+  --input-bg: #171a20;
+  --surface-bg: #262b34;
+  --code-bg: #262b34;
+  --inline-code-bg: #333a46;
+  --spinner-ring: #3a4150;
+  --refresh-overlay-bg: rgba(20, 22, 26, 0.86);
+  --busy-bg: #2a2118;
+  --busy-border: #5a4526;
+  --note-bg: #1c2740;
+  --card-bg: #262b34;
+  --card-hover: #2c3648;
+  --card-checked: #22304a;
+  --badge-fg: #ffd479;
+  --badge-bg: #3f3115;
+  --badge-border: #6b5626;
+  --badge-next-fg: #c6b0f0;
+  --badge-next-bg: #2d2545;
+  --badge-next-border: #4a3f6b;
+  --flag-cur-fg: #7ee2a8;
+  --flag-cur-bg: #17331f;
+  --flag-cur-border: #2e5c42;
+  --flag-old-fg: #b197fc;
+  --flag-old-bg: #2a2340;
+  --flag-old-border: #4a3f6b;
+  --backup-bg: #2b2413;
+  --backup-border: #6b5626;
+  --backup-accent: #d9a520;
+  --backup-code-bg: #171a20;
+  --backup-code-border: #57451f;
+  --wiz-step-bg: #292416;
+  --wiz-step-border: #4d4423;
+  --toast-bg: #2a2f38;
+  --focus-ring: rgba(103, 158, 254, 0.25);
 }
 
 html, body {
@@ -70,9 +173,9 @@ body {
   font-size: 12.5px;
 }
 .tb-right b { font-weight: 600; }
-.tb-right .sep { color: #9aa1a9; }
+.tb-right .sep { color: var(--sep); }
 
-/* 状态圆点 */
+/* 状态圆点（两主题共用同一组饱和色，深底上同样可辨） */
 .dot {
   width: 9px;
   height: 9px;
@@ -95,7 +198,7 @@ body {
   padding: 0 12px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  background: #ffffff;
+  background: var(--btn-bg);
   color: var(--text);
   font-size: 12.5px;
   font-family: inherit;
@@ -106,8 +209,8 @@ body {
   gap: 4px;
   transition: background 0.12s, border-color 0.12s;
 }
-.btn:hover:not(:disabled) { background: #f0f2f5; }
-.btn:active:not(:disabled) { background: #e4e7eb; }
+.btn:hover:not(:disabled) { background: var(--btn-hover); }
+.btn:active:not(:disabled) { background: var(--btn-active); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .btn.primary {
@@ -118,11 +221,11 @@ body {
 .btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
 
 .btn.danger {
-  background: #ffffff;
+  background: var(--btn-bg);
   border-color: var(--danger);
   color: var(--danger);
 }
-.btn.danger:hover:not(:disabled) { background: #fdf0f0; }
+.btn.danger:hover:not(:disabled) { background: var(--danger-btn-hover); }
 
 .btn.small { height: 26px; padding: 0 10px; font-size: 12px; }
 
@@ -202,8 +305,8 @@ body {
   flex-direction: column;
   align-items: center;
   gap: 12px;
-  background: #fff8f0;
-  border: 1px solid #f0d9b8;
+  background: var(--busy-bg);
+  border: 1px solid var(--busy-border);
   border-radius: 8px;
   padding: 16px 20px;
   color: var(--text);
@@ -253,7 +356,7 @@ body {
 .spinner {
   width: 26px;
   height: 26px;
-  border: 3px solid #e2e5e9;
+  border: 3px solid var(--spinner-ring);
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 0.9s linear infinite;
@@ -272,7 +375,7 @@ body {
   align-items: center;
   justify-content: center;
   gap: 12px;
-  background: rgba(255, 255, 255, 0.86);
+  background: var(--refresh-overlay-bg);
   z-index: 50;
   pointer-events: none;
 }
@@ -369,13 +472,13 @@ body {
   font-size: 12.5px;
   font-family: Consolas, "Microsoft YaHei", monospace;
   color: var(--text);
-  background: #fff;
+  background: var(--input-bg);
   user-select: text;
 }
 .field input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.15);
+  box-shadow: 0 0 0 2px var(--focus-ring);
 }
 
 .field .row { gap: 6px; }
@@ -392,7 +495,7 @@ body {
   align-items: center;
   gap: 10px;
   cursor: pointer;
-  background: #f6f8fa;
+  background: var(--surface-bg);
   border: 1px solid var(--toolbar-border);
   border-radius: 6px;
   padding: 10px 12px;
@@ -411,7 +514,7 @@ body {
   font-size: 11.5px;
   color: var(--text-dim);
   line-height: 1.7;
-  background: #f6f8fa;
+  background: var(--surface-bg);
   border-radius: 6px;
   padding: 10px 12px;
   user-select: text;
@@ -440,6 +543,7 @@ body {
   user-select: text;
 }
 
+/* 日志正文固定深色终端风（两主题一致），不再单独主题化 */
 .log-body {
   flex: 1;
   min-height: 0;
@@ -477,13 +581,13 @@ body {
   font-size: 11.5px;
   font-weight: 600;
   line-height: 1.5;
-  color: #7a4a00;
-  background: #ffe9bf;
-  border: 1px solid #f0c874;
+  color: var(--badge-fg);
+  background: var(--badge-bg);
+  border: 1px solid var(--badge-border);
   vertical-align: 1px;
   white-space: nowrap;
 }
-.ver-badge.badge-next { color: #3d2a75; background: #e8ddff; border-color: #c6b0f0; }
+.ver-badge.badge-next { color: var(--badge-next-fg); background: var(--badge-next-bg); border-color: var(--badge-next-border); }
 
 /* ---------- 更新 / 切换版本确认 ---------- */
 
@@ -498,7 +602,7 @@ body {
 }
 .update-desc code {
   display: block;
-  background: #f0f2f5;
+  background: var(--code-bg);
   border-radius: 6px;
   padding: 8px 10px;
   font-family: Consolas, monospace;
@@ -517,7 +621,7 @@ body {
   padding: 7px 10px;
   border-left: 3px solid var(--accent);
   border-radius: 0 6px 6px 0;
-  background: #f2f6ff;
+  background: var(--note-bg);
   font-size: 12px;
   line-height: 1.65;
   color: var(--text);
@@ -537,14 +641,14 @@ body {
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--card-bg);
   cursor: pointer;
 }
-.upd-channel:hover { border-color: var(--accent); background: #f7faff; }
+.upd-channel:hover { border-color: var(--accent); background: var(--card-hover); }
 .upd-channel input[type="radio"] { margin-top: 3px; flex: none; accent-color: var(--accent); }
 .upd-channel:has(input:checked) {
   border-color: var(--accent);
-  background: #eef4ff;
+  background: var(--card-checked);
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 .upd-ch-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -559,9 +663,9 @@ body {
   border-radius: 999px;
   border: 1px solid transparent;
 }
-.upd-ch-flag.cur { color: #0d5c33; background: #dcf5e7; border-color: #a5dcc0; }
-.upd-ch-flag.new { color: #7a4a00; background: #ffe9bf; border-color: #f0c874; }
-.upd-ch-flag.old { color: #3d2a75; background: #ece5fb; border-color: #c6b0f0; }
+.upd-ch-flag.cur { color: var(--flag-cur-fg); background: var(--flag-cur-bg); border-color: var(--flag-cur-border); }
+.upd-ch-flag.new { color: var(--badge-fg); background: var(--badge-bg); border-color: var(--badge-border); }
+.upd-ch-flag.old { color: var(--flag-old-fg); background: var(--flag-old-bg); border-color: var(--flag-old-border); }
 
 .upd-cmd-label { margin-bottom: 2px; }
 .upd-note { margin-top: 8px; }
@@ -570,13 +674,13 @@ body {
 .upd-backup {
   margin-top: 10px;
   padding: 8px 10px;
-  border: 1px solid #f0c874;
-  border-left: 3px solid #e6a817;
+  border: 1px solid var(--backup-border);
+  border-left: 3px solid var(--backup-accent);
   border-radius: 6px;
-  background: #fff9ec;
+  background: var(--backup-bg);
 }
 .upd-backup-title { font-weight: 600; }
-.upd-backup code { background: #fff; border: 1px solid #ecd9ae; }
+.upd-backup code { background: var(--backup-code-bg); border: 1px solid var(--backup-code-border); }
 .upd-backup-note { font-size: 11.5px; color: var(--text-dim); margin-top: 4px; line-height: 1.6; }
 
 /* ---------- Toast ---------- */
@@ -586,7 +690,7 @@ body {
   left: 50%;
   bottom: 28px;
   transform: translateX(-50%);
-  background: #24292f;
+  background: var(--toast-bg);
   color: #fff;
   padding: 9px 18px;
   border-radius: 8px;
@@ -617,7 +721,7 @@ body {
   font-size: 12.5px;
   font-family: inherit;
   color: var(--text);
-  background: #fff;
+  background: var(--input-bg);
 }
 
 /* 小号旋转指示（向导进度条用） */
@@ -657,13 +761,13 @@ body {
   font-size: 14.5px;
   line-height: 1.8;
   color: var(--text);
-  background: #f6f8fa;
+  background: var(--surface-bg);
   border-radius: 8px;
   padding: 12px 14px;
 }
 .setup-desc code {
   font-family: Consolas, monospace;
-  background: #eceff3;
+  background: var(--inline-code-bg);
   border-radius: 4px;
   padding: 1px 5px;
 }
@@ -687,8 +791,8 @@ body {
 }
 
 .wiz-step {
-  background: #fffdf5;
-  border: 1px solid #f0e3b8;
+  background: var(--wiz-step-bg);
+  border: 1px solid var(--wiz-step-border);
   border-radius: 8px;
   padding: 12px 14px;
   display: flex;
@@ -707,7 +811,7 @@ body {
 
 .block-code {
   display: block;
-  background: #f0f2f5;
+  background: var(--code-bg);
   border-radius: 6px;
   padding: 8px 10px;
   margin-top: 6px;
@@ -766,13 +870,13 @@ body {
   gap: 4px;
   border: 1.5px solid var(--toolbar-border);
   border-radius: 10px;
-  background: #fff;
+  background: var(--card-bg);
   cursor: pointer;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .lang-btn:hover {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.12);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 .lang-btn .lang-main {
   font-size: 18px;

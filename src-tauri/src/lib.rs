@@ -62,8 +62,11 @@ pub fn run(launched_by_autostart: bool) {
             process::set_language,
         ])
         .setup(move |app| {
-            // ---- 0. 按用户配置初始化界面语言（后续所有 launcher 日志/托盘菜单文案跟随） ----
-            i18n::set_lang(&config::load(app.handle()).language);
+            // ---- 0. 按用户配置初始化界面语言与外观（后续所有 launcher 日志/托盘菜单文案跟随语言） ----
+            let initial_cfg = config::load(app.handle());
+            i18n::set_lang(&initial_cfg.language);
+            // 原生标题栏深浅与外观设置对齐（页面内部的 data-theme 由 main.js 应用）
+            apply_window_theme(app.handle(), &initial_cfg.appearance);
 
             // ---- 1. 主窗口只在手动启动（非开机自启）时立即显示并聚焦。
             //        关闭拦截统一放在下方 Builder::on_window_event 中处理（hide 而非销毁）。 ----
@@ -233,6 +236,31 @@ pub fn refresh_tray_texts(app: &tauri::AppHandle) {
             let _ = items.show_item.set_text(i18n::t("tray_show"));
             let _ = items.autostart_item.set_text(i18n::t("tray_autostart"));
             let _ = items.quit_item.set_text(i18n::t("tray_quit"));
+        }
+    });
+}
+
+/// 把外观设置映射到原生窗口主题（标题栏深浅）。
+/// light/dark 强制对应主题；system → None 表示跟随操作系统。
+/// 这会影响窗口内所有 webview 的 prefers-color-scheme，但内嵌 DSH 页面自身的
+/// 深浅由 settings.yaml 的 ui-theme.preference 决定（已在 process::save_config 同步），
+/// 两者取值一致，不会打架。
+fn theme_for(appearance: &str) -> Option<tauri::Theme> {
+    match config::normalize_appearance(appearance) {
+        "light" => Some(tauri::Theme::Light),
+        "dark" => Some(tauri::Theme::Dark),
+        _ => None, // system：交还给操作系统决定
+    }
+}
+
+/// 应用外观到主窗口的原生标题栏（启动时与保存设置时各调用一次）。
+pub fn apply_window_theme(app: &tauri::AppHandle, appearance: &str) {
+    let theme = theme_for(appearance);
+    let app = app.clone();
+    // 窗口操作需主线程（与 show_main_window 同理）
+    let _ = app.clone().run_on_main_thread(move || {
+        if let Some(main) = app.get_webview_window("main") {
+            let _ = main.set_theme(theme);
         }
     });
 }

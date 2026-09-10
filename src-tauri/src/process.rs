@@ -817,10 +817,49 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
     // 1) Node.js：DSH 是 Node 程序，缺 node 必然失败
     {
         let env = detect::detect_all(false);
-        if env.node.is_none() {
+        let Some(node_path) = env.node.as_deref() else {
             let msg = i18n::t("err_node_missing").to_string();
             set_status(app, "error", Some(msg.clone()));
             return Err(msg);
+        };
+        // 1b) Node 版本：DSH 的运行下限是 22.19.0（node:sqlite / 原生 type-stripping /
+        //     pi-ai 依赖的 engines 三者共同定出）。**已发布的 dsh 包不声明 engines**，
+        //     所以 npm 安装阶段不拦，低于下限只在运行时炸：实测 Node 21.7.3 起不来，
+        //     而旧版程序只会把 DSH 的最后一行 stderr 甩给用户。这里提前说清楚。
+        //     判定不出来（读不到/解析不了版本串）时不拦，只记一条日志——
+        //     宁可让 DSH 自己去报错，也不误伤一个版本串异常但实际可用的环境。
+        let min_label = detect::NODE_MIN_VERSION_LABEL.to_string();
+        let block = |v: &str| -> Result<(), String> {
+            let line = i18n::fmt("log_node_too_old_block", &[v, &min_label]);
+            emit_log(app, "launcher", line);
+            let msg = i18n::fmt("err_node_too_old", &[v, &min_label]);
+            set_status(app, "error", Some(msg.clone()));
+            Err(msg)
+        };
+        match detect::quick_version(node_path, 10) {
+            Some(v) if detect::node_version_at_least_min(&v) == Some(false) => {
+                // 用户已明确选择「保留该版本并继续」时放行。只对**当时那条下限**有效：
+                // 程序以后提高下限（NODE_MIN_VERSION 变了）会重新拦一次。
+                if cfg.node_min_ack.trim() != detect::NODE_MIN_VERSION {
+                    return block(&v);
+                }
+            }
+            Some(v) => {
+                if detect::node_version_at_least_min(&v).is_none() {
+                    emit_log(
+                        app,
+                        "launcher",
+                        i18n::fmt("log_node_version_unknown", &[&v, &min_label]),
+                    );
+                }
+            }
+            None => {
+                emit_log(
+                    app,
+                    "launcher",
+                    i18n::fmt("log_node_version_unknown", &[&"node --version".to_string(), &min_label]),
+                );
+            }
         }
     }
 
@@ -1223,6 +1262,12 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     let old_cfg = config::load(&app);
     let old_lang = old_cfg.language;
     let old_appearance = old_cfg.appearance;
+    // 「Node 版本过低」的确认记忆不是设置页字段：前端整体提交配置时不会带上它
+    // （老版本前端更是完全不知道这个键），这里显式沿用磁盘上已有的值，
+    // 避免用户点一次「保存」就把自己的确认记录清掉、下次启动又被拦。
+    if config.node_min_ack.trim().is_empty() && !old_cfg.node_min_ack.trim().is_empty() {
+        config.node_min_ack = old_cfg.node_min_ack.clone();
+    }
     config::save(&app, &config)?;
 
     // 语言切换即时生效：本会话后续的 launcher 日志、托盘菜单文字（前端自行切换界面文案）。
@@ -2745,4 +2790,35 @@ pub fn set_language(app: AppHandle, lang: String) -> Result<(), String> {
         log_launcher(&app, &i18n::fmt("log_lang_changed", &[&lang]));
     }
     Ok(())
+}
+
+/// 「Node 版本过低」告警里的第三条路：用户明确选择保留这个版本、仍要尝试启动
+/// （ignore = true），或在首选项里取消这个选择、恢复启动拦截（ignore = false）。
+///
+/// 只写 config.json 的 `node_min_ack` 一个键（读取-修改-写回，同 last_url 的做法），
+/// 不动其它字段；前端也不走 save_config，避免整体写盘时把别的设置覆盖掉。
+/// 记的是**当时那条下限**：以后程序把 NODE_MIN_VERSION 提高，比对不相等就会重新告警——
+/// 「我接受 21 跑不了」不等于「我接受未来某条更高的下限也跑不了」。
+#[tauri::command]
+pub fn remember_node_min_version_notice(
+    app: AppHandle,
+    version: String,
+    ignore: bool,
+) -> Result<ConfigReport, String> {
+    let detected = version.trim().to_string();
+    let value = if ignore { detect::NODE_MIN_VERSION } else { "" };
+    config::remember_node_min_ack(&app, value)?;
+    let line = if ignore {
+        i18n::fmt(
+            "log_node_min_notice_remembered",
+            &[
+                &(if detected.is_empty() { "?".to_string() } else { detected }),
+                &detect::NODE_MIN_VERSION_LABEL.to_string(),
+            ],
+        )
+    } else {
+        i18n::t("log_node_check_restored").to_string()
+    };
+    log_launcher(&app, &line);
+    Ok(get_config(app))
 }

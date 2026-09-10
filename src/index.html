@@ -62,7 +62,10 @@
           <button id="btn-recheck-port" class="btn" data-i18n="btn_recheck_port">重新检测</button>
         </div>
       </div>
-      <button id="btn-copy-error" class="btn small hidden" data-i18n="btn_copy_error">复制错误信息</button>
+      <div class="row gap">
+        <button id="btn-fix-node" class="btn primary hidden" data-i18n="btn_open_node_settings">打开「首选项」升级 Node.js</button>
+        <button id="btn-copy-error" class="btn small hidden" data-i18n="btn_copy_error">复制错误信息</button>
+      </div>
     </div>
   </main>
 
@@ -89,6 +92,20 @@
             <button class="btn small" data-pick="exec" data-kind="npm" data-target="set-npm-path" data-i18n="btn_browse">浏览</button>
           </div>
         </label>
+        <!-- Node.js 版本状态 + 一键升级到官方 LTS（与首次运行向导的告警同一套后端流程）。
+             标题行由 main.js 用真实下限版本号重绘，故不挂 data-i18n-html。 -->
+        <div class="field field-node">
+          <span id="lbl-node-version">Node.js 版本（DSH 需要 <b>v22.19.0</b> 或更高，低版本上 DSH 会启动失败）</span>
+          <div class="row">
+            <em id="set-node-version" class="flag"></em>
+            <span class="spacer"></span>
+            <button id="btn-install-node-lts" class="btn small" data-i18n="btn_install_node_lts">下载并安装官方 LTS</button>
+          </div>
+          <label class="field-switch field-switch-inline">
+            <input type="checkbox" id="set-node-min-ignore" />
+            <span data-i18n="lbl_node_min_ignore">保留该版本并继续启动（不再拦截；DSH 很可能仍然启动失败）</span>
+          </label>
+        </div>
         <label class="field">
           <span><span data-i18n="lbl_dsh_path">dsh 程序路径（dsh.cmd / dsh.exe / dsh.bat）</span> <em id="dsh-exists-flag" class="flag"></em></span>
           <div class="row">
@@ -295,6 +312,33 @@
           <button id="wiz-btn-install-node" class="btn primary" data-i18n="wiz_btn_install_node">一键下载并安装（官方 LTS）</button>
           <button id="wiz-btn-recheck" class="btn" data-i18n="wiz_btn_recheck">重新检测</button>
           <button id="wiz-btn-skip-node" class="btn" data-i18n="wiz_btn_skip_node">稍后手动安装</button>
+        </div>
+      </div>
+
+      <!-- Node.js 版本过低（低于 DSH 的运行下限）时的告警步骤。
+           三条路都留着：一键升级到最新 LTS / 自行到官网下载 / 保留旧版本继续尝试。 -->
+      <div id="wiz-step-node-old" class="wiz-step wiz-warn hidden">
+        <div class="wiz-step-title" data-i18n="wiz_node_old_title">Node.js 版本过低</div>
+        <div class="wiz-step-body">
+          <!-- 这行由 main.js 用真实版本号重绘（含 <b> 标签，所以走 innerHTML 且值先转义），
+               语言切换时由 renderWiz() 重新渲染 —— 因此**不挂** data-i18n-html，
+               否则 applyDom 会用词典兜底文案把版本号覆盖掉。 -->
+          <span id="wiz-node-old-detail">检测到 Node.js <b>—</b>，而 DSH 需要 <b>v22.19.0</b> 或更高；这个版本上 DSH 会启动失败。</span>
+          <span id="wiz-node-unknown-note" class="wiz-warn-note hidden" data-i18n="wiz_node_unknown_note">（无法解析本机 Node 版本号，请自行确认是否 ≥ 下限，否则 DSH 可能启动失败。）</span>
+          <span class="wiz-warn-note" data-i18n="wiz_node_old_how">
+            升级会关闭并覆盖当前的 Node.js（安装在原目录，PATH 不变）；DSH 全局包装在用户目录，不受影响。也可以保留当前版本，稍后自行升级。
+          </span>
+        </div>
+        <div class="row gap left">
+          <button id="wiz-btn-upgrade-node" class="btn primary" data-i18n="wiz_btn_upgrade_node">一键下载并安装最新 LTS</button>
+        </div>
+        <div class="row gap left">
+          <button id="wiz-btn-node-manual" class="btn" data-i18n="wiz_btn_node_manual">自行到官网下载安装</button>
+          <button id="wiz-btn-node-ignore" class="btn subtle" data-i18n="wiz_btn_node_ignore">保留该版本，仍要继续</button>
+          <button id="wiz-btn-node-recheck" class="btn subtle" data-i18n="wiz_btn_recheck">重新检测</button>
+        </div>
+        <div class="wiz-warn-note" data-i18n="wiz_node_ignore_note">
+          「仍要继续」= 接受 DSH 很可能起不来；程序不会再拦截启动（可在「首选项」里重新开启检查）。
         </div>
       </div>
 

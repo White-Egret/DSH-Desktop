@@ -60,6 +60,8 @@ pub fn run(launched_by_autostart: bool) {
             process::setup_install_dsh,
             process::finish_setup,
             process::set_language,
+            // 「Node 版本过低」告警的第三条路：保留旧版本并继续（只写 node_min_ack 一个键）
+            process::remember_node_min_version_notice,
         ])
         .setup(move |app| {
             // ---- 0. 按用户配置初始化界面语言与外观（后续所有 launcher 日志/托盘菜单文案跟随语言） ----

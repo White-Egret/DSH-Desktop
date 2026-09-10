@@ -227,6 +227,75 @@ pub fn node_shasums_url_for(version: &str) -> String {
     format!("https://nodejs.org/dist/v{}/SHASUMS256.txt", version)
 }
 
+// ---------- Node.js 最低版本（DSH 的运行下限） ----------
+//
+// 为什么需要这一层：DSH（deepseek-harness）的运行下限是 **22.19.0**
+// （仓库根 engines.node = `^22.19.0 || >=24.0.0`）。三个来源共同定出这条线：
+//   - `node:sqlite` 的 `DatabaseSync` 在 22.13 才去掉 `--experimental-sqlite`；
+//   - 原生 TypeScript type-stripping 在 22.18 才默认开启；
+//   - 依赖 `@earendil-works/pi-ai` 自己声明 `engines.node >=22.19.0`。
+// 而**已发布的 `@deepseek-ai/dsh` 包并不声明 engines**，所以 npm 安装阶段不会拦，
+// 低于下限只会在运行时炸（实测 Node 21.7.3 起不来）。以前本程序只判断
+// 「node.exe 在不在」，于是用户看到的是 DSH 闪退 + 一段看不懂的 stderr；
+// 现在把这条线显式判定出来，好让界面能提前告警并提供一键升级。
+/// DSH 认可的 Node.js 最低版本（比较用，三段式）
+pub const NODE_MIN_VERSION: &str = "22.19.0";
+/// 上面那个常量的展示形态（带 v，用于界面文案）
+pub const NODE_MIN_VERSION_LABEL: &str = "v22.19.0";
+
+/// 把 `node --version` / `npm` 输出的版本串解析成可比较的数字序列。
+///
+/// 宽容但**不含糊**：允许 `v` 前缀、`-rc.1` 之类的预发布后缀、`^`/`~` 前缀
+/// 与残缺段（`"22.19"` 视作 `22.19.0`）；一旦出现无法解释的内容就返回 None ——
+/// 调用方据此判「未知」，而不是把它当成通过或失败。
+pub fn parse_version_numbers(s: &str) -> Option<Vec<u32>> {
+    let t = s.trim();
+    let t = t.strip_prefix('v').or_else(|| t.strip_prefix('V')).unwrap_or(t);
+    let t = t.strip_prefix(['^', '~']).unwrap_or(t);
+    // npm 也可能在 stderr 里带上 "npm warn EBADENGINE" 之类的告警文字，
+    // 所以只取第一段（到空白或预发布记号为止）
+    let head = t
+        .split(|c: char| c.is_whitespace() || c == '-' || c == '+')
+        .next()
+        .unwrap_or("");
+    if head.is_empty() {
+        return None;
+    }
+    let mut out: Vec<u32> = Vec::new();
+    for p in head.split('.') {
+        if p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        out.push(p.parse::<u32>().ok()?);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// 语义化版本比较：补零对齐后逐段比大小（`22.19` == `22.19.0`）。
+pub fn cmp_versions(a: &[u32], b: &[u32]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        match x.cmp(&y) {
+            Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    Ordering::Equal
+}
+
+/// 版本串是否 ≥ `NODE_MIN_VERSION`。解析不出来时返回 None（判「未知」，不猜）。
+pub fn node_version_at_least_min(version: &str) -> Option<bool> {
+    let v = parse_version_numbers(version)?;
+    let min = parse_version_numbers(NODE_MIN_VERSION)?;
+    Some(cmp_versions(&v, &min) != std::cmp::Ordering::Less)
+}
+
 /// 版本号白名单：形如 `24.20.0`（至少两段、每段非空纯数字）。
 /// 版本号会被拼进下载 URL、清单匹配名和落盘文件名，必须挡住 `..`、空段与任何路径片段。
 pub fn is_safe_node_version(v: &str) -> bool {
@@ -492,6 +561,11 @@ pub struct EnvDetection {
     pub node_found: bool,
     pub node_path: String,
     pub node_version: Option<String>,
+    /// Node 版本相对最低下限的状态："supported"（≥ 下限）/ "old"（低于下限）
+    /// / "unknown"（没装，或版本串读不到/解析不了）。前端据此决定是否告警。
+    pub node_min_state: String,
+    /// 最低版本（展示用，如 `v22.19.0`），文案里的阈值不写死在前端
+    pub node_min_version: String,
     pub npm_found: bool,
     pub npm_path: String,
     pub dsh_found: bool,
@@ -502,14 +576,33 @@ pub struct EnvDetection {
     pub node_download_page: String,
 }
 
+impl EnvDetection {
+    /// Node 版本够不够：Some(false) 明确低于下限，None 表示没法判定。
+    /// 目前前端是直接读 `node_min_state` 字段判定的（同一份判定逻辑在前端也有一份），
+    /// 这个方法留给需要「一次问清」的调用点用。
+    pub fn node_too_old(&self) -> Option<bool> {
+        self.node_version
+            .as_deref()
+            .and_then(node_version_at_least_min)
+            .map(|ok| !ok)
+    }
+}
+
 /// 完整环境检测（强制刷新缓存）。供 setup 向导与「设置 → 自动检测」使用。
 pub fn full_detect() -> EnvDetection {
     let paths = detect_all(true);
     let node_version = paths.node.as_deref().and_then(|p| quick_version(p, 10));
+    let node_min_state = match node_version.as_deref().and_then(node_version_at_least_min) {
+        Some(true) => "supported",
+        Some(false) => "old",
+        None => "unknown",
+    };
     EnvDetection {
         node_found: paths.node.is_some(),
         node_path: opt_to_string(&paths.node),
         node_version,
+        node_min_state: node_min_state.to_string(),
+        node_min_version: NODE_MIN_VERSION_LABEL.to_string(),
         npm_found: paths.npm.is_some(),
         npm_path: opt_to_string(&paths.npm),
         dsh_found: paths.dsh.is_some(),
@@ -523,4 +616,45 @@ fn opt_to_string(p: &Option<PathBuf>) -> String {
     p.as_ref()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn parses_common_version_shapes() {
+        assert_eq!(parse_version_numbers("v24.18.0"), Some(vec![24, 18, 0]));
+        assert_eq!(parse_version_numbers("22.19.0"), Some(vec![22, 19, 0]));
+        assert_eq!(parse_version_numbers(" 21.7.3 \r\n"), Some(vec![21, 7, 3]));
+        // 残缺段按 0 补齐（22.19 == 22.19.0）
+        assert_eq!(parse_version_numbers("22.19"), Some(vec![22, 19]));
+        // 预发布后缀只取数字部分：0.1.5-rc.1 这类 npm 输出不该被误判
+        assert_eq!(parse_version_numbers("v0.1.5-rc.1"), Some(vec![0, 1, 5]));
+        assert_eq!(parse_version_numbers("^22.19.0"), Some(vec![22, 19, 0]));
+        // 读不到 / 解析不了 → None（判「未知」，不猜）
+        assert_eq!(parse_version_numbers(""), None);
+        assert_eq!(parse_version_numbers("v"), None);
+        assert_eq!(parse_version_numbers("node: not found"), None);
+        assert_eq!(parse_version_numbers("v1.x.0"), None);
+    }
+
+    #[test]
+    fn compares_semantically() {
+        let min = parse_version_numbers(NODE_MIN_VERSION).unwrap();
+        // 明确低于下限：21.x 整条线（含实测起不来的 21.7.3）与 22.18.x
+        for old in ["21.7.3", "20.19.5", "22.18.0", "18.20.4", "21.99.99"] {
+            let v = parse_version_numbers(old).unwrap();
+            assert_eq!(cmp_versions(&v, &min), Ordering::Less, "{old} 应低于下限");
+            assert_eq!(node_version_at_least_min(old), Some(false), "{old}");
+        }
+        // 恰好等于 / 高于下限
+        for ok in ["22.19.0", "22.19", "22.19.1", "22.20.0", "24.18.0", "v24.20.0"] {
+            let v = parse_version_numbers(ok).unwrap();
+            assert_eq!(cmp_versions(&v, &min), Ordering::Greater, "{ok} 应不低于下限");
+            assert_eq!(node_version_at_least_min(ok), Some(true), "{ok}");
+        }
+        assert_eq!(node_version_at_least_min("not-a-version"), None);
+    }
 }

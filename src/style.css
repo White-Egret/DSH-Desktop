@@ -488,6 +488,22 @@ body {
 .flag { font-style: normal; font-weight: 400; margin-left: 6px; }
 .flag.ok   { color: var(--ok); }
 .flag.bad  { color: var(--danger); }
+/* 需要留意但不算「失败」的中间态（如 Node 版本号解析不出来） */
+.flag.warn { color: var(--backup-accent); }
+
+/* ---------- Node.js 版本行（首选项：版本状态 + 一键升级 + 保留旧版本开关） ---------- */
+.field-node .row {
+  align-items: center;
+  flex-wrap: wrap;
+}
+.field-node .spacer { flex: 1; }
+.field-switch-inline {
+  flex-direction: row-reverse;
+  justify-content: flex-end;
+  gap: 10px;
+  font-size: 12px;
+  margin-top: 2px;
+}
 
 /* 开机自启开关（即时生效型设置，独立于「保存」按钮） */
 .field-switch {
@@ -800,6 +816,20 @@ body {
   gap: 10px;
 }
 
+/* Node.js 版本过低：需要用户当场决策，用警示色与普通引导步骤区分开 */
+.wiz-step.wiz-warn {
+  background: var(--busy-bg);
+  border-color: var(--danger);
+}
+.wiz-step.wiz-warn .wiz-step-title { color: var(--danger); }
+.wiz-warn-note {
+  display: block;
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-dim);
+}
+
 .wiz-step-title { font-weight: 600; font-size: 15.5px; }
 
 .wiz-step-body {
@@ -808,6 +838,20 @@ body {
   color: var(--text);
 }
 #wiz-open-node-page { color: var(--accent); }
+/* 告警面板里的官网链接（点击用事件委托，见 main.js） */
+#wiz-node-old-detail a,
+#wiz-node-unknown-note a { color: var(--accent); }
+/* 次级按钮：有引导性但不抢主行动的视觉焦点 */
+.btn.subtle {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+}
+.btn.subtle:hover:not(:disabled) {
+  background: var(--btn-hover);
+  border-color: var(--border);
+  color: var(--text);
+}
 
 .block-code {
   display: block;

@@ -170,6 +170,7 @@
     th_component: '组件', th_status: '状态', th_path: '路径 / 版本',
     lbl_node: 'Node.js', lbl_npm: 'npm', lbl_dsh: 'DSH',
     wiz_installed: '✔ 已安装', wiz_notfound: '✘ 未找到', wiz_detecting_row: '检测中…',
+    wiz_node_flag_old: '⚠ 版本过低', wiz_node_flag_unknown: '? 版本未知',
     wiz_step_node_title: '缺少 Node.js',
     wiz_step_node_body_html: '将从官方地址下载并运行 Node.js LTS 安装包（不内置、不使用便携版）：<br /><code id="wiz-node-url" class="block-code"></code>一键安装会弹出官方安装窗口 / UAC 提示，按提示完成即可；也可以到 <a href="#" id="wiz-open-node-page">nodejs.org 官网</a> 手动下载安装。',
     wiz_btn_install_node: '一键下载并安装（官方 LTS）',
@@ -197,6 +198,34 @@
     toast_lang_fail: '语言切换失败（本次会话仍会跟随您的选择，重启后恢复）: {0}',
     toast_detect_fail_short: '检测失败: {0}',
     log_locale_synced: '[launcher] DSH 界面语言已同步写入 settings.yaml，点工具栏「重启」即可切换 DSH 界面语言。',
+
+    // ---------- Node.js 版本下限（DSH 需要 ≥ 22.19.0；低于它会启动失败） ----------
+    wiz_node_old_title: '⚠ Node.js 版本过低',
+    wiz_node_old_detail_html: '检测到 Node.js <b>{0}</b>，而 DSH 需要 <b>{1}</b> 或更高：在这个版本上 DSH 会启动失败（可能报看不懂的错误，或刚起来就退出），这不是 DSH 配置的问题。',
+    wiz_node_unknown_note: '（本机 Node 版本号读不出或无法解析，请自行确认是否 ≥ 下限，否则 DSH 可能启动失败。）',
+    wiz_node_old_how: '一键安装会下载官方 LTS 安装包（约 30MB，校验 SHA-256 后运行）：它会覆盖当前的 Node.js、安装在原目录，PATH 不变；DSH 的全局命令在用户目录，不受影响。',
+    wiz_btn_upgrade_node: '一键下载并安装最新 LTS',
+    wiz_btn_node_manual: '自行到官网下载安装',
+    wiz_btn_node_ignore: '保留该版本，仍要继续',
+    wiz_node_ignore_note: '「仍要继续」= 接受 DSH 很可能起不来（程序不会再拦截启动）。之后可在「首选项 → Node.js 版本」里重新开启启动检查。',
+    wiz_node_ignore_log: '[launcher] 已记录：Node.js 版本过低但仍选择继续（启动检查不再拦截）。',
+    wiz_node_old_log: '[launcher] 检测到 Node.js {0} 低于 DSH 要求的 {1}，界面已给出升级引导。',
+    wiz_node_manual_log: '[launcher] 已打开 Node.js 官方下载页，由用户自行安装。',
+    toast_node_ack_saved: '已记录你的选择：保留该版本并继续尝试启动',
+    toast_node_ack_clear: '已恢复启动检查：Node.js 版本过低时仍会拦截',
+    log_node_check_restored: '[launcher] 已取消「保留过低版本」：Node.js 版本低于下限时将再次拦截启动。',
+    toast_node_ack_fail: '记录选择失败: {0}',
+    toast_node_upgrade_hint: '安装完成后请按向导提示重新检测；若版本号没变，重启本程序再试',
+    // 首选项里的 Node 版本行
+    lbl_node_version_html: 'Node.js 版本（DSH 需要 <b>v22.19.0</b> 或更高，低版本上 DSH 会启动失败）',
+    btn_install_node_lts: '下载并安装官方 LTS',
+    lbl_node_min_ignore: '保留该版本并继续启动（不再拦截；DSH 很可能仍然启动失败）',
+    flag_node_ok: '✔ 已满足（{0}）',
+    flag_node_old: '✘ 版本过低（{0}，需要 {1}+）',
+    flag_node_unknown: '? 无法判定（{0}）',
+    log_node_install_manual: '[launcher] 用户从「首选项」发起了 Node.js LTS 引导安装。',
+    log_node_install_busy: '[launcher] 已有引导安装任务在进行中，忽略本次点击。',
+    btn_open_node_settings: '打开「首选项」升级 Node.js',
   };
 
   const en = {
@@ -351,6 +380,7 @@
     th_component: 'Component', th_status: 'Status', th_path: 'Path / Version',
     lbl_node: 'Node.js', lbl_npm: 'npm', lbl_dsh: 'DSH',
     wiz_installed: '✔ installed', wiz_notfound: '✘ not found', wiz_detecting_row: 'detecting…',
+    wiz_node_flag_old: '⚠ version too old', wiz_node_flag_unknown: '? version unknown',
     wiz_step_node_title: 'Node.js is missing',
     wiz_step_node_body_html: 'The official Node.js LTS installer will be downloaded and run from the official site (nothing bundled, no portable runtime):<br /><code id="wiz-node-url" class="block-code"></code>One-click install opens the official installer / UAC prompt — just follow it. You can also install manually from <a href="#" id="wiz-open-node-page">nodejs.org</a>.',
     // 注意：此文案经 data-i18n 走 textContent 注入，必须用字面 `&`；
@@ -380,6 +410,34 @@
     toast_lang_fail: 'Failed to switch the language (this session still follows your choice; it reverts after a restart): {0}',
     toast_detect_fail_short: 'Check failed: {0}',
     log_locale_synced: '[launcher] DSH UI language synced into settings.yaml — click "Restart" in the toolbar to switch DSH\'s own interface language.',
+
+    // ---------- Node.js minimum version (DSH needs >= 22.19.0; older versions fail to start) ----------
+    wiz_node_old_title: '⚠ Node.js version too old',
+    wiz_node_old_detail_html: 'Detected Node.js <b>{0}</b>, but DSH requires <b>{1}</b> or newer. DSH fails to start on this version (cryptic errors, or it exits right after launch) — this is not a DSH configuration problem.',
+    wiz_node_unknown_note: '(The local Node version string could not be read or parsed — please make sure it is at least the minimum, or DSH may fail to start.)',
+    wiz_node_old_how: 'One-click install downloads the official LTS installer (~30 MB, SHA-256 verified before running) and installs it over the current Node.js in the same directory — PATH stays unchanged; DSH\'s global command lives in your user directory and is unaffected.',
+    wiz_btn_upgrade_node: 'Download & install the latest LTS',
+    wiz_btn_node_manual: 'Download it myself from nodejs.org',
+    wiz_btn_node_ignore: 'Keep this version and continue',
+    wiz_node_ignore_note: '"Continue anyway" = you accept that DSH will most likely fail to start (the app stops blocking the launch). You can re-enable the start check later under Preferences → Node.js version.',
+    wiz_node_ignore_log: '[launcher] Recorded: Node.js is below the minimum but the user chose to continue (the start check no longer blocks).',
+    wiz_node_old_log: '[launcher] Node.js {0} is below the {1} required by DSH; upgrade guidance is shown in the UI.',
+    wiz_node_manual_log: '[launcher] Opened the official Node.js download page for a manual install.',
+    toast_node_ack_saved: 'Saved: keep this Node.js version and keep trying to start',
+    toast_node_ack_clear: 'Start check restored: an outdated Node.js will block the launch again',
+    log_node_check_restored: '[launcher] "Keep the outdated version" cleared: a Node.js below the minimum will block the launch again.',
+    toast_node_ack_fail: 'Failed to record your choice: {0}',
+    toast_node_upgrade_hint: 'After the installer finishes, click "Re-check"; if the version is unchanged, restart this app.',
+    // Preference row
+    lbl_node_version_html: 'Node.js version (DSH requires <b>v22.19.0</b> or newer; DSH fails to start on older ones)',
+    btn_install_node_lts: 'Download & install official LTS',
+    lbl_node_min_ignore: 'Keep this version and start anyway (no more blocking; DSH will most likely still fail)',
+    flag_node_ok: '✔ OK ({0})',
+    flag_node_old: '✘ too old ({0}, needs {1}+)',
+    flag_node_unknown: '? cannot tell ({0})',
+    log_node_install_manual: '[launcher] The user started the guided Node.js LTS install from Preferences.',
+    log_node_install_busy: '[launcher] A guided install is already running; this click was ignored.',
+    btn_open_node_settings: 'Open Preferences to upgrade Node.js',
   };
 
   const L = {

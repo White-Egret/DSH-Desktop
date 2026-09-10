@@ -39,6 +39,11 @@ pub struct Config {
     /// 这是程序自己写的运行时记忆（不是用户设置），只用于「连接现有服务 / 页面重开」
     /// 这类没有新进程输出的场景；读取侧（process.rs）每次使用前重新校验形状与端口。
     pub last_url: String,
+    /// 用户「保留过低版本 Node 并继续」的决定记录：内容是当时确认过的**最低版本**
+    /// （如 `22.19.0`）。为空 = 没确认过；与当前 NODE_MIN_VERSION 不同 = 程序把下限
+    /// 提高了，需要重新问一次。取值由 remember_node_min_ack 做读取-修改-写回，
+    /// 不经过设置页，避免把「一次性确认」变成用户要维护的配置项。
+    pub node_min_ack: String,
 }
 
 impl Default for Config {
@@ -60,6 +65,8 @@ impl Default for Config {
             // 默认跟随系统外观（DSH 的 ui-theme 默认值也是 system，两边一致）
             appearance: "system".to_string(),
             last_url: String::new(),
+            // 空 = 还没在「Node 版本过低」告警里选过「保留该版本继续」
+            node_min_ack: String::new(),
         }
     }
 }
@@ -533,6 +540,33 @@ pub fn last_url(app: &AppHandle) -> String {
     let Ok(s) = std::fs::read_to_string(&path) else { return String::new() };
     let Ok(root) = serde_json::from_str::<serde_json::Value>(&s) else { return String::new() };
     root["last_url"].as_str().unwrap_or("").to_string()
+}
+
+// ---------- 「Node 版本过低」告警的确认记忆（node_min_ack） ----------
+//
+// 为什么单独做一个键、而不是让前端 save_config 带上它：
+// 用户点的是「忽略告警，仍要继续」这一个动作，语义上只该改这一个键。
+// 走读取-修改-写回（与 last_url 同款）就不会顺手覆盖其它字段——save_config
+// 是整体结构体写盘，前端一旦漏字段就可能把用户的确认/其它设置抹掉。
+
+/// 记下「用户已知 Node 低于 <min_version>，仍选择继续」；传空串 = 取消这个选择
+/// （首选项里取消勾选时走这里），恢复「版本过低就拦截启动」。
+/// 写入的是**当时的下限**：以后程序把下限提高了，比对不相等就会重新告警。
+pub fn remember_node_min_ack(app: &AppHandle, min_version: &str) -> Result<(), String> {
+    let dir = config_dir(app);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| i18n::fmt("err_cfg_dir", &[&dir.display().to_string(), &e.to_string()]))?;
+    let path = config_path(app);
+    // 在「当前生效配置」上改这一个键：首次运行 config.json 还不存在时用默认配置，
+    // 不会写出一个只有单个键的半成品文件。
+    let mut root = serde_json::to_value(load(app)).unwrap_or_default();
+    if !root.is_object() {
+        root = serde_json::to_value(Config::default()).unwrap_or_default();
+    }
+    root["node_min_ack"] = serde_json::Value::String(min_version.trim().to_string());
+    let text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text)
+        .map_err(|e| i18n::fmt("err_cfg_write", &[&path.display().to_string(), &e.to_string()]))
 }
 
 // ---------- 界面语言 sidecar（首次运行向导专用） ----------

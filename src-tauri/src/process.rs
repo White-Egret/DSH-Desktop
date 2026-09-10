@@ -826,25 +826,20 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         //     pi-ai 依赖的 engines 三者共同定出）。**已发布的 dsh 包不声明 engines**，
         //     所以 npm 安装阶段不拦，低于下限只在运行时炸：实测 Node 21.7.3 起不来，
         //     而旧版程序只会把 DSH 的最后一行 stderr 甩给用户。这里提前说清楚。
-        //     判定不出来（读不到/解析不了版本串）时不拦，只记一条日志——
+        // 判定不出来（读不到/解析不了版本串）时不拦，只记一条日志——
         //     宁可让 DSH 自己去报错，也不误伤一个版本串异常但实际可用的环境。
-        let min_label = detect::NODE_MIN_VERSION_LABEL.to_string();
-        // 注意参数类型是 &&str：i18n::fmt 收的是 &[&dyn Display]，而 &str 自身是
-        // unsized（E0277）。写成 `v: &str` 时 `&[v, &min_label]` 里的 v 是 &str，
-        // 转不成 &dyn Display；用 &&str 则与其它调用点（&[&a, &b]）写法一致。
-        let block = |v: &&str| -> Result<(), String> {
-            let line = i18n::fmt("log_node_too_old_block", &[v, &min_label]);
-            emit_log(app, "launcher", line);
-            let msg = i18n::fmt("err_node_too_old", &[v, &min_label]);
-            set_status(app, "error", Some(msg.clone()));
-            Err(msg)
-        };
+        //
+        //     分两步写（先判定 needs_block、再报告）而不是把报告塞进 match 分支：
+        //     分支里若直接 `return`，v（String）已被移出、又要把 match 的值当返回值，
+        //     借用检查不过；而且 i18n::fmt 收的是 &[&dyn Display]，在闭包签名上纠缠
+        //     &String / &str / &&str 的层数很容易再踩坑。这里只移动一次 String。
+        let mut needs_block: Option<String> = None;
         match detect::quick_version(node_path, 10) {
             Some(v) if detect::node_version_at_least_min(&v) == Some(false) => {
                 // 用户已明确选择「保留该版本并继续」时放行。只对**当时那条下限**有效：
                 // 程序以后提高下限（NODE_MIN_VERSION 变了）会重新拦一次。
                 if cfg.node_min_ack.trim() != detect::NODE_MIN_VERSION {
-                    return block(&v);
+                    needs_block = Some(v);
                 }
             }
             Some(v) => {
@@ -852,7 +847,10 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
                     emit_log(
                         app,
                         "launcher",
-                        i18n::fmt("log_node_version_unknown", &[&v, &min_label]),
+                        i18n::fmt(
+                            "log_node_version_unknown",
+                            &[&v, &detect::NODE_MIN_VERSION_LABEL.to_string()],
+                        ),
                     );
                 }
             }
@@ -860,9 +858,23 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
                 emit_log(
                     app,
                     "launcher",
-                    i18n::fmt("log_node_version_unknown", &[&"node --version".to_string(), &min_label]),
+                    i18n::fmt(
+                        "log_node_version_unknown",
+                        &[&"node --version".to_string(), &detect::NODE_MIN_VERSION_LABEL.to_string()],
+                    ),
                 );
             }
+        }
+        if let Some(v) = needs_block {
+            let min_label = detect::NODE_MIN_VERSION_LABEL.to_string();
+            emit_log(
+                app,
+                "launcher",
+                i18n::fmt("log_node_too_old_block", &[&v, &min_label]),
+            );
+            let msg = i18n::fmt("err_node_too_old", &[&v, &min_label]);
+            set_status(app, "error", Some(msg.clone()));
+            return Err(msg);
         }
     }
 

@@ -829,7 +829,10 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         //     判定不出来（读不到/解析不了版本串）时不拦，只记一条日志——
         //     宁可让 DSH 自己去报错，也不误伤一个版本串异常但实际可用的环境。
         let min_label = detect::NODE_MIN_VERSION_LABEL.to_string();
-        let block = |v: &str| -> Result<(), String> {
+        // 注意参数类型是 &&str：i18n::fmt 收的是 &[&dyn Display]，而 &str 自身是
+        // unsized（E0277）。写成 `v: &str` 时 `&[v, &min_label]` 里的 v 是 &str，
+        // 转不成 &dyn Display；用 &&str 则与其它调用点（&[&a, &b]）写法一致。
+        let block = |v: &&str| -> Result<(), String> {
             let line = i18n::fmt("log_node_too_old_block", &[v, &min_label]);
             emit_log(app, "launcher", line);
             let msg = i18n::fmt("err_node_too_old", &[v, &min_label]);

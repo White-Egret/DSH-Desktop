@@ -98,6 +98,10 @@ DSH 的运行下限是 **Node.js 22.19.0**：SQLite 会话存储用的 `node:sql
 
 用 NSIS 安装包安装或直接运行便携 exe。首次启动会出现一次环境检查向导；一旦 `%APPDATA%\com.dsh.desktop\config.json` 存在即不再出现。
 
+**默认安装到哪里。** NSIS 安装包的默认目录是 **`C:\Users\<用户名>\DSH Desktop`**（当前用户安装，不需要管理员权限），安装时的「选择安装位置」页仍可改成任意目录。**升级安装沿用原路径**：安装程序会从注册表读取上次的安装位置并继续用它，因此不会在新默认目录下多出一份。MSI 是另一套「整机安装」包，默认目录仍是 `C:\Program Files\DSH Desktop`。
+
+> 这个默认值来自一份「随仓库保存」的 Tauri NSIS 模板（`src-tauri/nsis/installer.nsi`，通过 `bundle.windows.nsis.template` 接入）：Tauri 没有「默认安装目录」配置项（[tauri-apps/tauri#11015](https://github.com/tauri-apps/tauri/issues/11015)），而 NSIS 是在 `.onInit` 里定死这个值的，安装钩子（installer_hooks）执行得太晚、改不到默认值。该文件是**脚本生成、不要手改**：`node scripts/gen-nsis-template.mjs` 会按 `package-lock.json` 里**锁定的** `@tauri-apps/cli` 版本取对应官方模板，只打这一个补丁；升级 CLI 后重跑一次，模板就不会与 bundler 悄悄脱节。
+
 ## 从源码构建（Build from source）
 
 需要：Node.js 18+/20 LTS、Rust stable（MSVC）、Visual Studio Build Tools、WebView2。
@@ -108,6 +112,8 @@ npm run tauri build
 ```
 
 产物位于 `src-tauri/target/release/bundle/nsis/`、`.../msi/`，独立 exe 在 `src-tauri/target/release/`。
+
+> NSIS 安装包的默认安装目录由 `src-tauri/nsis/installer.nsi` 决定（见「安装」一节）。升级 `@tauri-apps/cli` 后请执行 `node scripts/gen-nsis-template.mjs` 重新生成并提交。
 
 ## GitHub Actions 构建
 

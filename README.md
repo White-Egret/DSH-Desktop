@@ -102,6 +102,10 @@ No local Rust toolchain needed — GitHub Actions builds the installers for you 
 
 Install with the NSIS setup exe, or just run the portable exe. On first launch the environment check wizard appears once (it disappears permanently once `%APPDATA%\com.dsh.desktop\config.json` exists).
 
+**Where it installs.** The NSIS installer defaults to **`C:\Users\<you>\DSH Desktop`** — a per-user install (no admin rights) — and the directory page lets you pick any other folder before installing. Upgrades go to the existing location: the installer reads the previous path from the registry and keeps it, so an updated copy does not appear under the new default. The MSI package is a separate, per-machine installer and still defaults to `C:\Program Files\DSH Desktop`.
+
+> That default comes from a vendored copy of Tauri's NSIS template (`src-tauri/nsis/installer.nsi`, wired up as `bundle.windows.nsis.template`), because Tauri has no config option for the default install directory ([tauri-apps/tauri#11015](https://github.com/tauri-apps/tauri/issues/11015)) and NSIS fixes it in `.onInit`, before any installer hook could override it. The file is **generated, not hand-edited**: `node scripts/gen-nsis-template.mjs` fetches the template matching the **pinned** `@tauri-apps/cli` version from `package-lock.json` and applies that single change. Rerun it after bumping the CLI so the template cannot silently drift from the bundler.
+
 ## Build from source
 
 Requirements: Node.js 18+ (or 20 LTS), Rust stable (MSVC toolchain), Visual Studio Build Tools, WebView2.
@@ -112,6 +116,8 @@ npm run tauri build
 ```
 
 Artifacts land in `src-tauri/target/release/bundle/nsis/`, `.../msi/`, and the raw exe in `src-tauri/target/release/`.
+
+> The NSIS installer's default install directory lives in `src-tauri/nsis/installer.nsi` (see [Installation](#installation)). If you bump `@tauri-apps/cli`, regenerate it with `node scripts/gen-nsis-template.mjs` and commit the result.
 
 ## GitHub Actions build
 

@@ -834,9 +834,11 @@ pub fn get_safe_status(app: AppHandle) -> SafeStatusReport {
     let Some(s) = app.try_state::<SafeState>() else {
         return SafeStatusReport { active: false, busy: false, report: None };
     };
-    SafeStatusReport {
-        active: s.active.load(Ordering::SeqCst),
-        busy: s.busy.load(Ordering::SeqCst),
-        report: s.report.lock().unwrap().clone(),
-    }
+    // 必须先取值、再在末尾构造返回值：tail expression 里的 MutexGuard 临时量会活到
+    // 整个块结束，晚于 `s`（State 借用）被 drop 的时刻，直接写成 `report: s.report…`
+    // 会触发 E0597（借用的值活得比 s 长），CI 上实测报错。
+    let active = s.active.load(Ordering::SeqCst);
+    let busy = s.busy.load(Ordering::SeqCst);
+    let report = s.report.lock().unwrap().clone();
+    SafeStatusReport { active, busy, report }
 }

@@ -1110,10 +1110,11 @@ pub(crate) fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<D
     );
     loop {
         // 0) 实际监听地址优先（要求一.8）：输出中出现则切换轮询/加载目标
+        //    （这里只取端口；URL 在就绪后重新读取，避免绑定一个本作用域用不到的变量）
         let detected = state.detected_url.lock().unwrap().clone();
-        let (target_url, poll_port) = match &detected {
-            Some((url, dp)) => (url.clone(), *dp),
-            None => (local_url(port), port),
+        let poll_port = match &detected {
+            Some((_, dp)) => *dp,
+            None => port,
         };
         let addr: SocketAddr = format!("127.0.0.1:{}", poll_port).parse().unwrap();
 

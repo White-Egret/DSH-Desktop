@@ -8,9 +8,11 @@
 //! - 凭据方案 = 只借用 `.credentials.yaml` 这一个文件（每次进入都覆盖拷贝，保证
 //!   拿到当前有效密钥）；DSH 在「家目录里除该文件全空」时会自动重建全部原厂配置。
 //!   **文件内容全程不离开 Rust 侧**：不写日志、不经 IPC 返回前端、不放进环境变量；
-//! - 基线重置（可配置，默认开启）：进入前把已存在的 .dsh-safe 整目录重命名为
+//! - 基线重置（可配置，**默认关闭**）：关闭时沿用已有 .dsh-safe（上一轮安全模式的
+//!   配置与日志保留），开启时进入前把已存在的 .dsh-safe 整目录重命名为
 //!   `.dsh-safe-archive-<YYYYMMDD-HHMMSS>` 归档（绝不删除），重建空目录后再写入
-//!   借用的凭据 —— 每次进入都是恒定的原厂基线；
+//!   借用的凭据 —— 每次进入都是恒定的原厂基线。首次进入两条路径结果相同
+//!   （目录还不存在，都是只含凭据的空家目录）；
 //! - 修复上下文：给安全实例额外注入 `DSH_DAILY_HOME=<日常家目录>`（只有路径，
 //!   绝不含任何密钥），让修复 agent 天然知道修复目标；
 //! - 生命周期：Child 句柄保存在 Tauri State（SafeState）中；应用退出 / 窗口销毁走
@@ -443,7 +445,8 @@ pub fn cleanup_safe_sync(app: &AppHandle) {
 ///      判定）/ 家目录路径策略 / 3081 空闲；
 ///   B. 预检（停日常）：日常实例完全退出（taskkill /T 带走 node 子进程）且日常端口
 ///      释放，失败则提示用户、绝不强行进入；
-///   C. 基线重置（可配置）：旧 .dsh-safe 归档为 .dsh-safe-archive-<时间戳>，重建空目录；
+///   C. 基线重置（可配置，默认关闭）：开启时旧 .dsh-safe 归档为
+///      .dsh-safe-archive-<时间戳> 并重建空目录，关闭时沿用已有目录；
 ///      凭据借用：只拷 .credentials.yaml（覆盖式）；
 ///   D. spawn `dsh web --port 3081 --no-open`（DSH_HOME / DSH_DAILY_HOME / 补全 PATH），
 ///      复用日常的日志读取与就绪等待，就绪后把 3081 页面内嵌进主窗口。
@@ -495,7 +498,7 @@ fn enter_safe_blocking(app: &AppHandle) -> Result<SafeReport, String> {
         i18n::fmt("log_safe_precheck_ok", &[&cfg.port, &SAFE_PORT]),
     );
 
-    // ---- C. 基线重置（可配置，默认开启）----
+    // ---- C. 基线重置（可配置，默认关闭：沿用已有安全环境）----
     let mut archived_to: Option<String> = None;
     if cfg.safe_reset_baseline {
         if safe_home_path.exists() {

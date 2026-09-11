@@ -684,10 +684,10 @@ function openSettings() {
   $('set-appearance').value = ['light', 'dark', 'system'].includes(config.appearance) ? config.appearance : 'system';
   $('set-extra-args').value = config.extra_args;
   $('set-package-name').value = config.package_name;
-  // 安全模式：基线重置开关（缺省视为开）与修复验证等待秒数（缺省 60）
-  $('set-safe-reset').checked = config.safe_reset_baseline !== false;
+  // 安全模式：基线重置开关（默认关闭：取不到字段也按关闭显示）与修复验证等待秒数（默认 80）
+  $('set-safe-reset').checked = config.safe_reset_baseline === true;
   const sv = Number(config.safe_verify_secs);
-  $('set-safe-verify').value = Number.isFinite(sv) ? sv : 60;
+  $('set-safe-verify').value = Number.isFinite(sv) ? sv : 80;
   $('set-config-path').textContent = config.config_path;
   // Node.js 版本状态行（含一键升级按钮与「保留该版本并继续」开关）：
   // 有缓存检测结果就直接渲染，没有就异步补一次检测
@@ -736,7 +736,7 @@ async function saveSettings() {
     safe_reset_baseline: $('set-safe-reset').checked,
     safe_verify_secs: (() => {
       const v = parseInt($('set-safe-verify').value, 10);
-      return Number.isFinite(v) && v >= 0 ? v : 60;
+      return Number.isFinite(v) && v >= 0 ? v : 80;
     })(),
     // 「Node 版本过低」的确认记忆不是设置页字段：原样带上内存里的值，
     // 后端在保存时也会再兜一层（缺字段时沿用磁盘上的值）

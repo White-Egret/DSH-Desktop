@@ -27,6 +27,7 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 - File logging: Desktop log at `%APPDATA%\com.dsh.desktop\desktop.log`, DSH output log at `%USERPROFILE%\.dsh\logs\dsh.log`; UI buttons to open the log folder and copy errors/log text
 - Refresh Page: reloads only the embedded DSH page without restarting the backend service (`F5` / `Ctrl+R`)
 - One-click update of DSH via npm, live output streaming; choose the `latest` **or** `next` channel in the confirmation dialog (upgrade *and* downgrade are offered regardless of what is installed), with a backup reminder for the DSH home dir
+- **Safe Mode**: start DSH from a separate, pristine home (`%USERPROFILE%\.dsh-safe`) on port 3081 to inspect and repair the daily environment; borrows only the `.credentials.yaml` file (its content never leaves the Rust side), archives the old safe home instead of deleting it, and verifies the repair after switching back — see [Safe Mode](#safe-mode)
 - Version check against both npm dist-tags (`npm view <pkg> dist-tags`); the toolbar flags "update available" when your install trails the newest channel
 - Close-to-tray or quit-on-close behavior (configurable); tray menu with Show Main Window / Start with Windows / Exit; tray restore does show + unminimize + set_focus
 - Start with Windows (official autostart plugin, HKCU registry only, no admin rights); autostart runs silently in tray and delays DSH launch by 12 s to avoid the boot-time IO spike
@@ -266,6 +267,25 @@ Click **⤓ 更新 DSH (Update)** → the dialog lists **both channels with thei
 - **⚠ Back up the DSH home dir (`%USERPROFILE%\.dsh` by default) before either direction.** The dialog shows your *actual configured* path, and the reminder is repeated in the log when the run starts: a newer version may rewrite the config/session format, and rolling back to an older one can just as well fail to read what the newer one wrote.
 - While installing, the **page shows live progress** — a "package files fetched / elapsed" counter plus scrolling npm output, also mirrored into the log (source tag `update`). Buttons are disabled during the update.
 - Use **检测全局包名** (`npm list -g --depth=0`) to confirm the package name.
+
+## Safe Mode
+
+Like an operating system's safe mode: DSH is started from a **separate, pristine home directory** so you can inspect and repair problems in the daily environment. The entry point is the **🛡 Safe Mode** toolbar button (between "Update DSH" and "Log").
+
+**Mechanism**: equivalent to `DSH_HOME="%USERPROFILE%\.dsh-safe" dsh web --port 3081 --no-open`. `.dsh-safe` sits next to the daily `.dsh` (never inside app_data_dir); when DSH finds a home that is empty apart from the credential file, it rebuilds all factory defaults itself.
+
+**Entry flow** (one click, every step visible in the log):
+
+1. **Pre-check**: the daily instance is fully stopped first (`taskkill /T` takes its node children with it) and both the daily port and 3081 must be free; any failure **prompts and refuses entry — never forced** (an in-progress update also refuses).
+2. **Baseline reset** (can be turned off in Preferences): an existing `.dsh-safe` is renamed to `.dsh-safe-archive-<YYYYMMDD-HHMMSS>` — **archived, never deleted** — and rebuilt empty, so every entry is the same factory baseline.
+3. **Credential borrowing**: the daily home's `.credentials.yaml` is **overwritten-copied** into `.dsh-safe` on every entry (always the currently valid key). It is the only file copied; a missing/empty source does not block entry (the banner tells you and DSH runs its first-run flow). **The content is never logged, never sent to the frontend over IPC, and never placed in environment variables**; permissions are tightened to 0600 on Unix.
+4. **Launch**: the child process also gets `DSH_DAILY_HOME=<daily home>` so a repair agent naturally knows the repair target (path only, never secrets), and the page is loaded through the exact same output-parsing / readiness-wait / embed logic as the daily mode, using the auth URL on 3081.
+
+**Visual distinction**: the window title is prefixed with "[Safe Mode]" (localized), the toolbar switches to an amber accent with a 🛡 badge, and an onboarding banner states the three key facts (you are in safe mode / the daily home path / the credential-borrowing result). Daily control buttons are disabled while safe mode is active.
+
+**Exit & repair-verification loop**: "Exit Safe Mode" kills the safe instance (the Child handle lives in Tauri State; app quit and window destruction clean it up too, and a hard-kill of the desktop app is covered by the Windows Job Object at kernel level — no orphan process keeps 3081), then restarts the daily instance through the normal path. If the daily instance is not ready within the verification window (default 60 s, configurable in Preferences, 0 = off), the app prompts "the repair may not have succeeded" and offers a one-click **return to Safe Mode**.
+
+**Logs**: the safe instance's output streams into the Log panel and `desktop.log`, but **no** mirror file is written into `.dsh-safe` (the "empty apart from credentials" factory baseline stays intact).
 
 ## Logs
 

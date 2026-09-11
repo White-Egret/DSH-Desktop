@@ -205,6 +205,46 @@ pub fn t(key: &str) -> &'static str {
         "setup_dsh_fail_code" => if en { "npm install -g {0} failed (exit code {1}). Common causes: no network, npm registry unreachable, insufficient permission for the global dir. See the log, or copy the command and run it yourself." } else { "npm install -g {0} 失败（退出码 {1}）。常见原因：无网络、npm 源不可达、全局目录权限不足。详见日志，也可复制命令手动执行。" },
         "log_setup_done" => if en { "[launcher] First-run setup finished; configuration saved." } else { "[launcher] 初始化引导已完成，配置已写入。" },
 
+        // ---------- 安全模式（独立纯净家目录 %USERPROFILE%\.dsh-safe，端口 3081） ----------
+        // 门禁 / 预检
+        "err_safe_busy" => if en { "A safe-mode task is already running; please wait" } else { "已有安全模式任务正在进行，请等待完成" },
+        "err_safe_already" => if en { "Already in safe mode" } else { "当前已处于安全模式" },
+        "err_safe_not_active" => if en { "Not in safe mode" } else { "当前不在安全模式" },
+        "err_safe_updating" => if en { "Cannot enter safe mode while DSH is being updated" } else { "DSH 正在更新，无法进入安全模式" },
+        "err_safe_active_op" => if en { "This action is unavailable in safe mode; exit safe mode first" } else { "安全模式下无法执行该操作；请先退出安全模式" },
+        "err_safe_port_busy" => if en { "Safe-mode port {0} is occupied; cannot enter safe mode. Free the port (a leftover process?) and retry" } else { "安全模式端口 {0} 已被占用，无法进入安全模式。请先释放该端口（可能有残留进程）后重试" },
+        "err_safe_daily_busy" => if en { "The daily instance did not fully exit: port {0} is still occupied, so safe mode was NOT entered. Check Task Manager, then retry" } else { "日常实例未能完全退出：端口 {0} 仍被占用，已取消进入安全模式。请在任务管理器中确认后重试" },
+        "err_safe_home" => if en { "Cannot determine the safe-mode home directory (USERPROFILE / HOME environment variable is missing)" } else { "无法确定安全模式家目录（缺少 USERPROFILE / HOME 环境变量）" },
+        "err_safe_archive" => if en { "Failed to archive the old safe-mode home {0} → {1}: {2}. Entry aborted (baseline not reset); retry, or turn off \"Reset the safe-mode baseline on entry\" in Preferences" } else { "归档旧安全模式家目录失败：{0} → {1}：{2}。基线未完成重置，已取消进入；可重试，或在「首选项」中关闭「进入安全模式时重置基线」" },
+        "err_safe_mkdir" => if en { "Cannot create the safe-mode home {0}: {1}" } else { "无法创建安全模式家目录 {0}：{1}" },
+        // 过程日志（[safe] 前缀，与 [launcher]/[update]/[setup] 同一风格）
+        "log_safe_precheck_stop" => if en { "[safe] Pre-check: stopping the daily DSH instance (including its child processes)..." } else { "[safe] 预检：正在停止日常模式 DSH 实例（含其子进程）…" },
+        "log_safe_precheck_ok" => if en { "[safe] Pre-check passed: the daily instance has exited, port {0} is free; safe-mode port {1} is free" } else { "[safe] 预检通过：日常实例已完全退出、端口 {0} 空闲；安全模式端口 {1} 空闲" },
+        "log_safe_archive" => if en { "[safe] Baseline reset: the old safe environment was archived to {0} (never deleted); rebuilding a pristine home" } else { "[safe] 基线重置：旧安全环境已归档为 {0}（不会删除），正在重建纯净家目录" },
+        "log_safe_reset_off" => if en { "[safe] Baseline reset is OFF: reusing the existing {0} (the credential file is still overwritten with the current one)" } else { "[safe] 基线重置已关闭：沿用现有 {0}（凭据文件仍会覆盖为当前有效版本）" },
+        "log_safe_cred_borrowed" => if en { "[safe] Borrowed the daily-mode API credential file into the safe home (overwritten with the current copy; the content is never logged nor sent to the UI)" } else { "[safe] 已从日常家目录借用 API 凭据文件（覆盖为当前有效版本；其内容不写入任何日志、不发给前端）" },
+        "log_safe_cred_skip" => if en { "[safe] Credentials not borrowed ({0}); DSH will run its own first-run flow inside safe mode" } else { "[safe] 未借用凭据（{0}）；安全模式将由 DSH 走自己的首跑流程" },
+        "log_safe_start_cmd" => if en { "[safe] Command: \"{0}\" web --port {1} --no-open (cwd: {2}, DSH_HOME: {3}, DSH_DAILY_HOME: {4}, PID: {5}; output goes to desktop.log only — the safe home keeps its factory baseline)" } else { "[safe] 启动命令: \"{0}\" web --port {1} --no-open（进程工作目录: {2}，DSH_HOME: {3}，DSH_DAILY_HOME: {4}，PID: {5}；输出仅写入 desktop.log，保持安全家目录原厂基线）" },
+        "log_safe_entered" => if en { "[safe] Entered safe mode: home {0}, port {1}. Daily home (left untouched): {2}" } else { "[safe] 已进入安全模式：家目录 {0}，端口 {1}。日常家目录（未做任何修改）：{2}" },
+        "log_safe_enter_fail" => if en { "[safe] Failed to enter safe mode: {0}" } else { "[safe] 进入安全模式失败：{0}" },
+        "log_safe_exit_restart" => if en { "[safe] Exiting safe mode: stopping the safe instance and restarting the daily DSH through the normal path..." } else { "[safe] 正在退出安全模式：停止安全实例，并按日常模式既有路径重新启动…" },
+        "log_safe_stopped" => if en { "[safe] Safe-mode DSH stopped." } else { "[safe] 安全模式 DSH 已停止。" },
+        "log_safe_restart_fail" => if en { "[safe] Failed to restart the daily instance after exiting safe mode: {0}" } else { "[safe] 退出安全模式后重启日常实例失败：{0}" },
+        // 修复验证闭环
+        "log_safe_verify_start" => if en { "[safe] Repair verification: waiting up to {0} s for the daily instance to become ready..." } else { "[safe] 修复验证：等待日常实例就绪（最长 {0} 秒）…" },
+        "log_safe_verify_ok" => if en { "[safe] Repair verification passed: the daily instance is ready." } else { "[safe] 修复验证通过：日常实例已就绪。" },
+        "log_safe_verify_fail" => if en { "[safe] The daily instance was not ready within {0} s — the repair may not have succeeded." } else { "[safe] 日常实例在 {0} 秒内未就绪——修复可能未成功。" },
+        "log_safe_verify_skip" => if en { "[safe] Repair verification is disabled (safe_verify_secs = 0)." } else { "[safe] 修复验证已关闭（safe_verify_secs = 0）。" },
+        "msg_safe_verify_fail" => if en { "The daily instance was not ready within {0} s — the repair may not have succeeded." } else { "日常实例在 {0} 秒内未能就绪，修复可能未成功。" },
+        // 窗口标题前缀（安全模式的视觉区分之一）
+        "safe_title_prefix" => if en { "[Safe Mode] " } else { "[安全模式] " },
+        // 凭据借用结果（写入 SafeReport.credential_message，前端横幅原样显示）
+        "safe_cred_msg_borrowed" => if en { "The API credential file was borrowed automatically from the daily home (.credentials.yaml copied into the safe home; its content never leaves this app)." } else { "已自动借用日常模式的 API 凭据文件（.credentials.yaml 已拷入安全家目录；其内容不会离开本程序）。" },
+        "safe_cred_msg_missing" => if en { "No credential file was found in the daily home ({0}); safe mode runs DSH's first-run flow — configure the API key in the page if needed." } else { "未找到日常模式的凭据文件（{0}）；安全模式将由 DSH 走首跑流程，如需使用请在页面内配置 API 密钥。" },
+        "safe_cred_msg_empty" => if en { "The daily credential file is empty ({0}) and was NOT borrowed; safe mode runs DSH's first-run flow." } else { "日常模式的凭据文件为空（{0}），未借用；安全模式将由 DSH 走首跑流程。" },
+        "safe_cred_msg_failed" => if en { "Credential borrowing failed: {0}. Entry was not blocked — handle it manually inside safe mode if needed." } else { "凭据借用失败：{0}。进入未被阻断——如有需要请在安全模式内手动处理。" },
+        "safe_cred_too_large" => if en { "the credential file is implausibly large ({0} bytes), so it was not copied" } else { "凭据文件体积异常（{0} 字节），未拷贝" },
+
         // 未知 key：返回静态标记（正常路径不会命中；出现即说明 key 拼写有遗漏）
         _ => "[i18n-key-missing]",
     }

@@ -63,6 +63,14 @@
   --wiz-step-border: #f0e3b8;
   --toast-bg: #24292f;
   --focus-ring: rgba(31, 111, 235, 0.15);
+
+  /* 安全模式标记色（琥珀橙，与日常模式的蓝/灰明显区分；机制同其他主题变量） */
+  --safe-accent: #d97706;
+  --safe-toolbar-bg: #fdf3e3;
+  --safe-btn-hover: #fdf3e3;
+  --safe-badge-fg: #7a4a00;
+  --safe-badge-bg: #ffe9bf;
+  --safe-badge-border: #f0c874;
 }
 
 /* ---------- 深色主题：仅覆盖颜色变量，结构规则与浅色完全共用 ---------- */
@@ -121,6 +129,14 @@ html[data-theme="dark"] {
   --wiz-step-border: #4d4423;
   --toast-bg: #2a2f38;
   --focus-ring: rgba(103, 158, 254, 0.25);
+
+  /* 安全模式标记色（深色主题） */
+  --safe-accent: #f0a538;
+  --safe-toolbar-bg: #2a2118;
+  --safe-btn-hover: #33291c;
+  --safe-badge-fg: #ffd479;
+  --safe-badge-bg: #3f3115;
+  --safe-badge-border: #6b5626;
 }
 
 html, body {
@@ -930,4 +946,88 @@ body {
 .lang-btn .lang-sub {
   font-size: 13px;
   color: var(--text-dim);
+}
+
+/* ---------- 安全模式（琥珀色标记：工具栏 / 按钮 / 徽标 / 引导横幅） ----------
+   视觉区分机制与主题一致：颜色全部走 CSS 变量，深浅主题各自覆盖。
+   窗口标题的「[安全模式]」前缀由 Rust 侧设置（safe.rs apply_safe_window_title）。 */
+
+/* 工具栏按钮：平时就带一点琥珀描边提示其特殊性；进入后整条工具栏换色 */
+.btn.safe {
+  border-color: var(--safe-badge-border);
+  color: var(--safe-accent);
+}
+.btn.safe:hover:not(:disabled) { background: var(--safe-btn-hover); }
+
+/* 进入安全模式后：工具栏整体切换琥珀底 + 2px 强调下边框。
+   #toolbar 是 border-box 且高度固定 43.2px（Rust TOOLBAR_H 依赖），
+   边框加粗不会改变工具栏总高度，内嵌 webview 的定位不受影响。 */
+body.safe-mode #toolbar {
+  background: var(--safe-toolbar-bg);
+  border-bottom: 2px solid var(--safe-accent);
+}
+body.safe-mode #btn-safe {
+  border-color: var(--safe-accent);
+  color: var(--safe-accent);
+  font-weight: 600;
+}
+
+/* 状态区左侧的常显徽标（点击可重开引导横幅，见 main.js safe-badge onclick） */
+.safe-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  line-height: 1.6;
+  color: var(--safe-badge-fg);
+  background: var(--safe-badge-bg);
+  border: 1px solid var(--safe-badge-border);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* 引导横幅 / 验证失败弹窗 */
+.safe-modal-box { border-top: 3px solid var(--safe-accent); }
+.safe-modal-body {
+  padding: 4px 18px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text);
+  overflow-y: auto;
+}
+.safe-fact code {
+  display: inline-block;
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-family: Consolas, "Microsoft YaHei", monospace;
+  font-size: 12px;
+  word-break: break-all;
+  user-select: text;
+}
+/* 凭据借用结果条：成功绿色系（复用频道「当前已装」的配色变量），其他情况警示黄 */
+.safe-cred {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--backup-border);
+  border-left: 3px solid var(--backup-accent);
+  background: var(--backup-bg);
+  line-height: 1.6;
+}
+.safe-cred.ok {
+  border-color: var(--flag-cur-border);
+  border-left-color: var(--ok);
+  background: var(--flag-cur-bg);
+}
+.safe-note {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.6;
 }

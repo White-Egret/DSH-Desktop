@@ -18,10 +18,15 @@
       <button id="btn-restart" class="btn" data-i18n="btn_restart">⟳ 重启</button>
       <button id="btn-refresh" class="btn" data-i18n="btn_refresh">↻ 刷新页面</button>
       <button id="btn-update" class="btn" data-i18n="btn_update">⤓ 更新 DSH</button>
+      <!-- 安全模式：进入（停日常→归档→借凭据→起 3081）/ 退出（kill 安全实例→重启日常）。
+           文案由 main.js renderSafeButton() 动态切换，故不挂 data-i18n -->
+      <button id="btn-safe" class="btn safe">🛡 安全模式</button>
       <button id="btn-log" class="btn" data-i18n="btn_log">日志</button>
       <button id="btn-settings" class="btn" data-i18n="btn_settings">⚙ 首选项</button>
     </div>
     <div class="tb-right">
+      <!-- 安全模式徽标：进入后常显（点击可重新打开引导弹窗）；工具栏同时整体切换琥珀色 -->
+      <span id="safe-badge" class="safe-badge hidden" title="Safe Mode / 安全模式">🛡 <span data-i18n="safe_badge">安全模式</span></span>
       <span id="status-dot" class="dot gray"></span>
       <span id="status-text" data-i18n="status_init">初始化…</span>
       <span class="sep">·</span>
@@ -155,11 +160,18 @@
               <option value="system" data-i18n="opt_app_system">跟随系统</option>
             </select>
           </label>
-          <div class="field" aria-hidden="true"></div>
+          <label class="field">
+            <span data-i18n="lbl_safe_verify">安全模式修复验证等待（秒；退出安全模式后日常实例超过该时间未就绪则提示「修复可能未成功」；0 = 不验证）</span>
+            <input id="set-safe-verify" type="number" min="0" max="3600" />
+          </label>
         </div>
         <label class="field field-switch">
           <span data-i18n="lbl_autostart">开机自动启动（系统登录后静默拉起，可在托盘恢复窗口；首启先延迟 12 秒错开冷启动高峰）</span>
           <input type="checkbox" id="set-autostart" />
+        </label>
+        <label class="field field-switch">
+          <span data-i18n="lbl_safe_reset">进入安全模式时重置基线（旧 .dsh-safe 归档为 .dsh-safe-archive-时间戳，绝不删除；重建后只写入从日常模式借用的 .credentials.yaml，保证每次进入都是原厂纯净环境）</span>
+          <input type="checkbox" id="set-safe-reset" />
         </label>
         <label class="field">
           <span data-i18n="lbl_extra">附加启动参数（追加在 dsh web --port N --no-open 之后，可留空）</span>
@@ -253,6 +265,58 @@
       <div class="modal-actions">
         <button id="btn-cancel-update" class="btn" data-i18n="btn_cancel">取消</button>
         <button id="btn-confirm-update" class="btn primary" data-i18n="btn_start_update">开始安装</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 安全模式引导横幅（进入成功后弹出；点击工具栏徽标可重新打开）。
+       明确告知三件事：① 当前处于安全模式 ② 日常家目录路径 ③ 凭据借用结果。
+       路径与凭据说明由 main.js 用 Rust 端 SafeReport 填充（凭据内容绝不经过 IPC）。 -->
+  <div id="safe-modal" class="modal hidden">
+    <div class="modal-box narrow safe-modal-box">
+      <div class="modal-title" data-i18n="safe_modal_title">🛡 当前处于安全模式</div>
+      <div class="safe-modal-body">
+        <div id="safe-fact-running" class="safe-fact" data-i18n-html="safe_fact_running_html">
+          DSH 正以<b>独立的纯净家目录</b>运行在端口 3081，用于检查与修复日常模式环境；日常家目录<b>未被修改</b>。
+        </div>
+        <div class="safe-fact">
+          <span data-i18n="safe_fact_daily">日常家目录（修复目标，已注入 DSH_DAILY_HOME）：</span>
+          <code id="safe-daily-home"></code>
+        </div>
+        <div class="safe-fact">
+          <span data-i18n="safe_fact_safe">安全模式家目录：</span>
+          <code id="safe-home"></code>
+        </div>
+        <div id="safe-archive-line" class="safe-fact hidden">
+          <span data-i18n="safe_fact_archived">旧安全环境已归档为：</span>
+          <code id="safe-archived-to"></code>
+        </div>
+        <div id="safe-cred-line" class="safe-cred"></div>
+        <div class="safe-note" data-i18n="safe_modal_note">
+          修复完成后点「退出安全模式」：程序会停止安全实例、按日常模式既有路径重启 DSH，并验证其能否就绪；未就绪会提示「修复可能未成功」并可一键返回。
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-safe-exit-modal" class="btn" data-i18n="safe_btn_exit">退出安全模式（回到日常）</button>
+        <button id="btn-safe-ok" class="btn primary" data-i18n="safe_btn_understood">我知道了</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 修复验证失败弹窗：退出安全模式后日常实例未能按时就绪时显示，
+       提供「返回安全模式」入口（修复验证闭环） -->
+  <div id="safe-verify-modal" class="modal hidden">
+    <div class="modal-box narrow safe-modal-box">
+      <div class="modal-title" data-i18n="safe_verify_title">⚠ 修复可能未成功</div>
+      <div class="safe-modal-body">
+        <div id="safe-verify-msg" class="safe-fact"></div>
+        <div class="safe-note" data-i18n="safe_verify_hint">
+          可返回安全模式继续修复，或留在日常模式自行排查（状态区会显示具体错误，也可点「启动」重试）。
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-safe-verify-close" class="btn" data-i18n="safe_verify_close">知道了</button>
+        <button id="btn-safe-verify-back" class="btn primary" data-i18n="safe_verify_back">返回安全模式</button>
       </div>
     </div>
   </div>

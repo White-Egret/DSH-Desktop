@@ -1,6 +1,6 @@
 [package]
 name = "dsh-launcher"
-version = "1.2.4"
+version = "1.2.5"
 description = "DSH Desktop - 启动并管理本机全局安装的 DSH Web 服务"
 authors = ["DSH Desktop"]
 license = "MIT"
@@ -32,6 +32,8 @@ encoding_rs = "0.8"
 windows-sys = { version = "0.59", features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
+    # 安全模式基线重置的归档目录名用**本地时间**戳（GetLocalTime），比 UTC 对用户更直观
+    "Win32_System_SystemInformation",
     "Win32_Foundation",
     "Win32_Security",
 ] }

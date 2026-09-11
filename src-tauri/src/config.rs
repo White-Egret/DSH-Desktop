@@ -44,6 +44,16 @@ pub struct Config {
     /// 提高了，需要重新问一次。取值由 remember_node_min_ack 做读取-修改-写回，
     /// 不经过设置页，避免把「一次性确认」变成用户要维护的配置项。
     pub node_min_ack: String,
+    /// 安全模式：进入前是否重置环境基线（默认 true）。
+    /// 开启时若 `%USERPROFILE%\.dsh-safe` 已存在，整目录重命名为
+    /// `.dsh-safe-archive-<YYYYMMDD-HHMMSS>` 归档后重建空目录，
+    /// 保证每次进入安全模式都是「除借用的凭据外全空」的原厂状态；
+    /// 关闭时沿用已有 .dsh-safe（凭据文件仍会每次覆盖拷贝为当前有效版本）。
+    pub safe_reset_baseline: bool,
+    /// 安全模式：修复验证等待秒数（默认 60）。退出安全模式并按日常路径重启后，
+    /// 日常实例在该时间内未就绪则提示「修复可能未成功」并提供返回安全模式入口。
+    /// 0 = 不做验证提示。保存时非 0 值会被收敛到 5~3600 秒（与就绪超时同一刻度）。
+    pub safe_verify_secs: u64,
 }
 
 impl Default for Config {
@@ -67,6 +77,10 @@ impl Default for Config {
             last_url: String::new(),
             // 空 = 还没在「Node 版本过低」告警里选过「保留该版本继续」
             node_min_ack: String::new(),
+            // 安全模式默认每次进入都重置为原厂基线（旧目录归档保留，绝不删除）
+            safe_reset_baseline: true,
+            // 修复验证默认等 60 秒
+            safe_verify_secs: 60,
         }
     }
 }

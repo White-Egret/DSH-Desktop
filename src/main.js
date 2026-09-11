@@ -21,6 +21,10 @@ let lastErrorText = '';          // 最近一次错误文本（「复制错误�
 // 最近一次环境检测结果（detect_environment 的返回）：向导、首选项的 Node 版本行共用。
 // 与 wiz.detection 的区别：这个在向导关闭后仍保留，首选项里打开设置时不需要重新检测。
 let lastEnvDetection = null;
+// ---------- 安全模式状态（编排在 Rust 侧 safe.rs，前端只消费事件） ----------
+let safeMode = false;       // 安全实例是否激活（safe-mode-change 事件 / get_safe_status 驱动）
+let safeReport = null;      // 最近一次进入的 SafeReport（路径与凭据借用状态；绝不含凭据内容）
+let safeBusy = false;       // 进入/退出流程进行中（点击按钮到收到 safe-mode-change 为止）
 
 // 状态键 → 词典 key / 圆点颜色（文案经 t() 取，随语言切换）
 const STATUS_META = {
@@ -148,7 +152,7 @@ window.addEventListener('keydown', (e) => {
 
 // ---------- 模态框（打开时隐藏内嵌 DSH webview，避免其盖住弹窗） ----------
 
-const MODALS = ['settings-modal', 'log-modal', 'update-modal'];
+const MODALS = ['settings-modal', 'log-modal', 'update-modal', 'safe-modal', 'safe-verify-modal'];
 
 function anyModalOpen() {
   return MODALS.some((m) => !$(m).classList.contains('hidden'));
@@ -274,11 +278,27 @@ function isNodeVersionError(p) {
 function onStatus(p) {
   const prev = status;
   status = p.status;
+  // 防御性同步：状态事件说处于安全模式而本地标记未置（理论上不会发生，
+  // 事件丢失时兜底），从后端补一次完整的 SafeReport 再渲染
+  if (p.safe_mode && !safeMode && !safeBusy) {
+    invoke('get_safe_status')
+      .then((s) => { if (s && s.active) applySafeUI(true, s.report); })
+      .catch(() => {});
+  }
   statusMessage = p.message || null; // 供 renderWaitLine 显示开机自启延迟等提示（Rust 端已本地化）
   const map = STATUS_META[p.status] || { key: null, dot: 'gray' };
   $('status-dot').className = 'dot ' + map.dot;
   $('status-text').textContent = map.key ? t(map.key) : p.status;
   $('port-val').textContent = p.port;
+
+  // 内嵌 DSH 页面是「就绪后才创建」的原生 webview（盖在本页面之上）：
+  // 打开模态框那一刻调用的 set_dsh_webview_visible(false) 对还不存在的 webview 是空操作，
+  // 于是弹窗会被刚创建的页面盖住（安全模式引导横幅正好在就绪前后显示，最易撞上；
+  // 日常模式在启动中打开设置/日志时同理）。就绪时机补一次同步，并留一次延迟兜底。
+  if (p.status === 'running' || p.status === 'running-external') {
+    syncWebviewVisibility();
+    setTimeout(syncWebviewVisibility, 400);
+  }
 
   const line = $('stage-line');
   const hint = $('stage-hint');
@@ -360,12 +380,132 @@ function onStatus(p) {
 
 function refreshButtons() {
   const busy = updating || ['starting', 'stopping', 'updating'].includes(status);
+  // 安全模式（或进入/退出流程进行中）：日常控制全部禁用——状态机归安全实例所有
+  // （Rust 侧同样有门禁，这里只是让按钮如实反映）；保留「退出安全模式」、
+  // 「刷新页面」（此时指向 3081 的安全页面）、日志与首选项。
+  if (safeMode || safeBusy) {
+    $('btn-start').disabled = true;
+    $('btn-stop').disabled = true;
+    $('btn-restart').disabled = true;
+    $('btn-update').disabled = true;
+    $('btn-connect').disabled = true;
+    $('btn-refresh').disabled = busy;
+    $('btn-safe').disabled = busy || safeBusy;
+    $('btn-settings').disabled = updating;
+    return;
+  }
   $('btn-start').disabled = busy || ['running', 'running-external'].includes(status);
   $('btn-stop').disabled = updating || ['idle', 'error', 'port-busy', 'stopping'].includes(status);
   $('btn-restart').disabled = busy || !['running', 'running-external'].includes(status);
   $('btn-update').disabled = busy || !config || !config.npm_exists;
+  $('btn-safe').disabled = busy;
   $('btn-settings').disabled = updating;
   $('btn-connect').disabled = updating;
+}
+
+// ---------- 安全模式 UI（独立纯净家目录 + 端口 3081；流程编排在 Rust 侧 safe.rs） ----------
+
+/// 工具栏按钮文字：未进入时「安全模式」，进入后「退出安全模式」。
+/// 动态文案，刻意不挂 data-i18n（避免 applyDom 用词典覆盖），
+/// 语言切换与安全模式进出时都要重绘。
+function renderSafeButton() {
+  $('btn-safe').textContent = safeMode ? t('btn_exit_safe_mode') : t('btn_safe_mode');
+}
+
+/// 渲染引导横幅：产品要求明确告知的三件事（处于安全模式 / 日常家目录路径 /
+/// 凭据借用结果）+ 归档信息。credential_message 由 Rust 端按界面语言生成，
+/// 前端原样显示——凭据文件内容全程不经过 IPC。
+function fillSafeModal(report) {
+  $('safe-fact-running').innerHTML = t('safe_fact_running_html', report ? report.port : 3081);
+  $('safe-daily-home').textContent = (report && report.daily_home) || (config && config.dsh_home_dir) || '—';
+  $('safe-home').textContent = (report && report.safe_home) || '—';
+  const archLine = $('safe-archive-line');
+  if (report && report.archived_to) {
+    $('safe-archived-to').textContent = report.archived_to;
+    archLine.classList.remove('hidden');
+  } else {
+    archLine.classList.add('hidden');
+  }
+  const cred = $('safe-cred-line');
+  const borrowed = !!(report && report.credential === 'borrowed');
+  cred.className = 'safe-cred' + (borrowed ? ' ok' : '');
+  cred.textContent = (borrowed ? '✔ ' : '⚠ ') + ((report && report.credential_message) || '');
+}
+
+/// 进出安全模式：切换工具栏琥珀标记（body.safe-mode）、徽标、按钮文字与可用性策略。
+/// 窗口标题的「[安全模式]」前缀由 Rust 侧同步设置（apply_safe_window_title）。
+function applySafeUI(active, report) {
+  safeMode = active;
+  safeReport = active ? (report || safeReport) : null;
+  document.body.classList.toggle('safe-mode', active);
+  $('safe-badge').classList.toggle('hidden', !active);
+  renderSafeButton();
+  if (active) fillSafeModal(safeReport);
+  refreshButtons();
+}
+
+function onSafeModeChange(p) {
+  safeBusy = false;
+  if (p.active) {
+    applySafeUI(true, p.report);
+    toast(t('toast_safe_entered', p.report ? p.report.port : 3081));
+    // 进入成功：弹出引导横幅（safe-modal 在 MODALS 里，打开期间自动隐藏内嵌 webview）
+    showModal('safe-modal');
+  } else {
+    applySafeUI(false);
+    if (p.phase === 'exited') {
+      toast(t('toast_safe_exiting'));
+    } else if (p.phase === 'crashed') {
+      toast(t('toast_safe_crashed', p.message || ''), true);
+    } else if (p.phase === 'timeout') {
+      toast(p.message || '', true); // 详情同时显示在状态区（与日常启动超时同款处理）
+    } else if (p.message) {
+      toast(t('toast_safe_enter_fail', p.message), true);
+    }
+  }
+  refreshButtons();
+}
+
+/// 修复验证闭环：退出安全模式后 Rust 端监控日常实例就绪情况，超时/失败发 safe-verify
+function onSafeVerify(p) {
+  if (p.success) {
+    appendLog('launcher', t('log_safe_verify_ok'));
+    toast(t('toast_safe_verify_ok'));
+  } else {
+    $('safe-verify-msg').textContent = p.message || '';
+    showModal('safe-verify-modal');
+  }
+}
+
+async function enterSafeMode() {
+  if (safeBusy || safeMode) return;
+  safeBusy = true;
+  refreshButtons();
+  appendLog('launcher', t('log_safe_ui_enter'));
+  toast(t('toast_safe_entering'));
+  try {
+    await invoke('enter_safe_mode');
+    // 过程与结果由 dsh-status / dsh-log / safe-mode-change 事件驱动
+  } catch (e) {
+    safeBusy = false;
+    refreshButtons();
+    toast(String(e), true);
+  }
+}
+
+async function exitSafeMode() {
+  if (safeBusy || !safeMode) return;
+  hideModal('safe-modal');
+  safeBusy = true;
+  refreshButtons();
+  appendLog('launcher', t('log_safe_ui_exit'));
+  try {
+    await invoke('exit_safe_mode');
+  } catch (e) {
+    safeBusy = false;
+    refreshButtons();
+    toast(t('toast_safe_exit_fail', e), true);
+  }
 }
 // ---------- 事件监听 + 初始化 ----------
 
@@ -382,6 +522,9 @@ async function init() {
   });
   await listen('setup-status', (e) => onSetupStatus(e.payload));
   await listen('setup-result', (e) => onSetupResult(e.payload));
+  // 安全模式：进入/退出/闪退（safe-mode-change）与修复验证结果（safe-verify）
+  await listen('safe-mode-change', (e) => onSafeModeChange(e.payload));
+  await listen('safe-verify', (e) => onSafeVerify(e.payload));
 
   await refreshConfig();
   // 应用外观（浅色/深色/跟随系统；theme-boot.js 已按缓存预设过，这里以配置为准纠正）
@@ -389,9 +532,18 @@ async function init() {
   // 应用界面语言（中英文），随后渲染的静态文案全部走词典
   I18N.setLang(config && config.language);
   I18N.applyDom();
+  // 安全模式按钮是动态文案（不挂 data-i18n），需要单独渲染一次
+  renderSafeButton();
 
   const st = await invoke('get_status');
   onStatus(st);
+
+  // 恢复安全模式 UI（页面重建/从托盘恢复等场景）：激活则应用标记色与徽标，
+  // 引导横幅不重弹（只在真正进入的那一刻弹一次）
+  try {
+    const s = await invoke('get_safe_status');
+    if (s && s.active) applySafeUI(true, s.report);
+  } catch (_) { /* 查询失败按非安全模式处理 */ }
 
   bindUI();
 
@@ -512,6 +664,10 @@ function applyLanguage(lang) {
   // Node 版本相关文案里带版本号（下限 + 本机版本），语言切换后要按新词典重绘
   renderNodePrefRow();
   if (wiz.active) renderWiz();
+  // 安全模式按钮文字与引导横幅里的动态行（不受 data-i18n 管理）需要手动重绘
+  // （凭据借用说明是进入时由 Rust 生成的，语言切换后要到下次进入才更新）
+  renderSafeButton();
+  if (safeMode && !$('safe-modal').classList.contains('hidden')) fillSafeModal(safeReport);
 }
 
 // ---------- 设置 ----------
@@ -528,6 +684,10 @@ function openSettings() {
   $('set-appearance').value = ['light', 'dark', 'system'].includes(config.appearance) ? config.appearance : 'system';
   $('set-extra-args').value = config.extra_args;
   $('set-package-name').value = config.package_name;
+  // 安全模式：基线重置开关（缺省视为开）与修复验证等待秒数（缺省 60）
+  $('set-safe-reset').checked = config.safe_reset_baseline !== false;
+  const sv = Number(config.safe_verify_secs);
+  $('set-safe-verify').value = Number.isFinite(sv) ? sv : 60;
   $('set-config-path').textContent = config.config_path;
   // Node.js 版本状态行（含一键升级按钮与「保留该版本并继续」开关）：
   // 有缓存检测结果就直接渲染，没有就异步补一次检测
@@ -572,6 +732,12 @@ async function saveSettings() {
     health_timeout_secs: Number.isFinite(timeout) && timeout >= 0 ? timeout : 300,
     extra_args: $('set-extra-args').value.trim(),
     package_name: $('set-package-name').value.trim() || '@deepseek-ai/dsh',
+    // 安全模式：基线重置开关 + 修复验证等待（0 = 不验证；后端保存时还会收敛范围）
+    safe_reset_baseline: $('set-safe-reset').checked,
+    safe_verify_secs: (() => {
+      const v = parseInt($('set-safe-verify').value, 10);
+      return Number.isFinite(v) && v >= 0 ? v : 60;
+    })(),
     // 「Node 版本过低」的确认记忆不是设置页字段：原样带上内存里的值，
     // 后端在保存时也会再兜一层（缺字段时沿用磁盘上的值）
     node_min_ack: (config && config.node_min_ack) || '',
@@ -1170,6 +1336,19 @@ function bindUI() {
   $('btn-restart').onclick = () => invoke('restart_dsh').catch((e) => toast(String(e), true));
   $('btn-refresh').onclick = refreshPage;
   $('btn-update').onclick = confirmUpdate;
+  // 安全模式：未进入 = 进入（后端会先完整停掉日常实例）；已进入 = 退出并重启日常
+  $('btn-safe').onclick = () => { if (safeMode) exitSafeMode(); else enterSafeMode(); };
+  // 徽标点击重开引导横幅（内容为最近一次进入的报告）
+  $('safe-badge').onclick = () => {
+    if (!safeMode) return;
+    fillSafeModal(safeReport);
+    showModal('safe-modal');
+  };
+  $('btn-safe-ok').onclick = () => hideModal('safe-modal');
+  $('btn-safe-exit-modal').onclick = () => exitSafeMode();
+  $('btn-safe-verify-close').onclick = () => hideModal('safe-verify-modal');
+  // 修复验证失败 →「返回安全模式」：重新走完整进入流程（再次归档、重新借凭据）
+  $('btn-safe-verify-back').onclick = () => { hideModal('safe-verify-modal'); enterSafeMode(); };
   $('btn-log').onclick = () => showModal('log-modal');
   $('btn-settings').onclick = openSettings;
   $('btn-cancel-settings').onclick = () => hideModal('settings-modal');

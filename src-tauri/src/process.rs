@@ -17,8 +17,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub const TOOLBAR_H: f64 = 43.2;
 
 /// Windows Job Object：程序退出（含崩溃）时由内核结束整个 DSH 进程树，兜底防残留。
+/// （pub(crate)：安全模式的子进程同样要放进自己的 Job，见 safe.rs）
 #[cfg(windows)]
-mod win {
+pub(crate) mod win {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -144,7 +145,8 @@ impl AppState {
         *self.last_stderr.lock().unwrap() = Some(line.to_string());
     }
 
-    fn take_last_stderr(&self) -> Option<String> {
+    /// pub(crate)：安全模式启动前也要清掉上一轮的 stderr 记忆（与日常启动同款处理）
+    pub(crate) fn take_last_stderr(&self) -> Option<String> {
         self.last_stderr.lock().unwrap().take()
     }
 }
@@ -169,6 +171,8 @@ pub struct StatusEvent {
     pub pid: Option<u32>,
     pub port: u16,
     pub message: Option<String>,
+    /// 当前状态是否属于安全模式实例（true 时 pid/port 均指安全模式子进程与 3081 端口）
+    pub safe_mode: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -253,22 +257,25 @@ pub fn log_launcher(app: &AppHandle, line: &str) {
     emit_log(app, "launcher", line.to_string());
 }
 
-fn set_status(app: &AppHandle, status: &str, message: Option<String>) {
+pub(crate) fn set_status(app: &AppHandle, status: &str, message: Option<String>) {
     let state = app.state::<AppState>();
     *state.status.lock().unwrap() = status.to_string();
     let cfg = config::load(app);
     let pid = *state.pid.lock().unwrap();
+    // 安全模式激活时：状态事件里的 pid/port 换指安全实例（3081），并带 safe_mode 标记，
+    // 前端据此渲染安全模式的工具栏/徽标（见 main.js applySafeUI）
+    let (safe_mode, port, pid) = crate::safe::overlay_status(app, cfg.port, pid);
     let _ = app.emit(
         "dsh-status",
-        StatusEvent { status: status.to_string(), pid, port: cfg.port, message },
+        StatusEvent { status: status.to_string(), pid, port, message, safe_mode },
     );
 }
 
-fn current_status(app: &AppHandle) -> String {
+pub(crate) fn current_status(app: &AppHandle) -> String {
     app.state::<AppState>().status.lock().unwrap().clone()
 }
 
-fn port_in_use(port: u16) -> bool {
+pub(crate) fn port_in_use(port: u16) -> bool {
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
     TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
 }
@@ -327,8 +334,9 @@ fn http_ready(addr: &SocketAddr) -> bool {
     matches!(stream.read(&mut buf), Ok(n) if n > 0)
 }
 
-/// 结束整个进程树：taskkill /PID <pid> /T /F（绝不使用 /IM 误杀其他程序）
-fn run_taskkill(pid: u32) -> Result<String, String> {
+/// 结束整个进程树：taskkill /PID <pid> /T /F（绝不使用 /IM 误杀其他程序）。
+/// pub(crate)：安全模式子进程（safe.rs）的停止同样只走这一条路。
+pub(crate) fn run_taskkill(pid: u32) -> Result<String, String> {
     let mut cmd = Command::new("taskkill");
     cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
     apply_no_window(&mut cmd);
@@ -366,7 +374,11 @@ pub(crate) fn apply_no_window(_cmd: &mut Command) {}
 /// 同时落盘：所有行 → desktop.log；DSH 进程的 stdout/stderr 额外 → <DSH家目录>\logs\dsh.log
 /// `fetch_counter`：可选，每读到一行 npm 的 http fetch 记录就 +1，
 /// 供引导安装 DSH 时在界面上显示「已下载 N 个包文件」的进度。
-fn spawn_log_reader(
+///
+/// pub(crate)：安全模式子进程复用同一个读取器（同样的 GBK 解码、URL 解析、
+/// 日志镜像与事件转发）；只是传 dsh_file=None —— 不在 .dsh-safe 里写任何文件，
+/// 保持「除凭据外全空」的原厂基线（完整输出仍落 desktop.log）。
+pub(crate) fn spawn_log_reader(
     app: AppHandle,
     out: impl Read + Send + 'static,
     stream: &'static str,
@@ -724,8 +736,9 @@ fn remembered_url_for(app: &AppHandle, port: u16) -> Option<String> {
     Some(parsed.as_str().to_string())
 }
 
-/// 销毁内嵌的 DSH Webview（服务停止后露出状态区）
-fn destroy_dsh_webview(app: &AppHandle) {
+/// 销毁内嵌的 DSH Webview（服务停止后露出状态区）。
+/// pub(crate)：安全模式退出时同样用它收起页面（两种模式共用 label="dsh" 的内嵌 webview）。
+pub(crate) fn destroy_dsh_webview(app: &AppHandle) {
     if let Some(wv) = app.get_webview("dsh") {
         let _ = wv.close();
     }
@@ -758,20 +771,121 @@ pub fn refresh_dsh_page(app: AppHandle) -> Result<(), String> {
     }
 
     // 服务在运行但页面不存在（例如之前被销毁）：优先复用上次记录的完整地址
-    // （可能带会话令牌，next 频道裸地址会 401），否则按配置端口重新打开页面
+    // （可能带会话令牌，next 频道裸地址会 401），否则按当前端口重新打开页面。
+    // 安全模式下当前端口是 3081（安全实例），不是配置里的日常端口。
     let cfg = config::load(&app);
-    let remembered = remembered_url_for(&app, cfg.port);
+    let port = if crate::safe::is_active(&app) { crate::safe::SAFE_PORT } else { cfg.port };
+    let remembered = remembered_url_for(&app, port);
     if remembered.is_some() {
         emit_log(&app, "launcher", i18n::fmt("log_using_last_url", &[]));
     }
-    open_dsh_webview(&app, &remembered.unwrap_or_else(|| local_url(cfg.port)));
+    open_dsh_webview(&app, &remembered.unwrap_or_else(|| local_url(port)));
     emit_log(&app, "launcher", i18n::t("log_reopened_page").to_string());
     Ok(())
 }
 
 // ---------- 启动 / 停止核心 ----------
 
-fn start_internal(app: &AppHandle) -> Result<(), String> {
+// 前置检查（日常模式 start_internal 与安全模式 safe.rs 共用同一套判定与文案）。
+// 这三个函数**无状态副作用**（不 set_status）：安全模式进入流程要在日常实例可能
+// 仍在运行时先跑一遍预检，若在这里改状态会把还在跑的日常实例错误标记为 error。
+// 报错后由调用方决定是否 set_status("error")。
+
+/// Node.js 预检：
+/// - 缺 node → Err（DSH 是 Node 程序，缺 node 必然失败）
+/// - 版本低于 DSH 运行下限 → Err（用户明确选过「保留该版本并继续」时放行）
+/// - 版本判定不出来 → 不拦，只记一条日志（宁可让 DSH 自己报错，不误伤可用环境）
+pub(crate) fn precheck_node(app: &AppHandle, cfg: &Config) -> Result<(), String> {
+    let env = detect::detect_all(false);
+    let Some(node_path) = env.node.as_deref() else {
+        return Err(i18n::t("err_node_missing").to_string());
+    };
+    // Node 版本：DSH 的运行下限是 22.19.0（node:sqlite / 原生 type-stripping /
+    //     pi-ai 依赖的 engines 三者共同定出）。**已发布的 dsh 包不声明 engines**，
+    //     所以 npm 安装阶段不拦，低于下限只在运行时炸：实测 Node 21.7.3 起不来，
+    //     而旧版程序只会把 DSH 的最后一行 stderr 甩给用户。这里提前说清楚。
+    // 判定不出来（读不到/解析不了版本串）时不拦，只记一条日志——
+    //     宁可让 DSH 自己去报错，也不误伤一个版本串异常但实际可用的环境。
+    //
+    //     分两步写（先判定 needs_block、再报告）而不是把报告塞进 match 分支：
+    //     分支里若直接 `return`，v（String）已被移出、又要把 match 的值当返回值，
+    //     借用检查不过；而且 i18n::fmt 收的是 &[&dyn Display]，在闭包签名上纠缠
+    //     &String / &str / &&str 的层数很容易再踩坑。这里只移动一次 String。
+    let mut needs_block: Option<String> = None;
+    match detect::quick_version(node_path, 10) {
+        Some(v) if detect::node_version_at_least_min(&v) == Some(false) => {
+            // 用户已明确选择「保留该版本并继续」时放行。只对**当时那条下限**有效：
+            // 程序以后提高下限（NODE_MIN_VERSION 变了）会重新拦一次。
+            if cfg.node_min_ack.trim() != detect::NODE_MIN_VERSION {
+                needs_block = Some(v);
+            }
+        }
+        Some(v) => {
+            if detect::node_version_at_least_min(&v).is_none() {
+                emit_log(
+                    app,
+                    "launcher",
+                    i18n::fmt(
+                        "log_node_version_unknown",
+                        &[&v, &detect::NODE_MIN_VERSION_LABEL.to_string()],
+                    ),
+                );
+            }
+        }
+        None => {
+            emit_log(
+                app,
+                "launcher",
+                i18n::fmt(
+                    "log_node_version_unknown",
+                    &[&"node --version".to_string(), &detect::NODE_MIN_VERSION_LABEL.to_string()],
+                ),
+            );
+        }
+    }
+    if let Some(v) = needs_block {
+        let min_label = detect::NODE_MIN_VERSION_LABEL.to_string();
+        emit_log(
+            app,
+            "launcher",
+            i18n::fmt("log_node_too_old_block", &[&v, &min_label]),
+        );
+        return Err(i18n::fmt("err_node_too_old", &[&v, &min_label]));
+    }
+    Ok(())
+}
+
+/// 解析要执行的 DSH 可执行文件（日常 / 安全模式启动共用）。
+/// 完整的执行目标策略（绝对路径 / 非 UNC / 无 `..` / 存在 / 扩展名白名单 / 不在临时目录）。
+/// 只判 is_file() 是不够的：config.json 是明文且开机自启会静默执行它，
+/// 把 dsh_path 指到任何用户可写的 .exe/.cmd 就已经是「以本用户身份执行任意程序」。
+pub(crate) fn resolve_dsh_prog(cfg: &Config) -> Result<String, String> {
+    if cfg.dsh_path.trim().is_empty() || !Path::new(&cfg.dsh_path).is_file() {
+        return Err(if cfg.dsh_path.trim().is_empty() {
+            i18n::fmt("err_dsh_missing_auto", &[&cfg.package_name])
+        } else {
+            i18n::fmt("err_dsh_missing", &[&cfg.dsh_path, &cfg.package_name])
+        });
+    }
+    config::validate_program_file("dsh_path", &cfg.dsh_path)
+}
+
+/// 解析用于组装子进程 PATH 的 npm 路径（日常 / 安全模式启动共用）。
+/// npm 缺失只影响更新 / 版本查询，不阻止启动。但它的目录会被 child_path_for
+/// 拿去拼子进程 PATH（见 detect.rs）：一个被改坏的 npm_path 等于往 DSH 的 PATH
+/// 前面插入攻击者可控的目录，从而劫持 shim 里那个裸 `node`。
+/// 所以校验不通过时不是「照旧用」，而是让它彻底不参与 PATH 组装。
+pub(crate) fn resolve_npm_for_path(app: &AppHandle, cfg: &Config) -> String {
+    match config::validate_program_file("npm_path", &cfg.npm_path) {
+        Ok(p) => p,
+        Err(_) => {
+            emit_log(app, "launcher", i18n::t("log_npm_missing_hint").to_string());
+            String::new()
+        }
+    }
+}
+
+pub(crate) fn start_internal(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let st = current_status(app);
     if matches!(
@@ -779,6 +893,11 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         "starting" | "running" | "running-external" | "stopping" | "updating"
     ) {
         return Err(i18n::fmt("err_status_locked", &[&st]));
+    }
+    // 安全模式期间日常实例的启动统一由退出流程（safe.rs）接管，这里拒绝直接启动，
+    // 避免两条路径同时往状态机与 3080/3081 端口上写
+    if crate::safe::is_active(app) {
+        return Err(i18n::t("err_safe_active_op").to_string());
     }
 
     // 开机自启触发：先延迟 12 秒错开系统冷启动高峰（IO 拥堵、Node/网络未就绪极易超时）
@@ -813,103 +932,25 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
     let cfg = config::load(app);
 
     // ---- 前置检查：依赖缺失时立即给出明确错误，绝不无限等待（要求三.3 / 四.5） ----
+    // （判定逻辑在上方三个共用 helper 里，安全模式启动走同一套；这里补上状态上报）
 
-    // 1) Node.js：DSH 是 Node 程序，缺 node 必然失败
-    {
-        let env = detect::detect_all(false);
-        let Some(node_path) = env.node.as_deref() else {
-            let msg = i18n::t("err_node_missing").to_string();
-            set_status(app, "error", Some(msg.clone()));
-            return Err(msg);
-        };
-        // 1b) Node 版本：DSH 的运行下限是 22.19.0（node:sqlite / 原生 type-stripping /
-        //     pi-ai 依赖的 engines 三者共同定出）。**已发布的 dsh 包不声明 engines**，
-        //     所以 npm 安装阶段不拦，低于下限只在运行时炸：实测 Node 21.7.3 起不来，
-        //     而旧版程序只会把 DSH 的最后一行 stderr 甩给用户。这里提前说清楚。
-        // 判定不出来（读不到/解析不了版本串）时不拦，只记一条日志——
-        //     宁可让 DSH 自己去报错，也不误伤一个版本串异常但实际可用的环境。
-        //
-        //     分两步写（先判定 needs_block、再报告）而不是把报告塞进 match 分支：
-        //     分支里若直接 `return`，v（String）已被移出、又要把 match 的值当返回值，
-        //     借用检查不过；而且 i18n::fmt 收的是 &[&dyn Display]，在闭包签名上纠缠
-        //     &String / &str / &&str 的层数很容易再踩坑。这里只移动一次 String。
-        let mut needs_block: Option<String> = None;
-        match detect::quick_version(node_path, 10) {
-            Some(v) if detect::node_version_at_least_min(&v) == Some(false) => {
-                // 用户已明确选择「保留该版本并继续」时放行。只对**当时那条下限**有效：
-                // 程序以后提高下限（NODE_MIN_VERSION 变了）会重新拦一次。
-                if cfg.node_min_ack.trim() != detect::NODE_MIN_VERSION {
-                    needs_block = Some(v);
-                }
-            }
-            Some(v) => {
-                if detect::node_version_at_least_min(&v).is_none() {
-                    emit_log(
-                        app,
-                        "launcher",
-                        i18n::fmt(
-                            "log_node_version_unknown",
-                            &[&v, &detect::NODE_MIN_VERSION_LABEL.to_string()],
-                        ),
-                    );
-                }
-            }
-            None => {
-                emit_log(
-                    app,
-                    "launcher",
-                    i18n::fmt(
-                        "log_node_version_unknown",
-                        &[&"node --version".to_string(), &detect::NODE_MIN_VERSION_LABEL.to_string()],
-                    ),
-                );
-            }
-        }
-        if let Some(v) = needs_block {
-            let min_label = detect::NODE_MIN_VERSION_LABEL.to_string();
-            emit_log(
-                app,
-                "launcher",
-                i18n::fmt("log_node_too_old_block", &[&v, &min_label]),
-            );
-            let msg = i18n::fmt("err_node_too_old", &[&v, &min_label]);
-            set_status(app, "error", Some(msg.clone()));
-            return Err(msg);
-        }
-    }
-
-    // 2) DSH 可执行文件（自动检测失败时允许用户在设置中手动选择）
-    if cfg.dsh_path.trim().is_empty() || !Path::new(&cfg.dsh_path).is_file() {
-        let msg = if cfg.dsh_path.trim().is_empty() {
-            i18n::fmt("err_dsh_missing_auto", &[&cfg.package_name])
-        } else {
-            i18n::fmt("err_dsh_missing", &[&cfg.dsh_path, &cfg.package_name])
-        };
+    // 1) Node.js：DSH 是 Node 程序，缺 node 必然失败；版本低于下限同样拦截
+    if let Err(msg) = precheck_node(app, &cfg) {
         set_status(app, "error", Some(msg.clone()));
         return Err(msg);
     }
-    // 完整的执行目标策略（绝对路径 / 非 UNC / 无 `..` / 存在 / 扩展名白名单 / 不在临时目录）。
-    // 只判 is_file() 是不够的：config.json 是明文且开机自启会静默执行它，
-    // 把 dsh_path 指到任何用户可写的 .exe/.cmd 就已经是「以本用户身份执行任意程序」。
-    let dsh_prog = match config::validate_program_file("dsh_path", &cfg.dsh_path) {
+
+    // 2) DSH 可执行文件（自动检测失败时允许用户在设置中手动选择）
+    let dsh_prog = match resolve_dsh_prog(&cfg) {
         Ok(p) => p,
-        Err(e) => {
-            set_status(app, "error", Some(e.clone()));
-            return Err(e);
+        Err(msg) => {
+            set_status(app, "error", Some(msg.clone()));
+            return Err(msg);
         }
     };
 
-    // 3) npm 缺失只影响更新 / 版本查询，不阻止启动。但它的目录会被 child_path_for
-    //    拿去拼子进程 PATH（见 detect.rs）：一个被改坏的 npm_path 等于往 DSH 的 PATH
-    //    前面插入攻击者可控的目录，从而劫持 shim 里那个裸 `node`。
-    //    所以校验不通过时不是「照旧用」，而是让它彻底不参与 PATH 组装。
-    let npm_for_path = match config::validate_program_file("npm_path", &cfg.npm_path) {
-        Ok(p) => p,
-        Err(_) => {
-            emit_log(app, "launcher", i18n::t("log_npm_missing_hint").to_string());
-            String::new()
-        }
-    };
+    // 3) npm 缺失只影响更新 / 版本查询，不阻止启动（校验失败时不参与 PATH 组装）
+    let npm_for_path = resolve_npm_for_path(app, &cfg);
 
     // 4) 家目录：DSH_HOME、日志镜像目录都落在它里面，其上一级还是本进程的 cwd，
     //    所以同样在使用点校验并改用规范化后的值
@@ -1038,7 +1079,7 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
         Some(Duration::from_secs(timeout_secs.clamp(5, 3600)))
     };
     std::thread::spawn(move || {
-        wait_ready_and_embed(&app2, port, timeout);
+        wait_ready_and_embed(&app2, port, timeout, false);
     });
     Ok(())
 }
@@ -1046,7 +1087,11 @@ fn start_internal(app: &AppHandle) -> Result<(), String> {
 /// 等待 DSH 就绪：同时监控子进程存活 + 轮询 HTTP；就绪后才把 DSH 页面内嵌进主窗口。
 /// 若 DSH 输出中解析到实际监听地址（如 `dsh web: http://127.0.0.1:3080`），
 /// 则以实际地址为准轮询并加载。
-fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
+///
+/// `safe = true` 时监控的是安全模式子进程（SafeState 里的句柄，端口 3081）：
+/// 就绪判定、URL 解析（含 ?token= 会话令牌）、宽限期与内嵌页面和日常模式
+/// 完全是同一套逻辑，只有「进程句柄在哪」与「超时/闪退后走哪条停止路径」不同。
+pub(crate) fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>, safe: bool) {
     let state = app.state::<AppState>();
     let started = Instant::now();
     emit_log(
@@ -1072,8 +1117,31 @@ fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
         };
         let addr: SocketAddr = format!("127.0.0.1:{}", poll_port).parse().unwrap();
 
-        // 1) 监控子进程存活：DSH 若在端口就绪前闪退，立即终止等待并显示错误
-        {
+        // 1) 监控子进程存活：DSH 若在端口就绪前闪退，立即终止等待并显示错误。
+        //    日常 / 安全模式各自监控自己的 Child 句柄，错误处理与日志是同一条路径。
+        let mut exited: Option<std::process::ExitStatus> = None;
+        if safe {
+            let sstate = app.state::<crate::safe::SafeState>();
+            let mut guard = sstate.child.lock().unwrap();
+            if let Some(child) = guard.as_mut() {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        guard.take();
+                        drop(guard);
+                        *sstate.pid.lock().unwrap() = None;
+                        sstate.close_job();
+                        exited = Some(status);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        emit_log(app, "launcher", i18n::fmt("log_proc_check_fail", &[&e.to_string()]));
+                    }
+                }
+            } else {
+                // 进程句柄已被停止操作（退出安全模式）清空，无需继续轮询
+                return;
+            }
+        } else {
             let mut guard = state.child.lock().unwrap();
             if let Some(child) = guard.as_mut() {
                 match child.try_wait() {
@@ -1082,20 +1150,7 @@ fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
                         drop(guard);
                         *state.pid.lock().unwrap() = None;
                         state.close_jobs();
-                        let last_err = state.take_last_stderr();
-                        let code = format!("{:?}", status.code());
-                        emit_log(
-                            app,
-                            "launcher",
-                            i18n::fmt("log_exit_before_ready", &[&code]),
-                        );
-                        let mut msg = i18n::fmt("err_exit_before_ready", &[&code]);
-                        if let Some(e) = last_err {
-                            msg.push_str("：");
-                            msg.push_str(&e);
-                        }
-                        set_status(app, "error", Some(msg));
-                        return;
+                        exited = Some(status);
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -1106,6 +1161,26 @@ fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
                 // 进程句柄已被停止操作清空，无需继续轮询
                 return;
             }
+        }
+        if let Some(exit_status) = exited {
+            let last_err = state.take_last_stderr();
+            let code = format!("{:?}", exit_status.code());
+            emit_log(
+                app,
+                "launcher",
+                i18n::fmt("log_exit_before_ready", &[&code]),
+            );
+            let mut msg = i18n::fmt("err_exit_before_ready", &[&code]);
+            if let Some(e) = last_err {
+                msg.push_str("：");
+                msg.push_str(&e);
+            }
+            if safe {
+                // 安全实例没了：先解除安全模式标记（标题/工具栏恢复正常），再报错误
+                crate::safe::on_safe_child_died(app, Some(msg.clone()));
+            }
+            set_status(app, "error", Some(msg));
+            return;
         }
 
         // 2) HTTP 就绪检查
@@ -1120,7 +1195,16 @@ fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
                     if state.detected_url.lock().unwrap().is_some() {
                         break;
                     }
-                    let dead = {
+                    // 宽限期内进程退出也立即结束等待——按模式监控对应的 Child 句柄
+                    // （安全模式监控 SafeState 的句柄；监控错对象会把宽限期立即判死）
+                    let dead = if safe {
+                        let sstate = app.state::<crate::safe::SafeState>();
+                        let mut guard = sstate.child.lock().unwrap();
+                        match guard.as_mut() {
+                            Some(child) => matches!(child.try_wait(), Ok(Some(_))),
+                            None => true,
+                        }
+                    } else {
                         let mut guard = state.child.lock().unwrap();
                         match guard.as_mut() {
                             Some(child) => matches!(child.try_wait(), Ok(Some(_))),
@@ -1160,12 +1244,14 @@ fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
                     "launcher",
                     i18n::fmt("log_timeout_stop", &[&t.as_secs()]),
                 );
-                let _ = stop_internal(app);
-                set_status(
-                    app,
-                    "error",
-                    Some(i18n::fmt("err_timeout", &[&t.as_secs()])),
-                );
+                let msg = i18n::fmt("err_timeout", &[&t.as_secs()]);
+                if safe {
+                    let _ = crate::safe::stop_safe_internal(app);
+                    crate::safe::emit_safe_change(app, false, "timeout", None, Some(msg.clone()));
+                } else {
+                    let _ = stop_internal(app);
+                }
+                set_status(app, "error", Some(msg));
                 return;
             }
         }
@@ -1174,8 +1260,9 @@ fn wait_ready_and_embed(app: &AppHandle, port: u16, timeout: Option<Duration>) {
     }
 }
 
-/// 停止本次启动的 DSH 进程树（幂等；对"外部进程"模式只重置状态，绝不碰别人的进程）
-fn stop_internal(app: &AppHandle) -> Result<(), String> {
+/// 停止本次启动的 DSH 进程树（幂等；对"外部进程"模式只重置状态，绝不碰别人的进程）。
+/// pub(crate)：安全模式进入流程也用它先把日常实例完整停掉（taskkill /T 会带走 node 子进程）。
+pub(crate) fn stop_internal(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let pid = state.pid.lock().unwrap().take();
     let child = state.child.lock().unwrap().take();
@@ -1274,6 +1361,12 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     config.npm_path = config::validate_program_shape("npm_path", &config.npm_path)?;
     // 外观只认 light / dark / system（非法值归一为 system，与前端下拉框互为防线）
     config.appearance = config::normalize_appearance(&config.appearance).to_string();
+    // 安全模式修复验证等待：0 = 关闭验证提示；其余收敛到 5~3600 秒（与就绪超时同一刻度）
+    config.safe_verify_secs = if config.safe_verify_secs == 0 {
+        0
+    } else {
+        config.safe_verify_secs.clamp(5, 3600)
+    };
     let old_cfg = config::load(&app);
     let old_lang = old_cfg.language;
     let old_appearance = old_cfg.appearance;
@@ -1289,6 +1382,8 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     // DSH 自身界面语言通过 settings.yaml 联动，需 DSH 重启后变化。
     i18n::set_lang(&config.language);
     crate::refresh_tray_texts(&app);
+    // 安全模式激活时窗口标题带本地化前缀（[安全模式] / [Safe Mode]），语言切换后同步刷新
+    crate::safe::refresh_title_if_active(&app);
     // 同步 DSH 家目录 settings.yaml → locale.preference
     match config::sync_dsh_locale(&config.dsh_home_dir, &config.language) {
         Ok(()) => emit_log(
@@ -1349,11 +1444,14 @@ pub fn get_status(app: AppHandle) -> StatusEvent {
     let cfg = config::load(&app);
     let status = state.status.lock().unwrap().clone();
     let pid = *state.pid.lock().unwrap();
+    // 与 set_status 同一套覆盖：安全模式激活时 pid/port 指安全实例
+    let (safe_mode, port, pid) = crate::safe::overlay_status(&app, cfg.port, pid);
     StatusEvent {
         status,
         pid,
-        port: cfg.port,
+        port,
         message: None,
+        safe_mode,
     }
 }
 
@@ -1364,6 +1462,10 @@ pub async fn start_dsh(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn stop_dsh(app: AppHandle) -> Result<(), String> {
+    // 安全模式期间「停止」只应通过「退出安全模式」触发（停止安全实例并重启日常）
+    if crate::safe::is_active(&app) {
+        return Err(i18n::t("err_safe_active_op").to_string());
+    }
     let st = current_status(&app);
     if st == "running-external" {
         // 外部进程不由本程序管理，只解除连接状态并收起页面
@@ -1377,6 +1479,9 @@ pub async fn stop_dsh(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn restart_dsh(app: AppHandle) -> Result<(), String> {
+    if crate::safe::is_active(&app) {
+        return Err(i18n::t("err_safe_active_op").to_string());
+    }
     let st = current_status(&app);
     if st != "running" && st != "running-external" {
         return Err(i18n::t("err_restart_not_running").to_string());
@@ -1394,6 +1499,9 @@ pub async fn restart_dsh(app: AppHandle) -> Result<(), String> {
 /// 端口被占用时：连接到现有服务（不接管、不停止该进程）
 #[tauri::command]
 pub async fn connect_existing(app: AppHandle) -> Result<(), String> {
+    if crate::safe::is_active(&app) {
+        return Err(i18n::t("err_safe_active_op").to_string());
+    }
     let cfg = config::load(&app);
     if !port_in_use(cfg.port) {
         return Err(i18n::fmt("err_connect_no_listener", &[&cfg.port]));
@@ -1609,6 +1717,11 @@ pub async fn detect_npm_package(app: AppHandle) -> Result<String, String> {
 /// 两个方向都允许（升级或退回稳定版），因此不做任何版本高低判断。
 #[tauri::command]
 pub async fn update_dsh(app: AppHandle, tag: String) -> Result<(), String> {
+    // 更新流程内部会走「停止日常实例 → npm → 重启日常」的完整状态机；
+    // 安全模式期间状态机归安全实例所有，必须先退出安全模式再更新
+    if crate::safe::is_active(&app) {
+        return Err(i18n::t("err_safe_active_op").to_string());
+    }
     let tag = tag.trim().to_ascii_lowercase();
     if tag != "latest" && tag != "next" {
         return Err(i18n::t("err_update_bad_tag").to_string());
@@ -1859,9 +1972,13 @@ pub fn pick_folder(app: AppHandle, kind: String) {
     });
 }
 
-/// 退出 / 关窗时的兜底清理（幂等，可安全重复调用）
+/// 退出 / 关窗时的兜底清理（幂等，可安全重复调用）。
+/// 日常与安全模式两个子进程都要清：无论走哪条退出路径（正常退出、点 X 退出、
+/// 窗口销毁），都不能留下孤儿 dsh 进程占用 3080/3081 端口。
+/// 强杀桌面进程的场景由 Job Object（KILL_ON_JOB_CLOSE）在内核层兜底。
 pub fn cleanup_sync(app: &AppHandle) {
     let _ = stop_internal(app);
+    crate::safe::cleanup_safe_sync(app);
 }
 
 // ---------- 开机自启 ----------

@@ -61,6 +61,28 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// 紧凑 UTC 时间戳（YYYYMMDD-HHMMSS）。
+/// 安全模式基线重置的归档目录名用：Windows 上 safe.rs 会用 GetLocalTime 取本地时间，
+/// 这个函数是非 Windows 平台的回退（不引入任何时间库依赖，复用上面的 civil 算法）。
+pub fn utc_compact_timestamp() -> String {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        y,
+        m,
+        d,
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
 /// 追加一行到日志文件（自动建目录、超限滚动、失败忽略）
 pub fn append_line(path: &Path, line: &str) {
     let _guard = LOG_LOCK.lock().unwrap();

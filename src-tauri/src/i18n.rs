@@ -66,6 +66,7 @@ pub fn t(key: &str) -> &'static str {
         // ---------- 内嵌页面 / 刷新 ----------
         "log_no_main_window" => if en { "[launcher] Main window not found; cannot embed the DSH page." } else { "[launcher] 找不到主窗口，无法内嵌 DSH 页面。" },
         "log_embed_fail" => if en { "[launcher] Failed to embed the DSH page: {0}" } else { "[launcher] 内嵌 DSH 页面失败: {0}" },
+        "log_load_fail" => if en { "[launcher] Failed to navigate the embedded DSH page: {0}" } else { "[launcher] 内嵌 DSH 页面跳转失败: {0}" },
         "log_invalid_url" => if en { "[launcher] Invalid load URL: {0}" } else { "[launcher] 非法的加载地址: {0}" },
         "err_not_running_refresh" => if en { "DSH service is not running." } else { "DSH 服务未在运行。" },
         "log_refreshed_page" => if en { "[launcher] Refreshed the DSH page (service not restarted)." } else { "[launcher] 已刷新 DSH 页面（DSH 服务未重启）。" },

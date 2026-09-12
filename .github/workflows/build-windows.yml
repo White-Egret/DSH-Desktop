@@ -11,6 +11,12 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    # 构建来源证明（attestation）所需：id-token 用 OIDC 向 Sigstore 换签名证书，
+    # attestations 用于写入证明。contents 只读即可——本 workflow 不创建 Release。
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout 代码
         uses: actions/checkout@v4
@@ -36,6 +42,12 @@ jobs:
       - name: 安装前端依赖（@tauri-apps/cli）
         run: npm ci
 
+      # 纯函数单元测试（detect.rs 版本比较 / process.rs 的 URL 解析回归，含 HIGH-1 注入用例）。
+      # 开发机没有 Rust 工具链，这里是这些测试**唯一**真实执行的地方；失败即中止，不产出安装包。
+      - name: Rust 单元测试
+        run: cargo test --lib
+        working-directory: src-tauri
+
       - name: 执行 Tauri 构建（NSIS + MSI）
         run: npm run tauri build
 
@@ -59,3 +71,49 @@ jobs:
           name: DSH-Desktop-windows-portable-exe
           path: src-tauri/target/release/*.exe
           if-no-files-found: warn
+
+      # ---------- 发布产物可验证性（安全审查 L-2） ----------
+      # 哈希必须由**构建方**给出，不能由分发渠道给出：镜像站上的文件是这里产物的原样转存，
+      # 所以这份清单对镜像下载者同样有效；反过来，向镜像站索要哈希等于让可能被篡改的一方
+      # 自己证明自己没被篡改（文件与哈希会被一起替换）。校验的正确姿势是：
+      # 文件从任意渠道下载，哈希到本仓库的 Release / 构建 artifact 里比对。
+      - name: 生成 SHA-256 校验清单
+        shell: pwsh
+        run: |
+          $paths = @(
+            'src-tauri/target/release/bundle/nsis/*.exe',
+            'src-tauri/target/release/bundle/msi/*.msi',
+            'src-tauri/target/release/*.exe'
+          )
+          $files = @()
+          foreach ($p in $paths) {
+            $files += @(Get-ChildItem -Path $p -File -ErrorAction SilentlyContinue)
+          }
+          if (-not $files) { throw '没有找到任何构建产物，无法生成校验清单' }
+
+          # sha256sum 的通用格式："<小写哈希>␣␣<文件名>"（两空格：文本模式标记）
+          $lines = $files | Sort-Object Name | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
+          }
+          $lines | Set-Content -Path SHA256SUMS.txt -Encoding ascii
+          Write-Host '==== SHA256SUMS.txt ===='
+          $lines | ForEach-Object { Write-Host $_ }
+
+      - name: 上传 SHA-256 校验清单
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSH-Desktop-windows-sha256
+          path: SHA256SUMS.txt
+          if-no-files-found: error
+
+      # 构建来源证明（GitHub Artifact Attestations，Sigstore 签名，公开仓库免费）。
+      # 它比一份哈希更强：不仅证明"文件是这些字节"，还证明"这些字节确实由本仓库的
+      # build-windows.yml、从某个具体 commit 构建出来"——用户用 gh 一条命令即可核验，
+      # 不需要事先信任我们贴出来的任何字符串。
+      - name: 生成构建来源证明（attestation）
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/*.exe

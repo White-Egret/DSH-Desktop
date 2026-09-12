@@ -289,15 +289,26 @@ fn local_url(port: u16) -> String {
 ///   `dsh web: http://127.0.0.1:3080`、`Local: http://localhost:3000/`
 /// 返回 (规范化URL, 端口)。只接受 127.0.0.1 / localhost。
 /// next 频道（0.1.2+）打印的地址带 `?token=<base64url>`（浏览器会话认证），
-/// 必须整串保留，否则加载裸地址会收到 401。base64url 不含空白/引号，
-/// 现有截断逻辑天然安全。
+/// 必须整串保留，否则加载裸地址会收到 401。base64url 不含空白/引号，截断逻辑不会切到它。
+///
+/// 截断字符集（HIGH-1 纵深防御）：空白、`"`、`'`、`\`、反引号、`<`、`>` 与控制字符。
+/// 这一行来自 DSH 的 stdout/stderr，也就是**不可信数据**（模型回复、工具结果都会进去），
+/// 而解析出的地址会被交给内嵌 webview 加载。原来的集合只有空白与引号，
+/// 于是 URL 里可以保留 `\`、`)`、`;` 等字符——H-1 就是靠尾部一个 `\` 转义掉
+/// `window.location.replace('…')` 的闭合引号实现 JS 注入的。现在导航已改走
+/// `Webview::navigate()`（不再拼 JS），这里是第二道闸：把 URL 里根本不该出现的字符切掉。
+/// 注意 `\` 必须在这里截断，不能让它在 URL 里存活。
 fn extract_local_url(line: &str) -> Option<(String, u16)> {
     const NEEDLE: &str = "http://";
     let mut rest = line;
     while let Some(i) = rest.find(NEEDLE) {
         let s = &rest[i..];
         let end = s
-            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+            .find(|c: char| {
+                c.is_whitespace()
+                    || c.is_control()
+                    || matches!(c, '"' | '\'' | '\\' | '`' | '<' | '>')
+            })
             .unwrap_or(s.len());
         let url = &s[..end];
         let host = url.trim_start_matches("http://");
@@ -662,18 +673,35 @@ fn main_content_size(app: &AppHandle) -> (f64, f64) {
 /// 冻结在这里只有副作用没有防护价值，故全局关闭。请勿重新打开；若未来 Tauri 提供
 /// 按 webview 豁免该脚本的 API，可再评估只对 `dsh` 关闭。
 fn open_dsh_webview(app: &AppHandle, url: &str) {
+    // 先解析并校验一次，后面三处（记 last_url / 刷新已有 webview / 新建 webview）共用它。
+    // 解析失败或不是 http 时什么都不做：宁可不加载，也不把未校验的字符串交给任何 webview。
+    let Ok(parsed) = url.parse::<tauri::Url>() else {
+        emit_log(app, "launcher", i18n::fmt("log_invalid_url", &[&url.to_string()]));
+        return;
+    };
+    if parsed.scheme() != "http" {
+        emit_log(app, "launcher", i18n::fmt("log_invalid_url", &[&url.to_string()]));
+        return;
+    }
     // 记录最近一次交给 WebView 的地址（next 频道带 ?token=... 会话令牌），
     // 供没有进程输出的场景（连接现有服务 / 页面重开）复用；只写 last_url 一个键。
-    if let Ok(parsed) = url.parse::<tauri::Url>() {
-        if parsed.scheme() == "http" {
-            config::set_last_url(app, parsed.as_str());
-        }
-    }
-    // 已存在：直接刷新到当前 URL（端口可能已变更）
+    config::set_last_url(app, parsed.as_str());
+
+    // 已存在：直接导航到当前 URL（端口可能已变更）。
+    // 安全（HIGH-1 修复）：这里原来用 `wv.eval(&format!("window.location.replace('{}')", url))`，
+    // 而 url 来自 DSH 子进程输出（模型回复、工具结果都可能进入 stdout/stderr，属于不可信数据）。
+    // 单引号 JS 字符串里，URL 尾部的一个 `\` 就能转义掉闭合引号，后面的 `);` 再闭合 replace()
+    // 并追加任意 JS —— 注进的是内嵌 DSH 页面自己的 origin（带着它的会话 cookie），
+    // 于是可以读改 DSH 会话、以用户身份调用它的 Web API。capability 隔离挡不住这种 Web 层攻击。
+    // 现在改走 Tauri 自带的 navigate()：URL 只作为 URL 交给 webview，**不经过任何 JS 拼接**，
+    // 该注入面从根上消失。请勿再改回 eval 形式。
     if let Some(wv) = app.get_webview("dsh") {
         sync_dsh_webview_size(app);
         let _ = wv.show();
-        let _ = wv.eval(&format!("window.location.replace('{}')", url));
+        // navigate() 按值收 Url，而下面新建 webview 的分支还要用 parsed，故 clone 一份
+        if let Err(e) = wv.navigate(parsed.clone()) {
+            emit_log(app, "launcher", i18n::fmt("log_load_fail", &[&e.to_string()]));
+        }
         return;
     }
 
@@ -683,10 +711,6 @@ fn open_dsh_webview(app: &AppHandle, url: &str) {
         return;
     };
     let (w, h) = main_content_size(app);
-    let Ok(parsed) = url.parse::<tauri::Url>() else {
-        emit_log(app, "launcher", i18n::fmt("log_invalid_url", &[&url.to_string()]));
-        return;
-    };
     let result = win.add_child(
         tauri::WebviewBuilder::new(
             "dsh",
@@ -2954,4 +2978,108 @@ pub fn remember_node_min_version_notice(
     };
     log_launcher(&app, &line);
     Ok(get_config(app))
+}
+
+// ---------- 单元测试 ----------
+//
+// 这里守的是 HIGH-1（JS 注入）的**第二道闸**：extract_local_url 的输入是 DSH 的
+// stdout/stderr，属于不可信数据（模型回复、工具执行结果都会进这两个流），
+// 而它解析出的地址会被交给内嵌 webview 加载。
+// 第一道闸是 open_dsh_webview 里的 Webview::navigate()（URL 不再拼进 JS 字符串），
+// 无法用纯函数测试覆盖；这个函数能，所以把这些行钉在这里防回归。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_plain_url() {
+        assert_eq!(
+            extract_local_url("dsh web: http://127.0.0.1:3080"),
+            Some(("http://127.0.0.1:3080".to_string(), 3080))
+        );
+        assert_eq!(
+            extract_local_url("[dsh] Local: http://localhost:3000/"),
+            Some(("http://localhost:3000/".to_string(), 3000))
+        );
+    }
+
+    #[test]
+    fn keeps_token_query() {
+        // next 频道会打印带会话令牌的地址，必须整串保留（丢掉查询串会 401）
+        assert_eq!(
+            extract_local_url("http://127.0.0.1:3080/?token=abc-DEF_123"),
+            Some(("http://127.0.0.1:3080/?token=abc-DEF_123".to_string(), 3080))
+        );
+        assert_eq!(
+            extract_local_url("http://127.0.0.1:3080/#/chat"),
+            Some(("http://127.0.0.1:3080/#/chat".to_string(), 3080))
+        );
+    }
+
+    /// HIGH-1 回归：报告里的构造是 URL 尾部一个 `\` 转义掉
+    /// `window.location.replace('…')` 的闭合引号，后面 `);` 再追加任意 JS。
+    /// 现在 `\` 必须在截断集里，URL 里不许有它存活。
+    #[test]
+    fn truncates_at_backslash_injection() {
+        let got = extract_local_url(r"dsh web: http://127.0.0.1:3080/\);eval(1)//");
+        assert_eq!(got, Some(("http://127.0.0.1:3080/".to_string(), 3080)));
+        let (url, _) = got.unwrap();
+        assert!(!url.contains('\\'), "URL 里不允许残留反斜杠");
+        assert!(!url.contains(')') && !url.contains(';'), "注入语句的字符不应进入 URL");
+    }
+
+    #[test]
+    fn truncates_at_quotes_backticks_and_angles() {
+        for line in [
+            "http://127.0.0.1:3080/'x",
+            "http://127.0.0.1:3080/\"x",
+            "http://127.0.0.1:3080/`x",
+            "http://127.0.0.1:3080/<x",
+            "http://127.0.0.1:3080/>x",
+        ] {
+            assert_eq!(
+                extract_local_url(line),
+                Some(("http://127.0.0.1:3080/".to_string(), 3080)),
+                "应在特殊字符处截断：{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn truncates_at_whitespace_and_control_characters() {
+        // 控制字符（含 CR/LF、NUL、ESC）同样不能进 URL：既防注入也防日志/URL 解析被搅乱。
+        // 这两个判据分属谓词的两半：CR/LF/TAB 由 is_whitespace 命中，NUL/ESC 由 is_control 命中。
+        for c in ['\r', '\n', '\t', '\u{0}', '\u{1b}'] {
+            let line = format!("http://127.0.0.1:3080/{c}rest");
+            assert_eq!(
+                extract_local_url(&line),
+                Some(("http://127.0.0.1:3080/".to_string(), 3080)),
+                "应在控制字符处截断：{:?}",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn skips_noise_before_the_real_url() {
+        assert_eq!(
+            extract_local_url("port 3080 ready, see http://example.com:8080 then http://127.0.0.1:3080"),
+            Some(("http://127.0.0.1:3080".to_string(), 3080))
+        );
+        assert_eq!(
+            extract_local_url("localhost is not a url; http://LOCALHOST:8081/"),
+            Some(("http://LOCALHOST:8081/".to_string(), 8081))
+        );
+    }
+
+    #[test]
+    fn rejects_non_local_and_portless_lines() {
+        // 只认 127.0.0.1 / localhost，且必须带有效端口（0 不算）
+        assert_eq!(extract_local_url("http://192.168.1.10:3080"), None);
+        assert_eq!(extract_local_url("http://127.0.0.1.evil.example:3080"), None);
+        assert_eq!(extract_local_url("http://127.0.0.1:0"), None);
+        assert_eq!(extract_local_url("http://127.0.0.1"), None);
+        assert_eq!(extract_local_url("http://127.0.0.1:99999"), None);
+        assert_eq!(extract_local_url("no url on this line at all"), None);
+    }
 }

@@ -99,6 +99,23 @@ DSH 的运行下限是 **Node.js 22.19.0**：SQLite 会话存储用的 `node:sql
 
 用 NSIS 安装包安装或直接运行便携 exe。首次启动会出现一次环境检查向导；一旦 `%APPDATA%\com.dsh.desktop\config.json` 存在即不再出现。
 
+**下载后请校验。** 每次构建都会产出 `SHA256SUMS.txt` —— 维护者若把它放到 Release 里就随 Release 一起，但无论是否如此，它一定在该次构建的 artifact `DSH-Desktop-windows-sha256` 中 —— **以及**针对该次运行全部产物记录的一份签名「构建来源证明」。两者都出自**构建流程本身**，而不是把文件交给你的人；这正是关键：文件可以从任何渠道拿到，但校验要拿文件所在主机**控制不了**的源来比对。
+
+```powershell
+# 1) 哈希校验：与该文件在 SHA256SUMS.txt 中对应的一行比对（不区分大小写）
+Get-FileHash .\DSH-Desktop-windows-nsis.zip -Algorithm SHA256
+
+# 2) 更强的一道：证明这个二进制确实出自本仓库的 build-windows.yml
+#    （需 GitHub CLI；对解压出来的 .exe 执行）
+gh attestation verify ".\DSH Desktop_<版本号>_x64-setup.exe" --repo White-Egret/DSH-Desktop   # 去掉尖括号
+```
+
+第 2 项是由 Sigstore 签名的声明，把文件的哈希与本仓库、本 workflow 文件、以及构建它的那个具体 commit 绑在一起，因此**不需要事先信任任何我们贴出来的字符串**。它作用于安装包/便携 exe 本身（`gh` 校验的是文件而不是压缩包，先解压），并且存放在那次 workflow 运行里、而不是 Release 页面上。
+
+上面两道校验对从镜像下载的文件同样有效，而这正是那个镜像可以继续放心用的原因：它存的是同一批构建产物的**逐字节相同**的副本。`gh` 是按文件的摘要去查证 attestation 的，因此不关心你从哪里拿到文件 —— 反过来，向镜像索取它**自己**的校验值则毫无意义：被换掉的文件和被换掉的校验值会一起送过来。
+
+> 这些产物**没有代码签名**，所以首次运行时 Windows SmartScreen 会提示"未知发布者"（部分受管企业电脑甚至会直接拒绝运行未签名的可执行文件）。为什么这不是"买张证书"就能解决：代码签名证明的是**谁发布的**这个文件，而哈希证明不了这一点；EV 证书自 2024 年起**不再**免检直达，也就是说所有方案（包括付费的）都要从零信誉开始、靠一次次发布累积；而最便宜的托管签名服务（Azure Artifact Signing，约 $9.99/月）对个人开发者只开放美国与加拿大。对这类项目而言免费的路子是 [SignPath Foundation](https://signpath.io)（为符合条件的开源项目提供代码签名），目前正在评估。在那之前，上面这两道校验才是你确认"文件就是本仓库构建出来的那一个"的依据。
+
 **默认安装到哪里。** NSIS 安装包的默认目录是 **`C:\Users\<用户名>\DSH Desktop`**（当前用户安装，不需要管理员权限），安装时的「选择安装位置」页仍可改成任意目录。**升级安装沿用原路径**：安装程序会从注册表读取上次的安装位置并继续用它，因此不会在新默认目录下多出一份。MSI 是另一套「整机安装」包，默认目录仍是 `C:\Program Files\DSH Desktop`。
 
 > 这个默认值来自一份「随仓库保存」的 Tauri NSIS 模板（`src-tauri/nsis/installer.nsi`，通过 `bundle.windows.nsis.template` 接入）：Tauri 没有「默认安装目录」配置项（[tauri-apps/tauri#11015](https://github.com/tauri-apps/tauri/issues/11015)），而 NSIS 是在 `.onInit` 里定死这个值的，安装钩子（installer_hooks）执行得太晚、改不到默认值。该文件是**脚本生成、不要手改**：`node scripts/gen-nsis-template.mjs` 会按 `package-lock.json` 里**锁定的** `@tauri-apps/cli` 版本取对应官方模板，只打这一个补丁；升级 CLI 后重跑一次，模板就不会与 bundler 悄悄脱节。
@@ -180,7 +197,11 @@ DSH 网页界面属于不可信内容（它渲染模型输出），却以第二�
 - **capability 用 `webviews` 绑定，而不是 `windows`。** Tauri v2 中，`windows` 一旦命中窗口标签，就会对该窗口内的**每一个 webview** 生效 —— 所以写 `windows: ["main"]` 等于把 `core:*` 同时发给内嵌的 DSH 页面。因此 `capabilities/default.json` 只列 `"webviews": ["main"]`（启动器自身的 webview），并刻意不写 `windows`，这也是官方对多 webview 窗口的建议。
 - **它的 origin 属于 remote。** 内嵌页面加载的是 `http://127.0.0.1:<port>`，Tauri 将其判定为远程来源，而远程来源默认无法触达 `invoke_handler` 里的自定义命令，除非某个 capability 在 `remote.urls` 中显式放行。**永远不要给 `dsh` 这个 webview 加这种放行** —— 隔离成立靠的就是这一条加上面的作用域绑定。
 
-启动器自身页面运行在严格 CSP 下（`script-src 'self'`，不允许 `unsafe-inline`/`unsafe-eval`，`object-src 'none'`、`base-uri 'none'`、`form-action 'none'`、`frame-src 'none'`（不可信内容无法被拉进特权文档）），资源协议（asset protocol）关闭，并开启 `freezePrototype`（阻止通过原型链污染攻击被注入的 IPC 桥）。所有不可信字符串 —— DSH 输出、错误信息、检测到的路径 —— 一律用 `textContent` 渲染，绝不拼成 HTML。此外 Tauri 会在编译期为自身资源注入 nonce/hash，所以 `script-src 'self'` 无需放宽即可正常工作。
+启动器自身页面运行在严格 CSP 下（`script-src 'self'`，不允许 `unsafe-inline`/`unsafe-eval`，`object-src 'none'`、`base-uri 'none'`、`form-action 'none'`、`frame-src 'none'`（不可信内容无法被拉进特权文档）），资源协议（asset protocol）关闭。所有不可信字符串 —— DSH 输出、错误信息、检测到的路径 —— 一律用 `textContent` 渲染，绝不拼成 HTML。此外 Tauri 会在编译期为自身资源注入 nonce/hash，所以 `script-src 'self'` 无需放宽即可正常工作。
+
+- **`freezePrototype` 是 `false`，这是有意为之、不是漏配。** 上游的 `freezePrototype` 加固会给**每一个** webview（包括内嵌的 DSH 页面）注入一段冻结 `Object.prototype` 的脚本，而 DSH 前端在它之下会坏掉：Monaco 主题服务会以 strict mode 给一个继承属性赋值（`target.constructor = …`），原型被冻结后抛 `TypeError: Cannot assign to read only property 'constructor'`，把会话渲染槽整体打崩 —— 表现为回复闪一下然后消失，而同一个页面在普通浏览器里完全正常。该加固的本义是防原型污染攻击被注入的 IPC 桥，但 `dsh` 这个 webview 没有任何 capability，本页面又是全本地静态页、从不把不可信文本变成 HTML，所以冻结在这里只有副作用、没有防护价值，故全局关闭。**请勿重新打开**；若未来 Tauri 提供按 webview 豁免该脚本的 API，可再评估只对 `dsh` 关闭。
+
+> 桌面外壳的 CSP 与原型冻结，**保护不了 DSH 自己的 Web 应用**。任何渲染不可信模型输出的页面，在它自己的 origin 里就是注入目标 —— 对应的防线（每个插值都转义、绝不把数据拼成代码、让会话令牌不可被读取）必须落在 DSH 的 Web 应用里。
 
 > Tauri 是以「往构建后的 HTML 里注入 `<meta http-equiv="Content-Security-Policy">` 标签」的方式下发这份策略的（见 `tauri-utils/src/html.rs` 的 `create_csp_meta_tag`），而不是 HTTP 响应头。按 CSP 规范，`<meta>` 里的 `frame-ancestors`、`sandbox`、`report-uri` 会被浏览器忽略，所以上面刻意没有列它们 —— 列出的每一条都是真正生效的。若将来确实需要防内嵌，得改用 `app.security.headers` 以 HTTP 头下发。
 

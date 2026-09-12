@@ -64,6 +64,13 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// 紧凑 UTC 时间戳（YYYYMMDD-HHMMSS）。
 /// 安全模式基线重置的归档目录名用：Windows 上 safe.rs 会用 GetLocalTime 取本地时间，
 /// 这个函数是非 Windows 平台的回退（不引入任何时间库依赖，复用上面的 civil 算法）。
+///
+/// Windows 构建里没有调用点（被 GetLocalTime 的本地时间路径取代），所以这里会报
+/// "never used"；加 allow 是为了让构建日志干净，同时**保住这条跨平台回退路径**——
+/// safe.rs 里 `#[cfg(not(windows))]` 的 `local_timestamp_compact()` 正是调用它
+/// （`civil_from_days` 另有一个使用者 `utc_now_string`，所以删掉不会孤立那个算法，
+/// 丢掉的只是「非 Windows 也拿得到本地时间戳」这条分支）。
+#[allow(dead_code)]
 pub fn utc_compact_timestamp() -> String {
     let dur = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

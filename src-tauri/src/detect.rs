@@ -580,6 +580,11 @@ impl EnvDetection {
     /// Node 版本够不够：Some(false) 明确低于下限，None 表示没法判定。
     /// 目前前端是直接读 `node_min_state` 字段判定的（同一份判定逻辑在前端也有一份），
     /// 这个方法留给需要「一次问清」的调用点用。
+    ///
+    /// 有意保留、当前无调用点：它是 `EnvDetection` 上「把版本串直接翻译成是与否」的
+    /// 唯一入口，调用点出现时不该被迫在别处重写一遍判下限的逻辑。加 allow 只是让构建日志
+    /// 保持干净（真正的使用点出现时这个属性可以删掉，编译器会重新盯着它）。
+    #[allow(dead_code)]
     pub fn node_too_old(&self) -> Option<bool> {
         self.node_version
             .as_deref()
@@ -649,10 +654,17 @@ mod tests {
             assert_eq!(cmp_versions(&v, &min), Ordering::Less, "{old} 应低于下限");
             assert_eq!(node_version_at_least_min(old), Some(false), "{old}");
         }
-        // 恰好等于 / 高于下限
-        for ok in ["22.19.0", "22.19", "22.19.1", "22.20.0", "24.18.0", "v24.20.0"] {
+        // 恰好等于下限：比较结果是 Equal 而不是 Greater —— 这里同时替 node_version_at_least_min
+        // 的正确性作证（Equal 必须算「满足」，否则下限本身会被误判为过低）
+        let at_min = parse_version_numbers(NODE_MIN_VERSION).unwrap();
+        assert_eq!(cmp_versions(&at_min, &min), Ordering::Equal);
+        assert_eq!(node_version_at_least_min(NODE_MIN_VERSION), Some(true));
+
+        // 高于下限：严格 Greater；「不低于下限」用 assert_ne!(.., Less) 表达，
+        // 与循环里那句文案（应不低于下限）语义一致（原来断言的是 Greater，边界值必然失败）
+        for ok in ["22.19", "22.19.1", "22.20.0", "24.18.0", "v24.20.0"] {
             let v = parse_version_numbers(ok).unwrap();
-            assert_eq!(cmp_versions(&v, &min), Ordering::Greater, "{ok} 应不低于下限");
+            assert_ne!(cmp_versions(&v, &min), Ordering::Less, "{ok} 应不低于下限");
             assert_eq!(node_version_at_least_min(ok), Some(true), "{ok}");
         }
         assert_eq!(node_version_at_least_min("not-a-version"), None);

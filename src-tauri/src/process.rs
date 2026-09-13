@@ -106,6 +106,7 @@ impl AppState {
             updating: AtomicBool::new(false),
             last_stderr: Mutex::new(None),
             detected_url: Mutex::new(None),
+            last_loaded_url: Mutex::new(String::new()),
             setup_busy: AtomicBool::new(false),
             launched_by_autostart: AtomicBool::new(launched_by_autostart),
             #[cfg(windows)]
@@ -148,6 +149,16 @@ impl AppState {
     /// pub(crate)：安全模式启动前也要清掉上一轮的 stderr 记忆（与日常启动同款处理）
     pub(crate) fn take_last_stderr(&self) -> Option<String> {
         self.last_stderr.lock().unwrap().take()
+    }
+
+    /// 记下「刚把哪个地址交给了 webview」（含令牌的完整地址，只在内存里）
+    pub(crate) fn set_last_loaded_url(&self, url: &str) {
+        *self.last_loaded_url.lock().unwrap() = url.to_string();
+    }
+
+    /// 读最近一次交给 webview 的地址；没有则空串
+    pub(crate) fn last_loaded_url(&self) -> String {
+        self.last_loaded_url.lock().unwrap().clone()
     }
 }
 
@@ -247,7 +258,12 @@ pub(crate) fn decode_console_output(bytes: &[u8]) -> String {
 }
 
 /// 统一日志出口：先镜像写入 %APPDATA%\com.dsh.desktop\desktop.log，再发到前端「日志」面板
+///
+/// 两条出口前都过一道会话令牌脱敏（`secret::redact`，安全审查 MEDIUM-2）：日志面板有
+/// 「复制日志 / 复制错误信息」，界面上的明文等于可以被一键复制走。写入侧的函数是幂等的，
+/// 与 `logger::append_line` 内部那道防线叠加也不会出现重复替换。
 pub fn emit_log(app: &AppHandle, stream: &str, line: String) {
+    let line = crate::secret::redact(&line);
     logger::append_line(&logger::desktop_log_path(app), &line);
     let _ = app.emit("dsh-log", LogEvent { stream: stream.to_string(), line });
 }
@@ -422,6 +438,12 @@ pub(crate) fn spawn_log_reader(
                 continue;
             }
             let l = decode_console_output(&raw);
+            // 会话令牌脱敏（安全审查 MEDIUM-2）：`l` 是**原始行**，下面只拿它做解析
+            // （extract_local_url 需要完整的带令牌地址去加载页面）；所有对外可见的出口
+            // —— 状态区错误行、两个日志文件、前端日志面板 —— 一律用 `shown`。
+            // 令牌本身仍会进内存（detected_url / last_loaded_url）与本机 webview 的 URL，
+            // 那是功能所需；不能接受的是它被写进任何文件或被复制走。
+            let shown = crate::secret::redact(&l);
 
             // npm 的 http 日志行（loglevel=http 时形如 "npm http fetch GET 200 …"），
             // 每行代表一次 registry 请求 → 作为「已下载包文件数」的进度依据
@@ -432,7 +454,8 @@ pub(crate) fn spawn_log_reader(
             }
 
             if track_stderr && stream == "stderr" {
-                state.set_last_stderr(&l);
+                // 状态区会显示这行、「复制错误信息」会把它拷进剪贴板 → 用脱敏后的文本
+                state.set_last_stderr(&shown);
             }
             // 从 DSH 输出中解析实际监听地址（如 "dsh web: http://127.0.0.1:3080/?token=..."），
             // 就绪后优先按实际地址加载页面（要求一.8）
@@ -455,9 +478,10 @@ pub(crate) fn spawn_log_reader(
                     // 兜底重导航：若这行输出晚于 HTTP 就绪判定（next 频道 loader
                     // 就绪后才打印 URL 行，可能超过就绪后的宽限期），页面已按裸地址
                     // 内嵌并显示 401——用带令牌的完整地址重新导航一次。
-                    // last_url 在 open_dsh_webview 每次加载时更新，地址相同则跳过。
+                    // 判重走**内存**里的「最近一次交给 webview 的地址」：磁盘记录是密文，
+                    // 拿它比对要先解密、换用户后还解不开（那样每次输出都会重导航）。
                     if matches!(current_status(&app).as_str(), "running" | "running-external") {
-                        if config::last_url(&app) != url {
+                        if state.last_loaded_url() != url {
                             open_dsh_webview(&app, &url);
                         }
                     }
@@ -465,10 +489,10 @@ pub(crate) fn spawn_log_reader(
             }
             // 落盘（失败忽略，不影响主流程）
             if let Some(f) = &dsh_file {
-                logger::append_line(f, &l);
+                logger::append_line(f, &shown);
             }
-            logger::append_line(&desktop_log, &l);
-            let _ = app.emit(event, LogEvent { stream: stream.to_string(), line: l });
+            logger::append_line(&desktop_log, &shown);
+            let _ = app.emit(event, LogEvent { stream: stream.to_string(), line: shown });
         }
     });
 }
@@ -673,7 +697,7 @@ fn main_content_size(app: &AppHandle) -> (f64, f64) {
 /// 冻结在这里只有副作用没有防护价值，故全局关闭。请勿重新打开；若未来 Tauri 提供
 /// 按 webview 豁免该脚本的 API，可再评估只对 `dsh` 关闭。
 fn open_dsh_webview(app: &AppHandle, url: &str) {
-    // 先解析并校验一次，后面三处（记 last_url / 刷新已有 webview / 新建 webview）共用它。
+    // 先解析并校验一次，后面三处（记 last_url_enc / 刷新已有 webview / 新建 webview）共用它。
     // 解析失败或不是 http 时什么都不做：宁可不加载，也不把未校验的字符串交给任何 webview。
     let Ok(parsed) = url.parse::<tauri::Url>() else {
         emit_log(app, "launcher", i18n::fmt("log_invalid_url", &[&url.to_string()]));
@@ -684,8 +708,12 @@ fn open_dsh_webview(app: &AppHandle, url: &str) {
         return;
     }
     // 记录最近一次交给 WebView 的地址（next 频道带 ?token=... 会话令牌），
-    // 供没有进程输出的场景（连接现有服务 / 页面重开）复用；只写 last_url 一个键。
+    // 供没有进程输出的场景（连接现有服务 / 页面重开）复用；只写 `last_url_enc` 一个键，
+    // 且写进去的是 DPAPI 密文（安全审查 MEDIUM-2：明文绝不落盘，详见 config.rs 那段注释）。
     config::set_last_url(app, parsed.as_str());
+    // 内存里另存一份明文：spawn_log_reader 用它判断「同一地址的日志行反复出现时要不要
+    // 重新导航」。这样那次判断不必去解密磁盘记录，也不受「换用户后解不开」影响。
+    app.state::<AppState>().set_last_loaded_url(parsed.as_str());
 
     // 已存在：直接导航到当前 URL（端口可能已变更）。
     // 安全（HIGH-1 修复）：这里原来用 `wv.eval(&format!("window.location.replace('{}')", url))`，
@@ -1400,6 +1428,12 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     // 避免用户点一次「保存」就把自己的确认记录清掉、下次启动又被拦。
     if config.node_min_ack.trim().is_empty() && !old_cfg.node_min_ack.trim().is_empty() {
         config.node_min_ack = old_cfg.node_min_ack.clone();
+    }
+    // 同理：最近加载地址（密文）也是运行时记忆、不是设置页字段。前端拼 cfg 时不带它，
+    // 不显式沿用的话，用户点一次「保存」就把这条记录清空了（表现为下次「连接现有服务」
+    // 又回到裸地址、可能撞一次 401）。沿用磁盘上的密文，绝不在这里重新加密明文。
+    if config.last_url_enc.trim().is_empty() && !old_cfg.last_url_enc.trim().is_empty() {
+        config.last_url_enc = old_cfg.last_url_enc.clone();
     }
     config::save(&app, &config)?;
 
@@ -2952,7 +2986,7 @@ pub fn set_language(app: AppHandle, lang: String) -> Result<(), String> {
 /// 「Node 版本过低」告警里的第三条路：用户明确选择保留这个版本、仍要尝试启动
 /// （ignore = true），或在首选项里取消这个选择、恢复启动拦截（ignore = false）。
 ///
-/// 只写 config.json 的 `node_min_ack` 一个键（读取-修改-写回，同 last_url 的做法），
+/// 只写 config.json 的 `node_min_ack` 一个键（读取-修改-写回，同 last_url_enc 的做法），
 /// 不动其它字段；前端也不走 save_config，避免整体写盘时把别的设置覆盖掉。
 /// 记的是**当时那条下限**：以后程序把 NODE_MIN_VERSION 提高，比对不相等就会重新告警——
 /// 「我接受 21 跑不了」不等于「我接受未来某条更高的下限也跑不了」。

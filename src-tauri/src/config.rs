@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
-use crate::{detect, i18n};
+use crate::{detect, i18n, secret};
 
 /// Launcher 的持久化配置，保存于 %APPDATA%\com.dsh.desktop\config.json
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -35,10 +35,13 @@ pub struct Config {
     /// 监视该文件并把变化实时推送到已打开的页面，无需重启 DSH。
     /// 老配置（无此字段）首次加载时继承 DSH settings.yaml 里的现有主题，避免升级即覆盖。
     pub appearance: String,
-    /// 最近一次交给内嵌 WebView 的 DSH 页面完整地址（next 频道带 `?token=...`）。
-    /// 这是程序自己写的运行时记忆（不是用户设置），只用于「连接现有服务 / 页面重开」
-    /// 这类没有新进程输出的场景；读取侧（process.rs）每次使用前重新校验形状与端口。
-    pub last_url: String,
+    /// 最近一次交给内嵌 WebView 的 DSH 页面完整地址，**以 DPAPI 密文（十六进制）存放**
+    /// （地址可能带 `?token=<base64url>` 会话令牌，明文绝不落盘 —— 安全审查 MEDIUM-2，
+    /// 加解密原语见 secret.rs）。这是程序自己写的运行时记忆（不是用户设置），只用于
+    /// 「连接现有服务 / 页面重开」这类没有新进程输出的场景；读取侧（process.rs）
+    /// 每次使用前重新校验形状与端口。
+    /// 字段名带 `_enc` 是刻意的：读代码/读配置文件的人一眼就知道它不是一个能直接用的地址。
+    pub last_url_enc: String,
     /// 用户「保留过低版本 Node 并继续」的决定记录：内容是当时确认过的**最低版本**
     /// （如 `22.19.0`）。为空 = 没确认过；与当前 NODE_MIN_VERSION 不同 = 程序把下限
     /// 提高了，需要重新问一次。取值由 remember_node_min_ack 做读取-修改-写回，
@@ -76,7 +79,7 @@ impl Default for Config {
             language: "zh".to_string(),
             // 默认跟随系统外观（DSH 的 ui-theme 默认值也是 system，两边一致）
             appearance: "system".to_string(),
-            last_url: String::new(),
+            last_url_enc: String::new(),
             // 空 = 还没在「Node 版本过低」告警里选过「保留该版本继续」
             node_min_ack: String::new(),
             // 安全模式默认**不**重置基线：沿用已有 .dsh-safe，上一轮安全模式的
@@ -459,13 +462,33 @@ pub fn load(app: &AppHandle) -> Config {
     let path = config_path(app);
     let mut first_run = false;
     let mut has_appearance = false;
+    // 明文 last_url 迁移（MEDIUM-2）：≤1.2.5 把带 ?token= 的完整地址明文写在
+    // `last_url` 键里。这里先把它取出来（只在还没有密文时），函数末尾再加密写回去，
+    // 并把明文键删掉 —— 取出即加密，磁盘上不留明文副本。
+    let mut legacy_last_url: Option<String> = None;
     let mut cfg = if let Ok(s) = std::fs::read_to_string(&path) {
         // 老版本 config.json 没有 appearance 字段：先探一下键是否存在（合法字符串值），
         // 缺失时下面再从 DSH settings.yaml 继承现有主题，避免升级即把 DSH 页面改色。
-        has_appearance = serde_json::from_str::<serde_json::Value>(&s)
-            .ok()
+        let raw = serde_json::from_str::<serde_json::Value>(&s).ok();
+        has_appearance = raw
+            .as_ref()
             .map(|v| v.get("appearance").and_then(|a| a.as_str()).is_some())
             .unwrap_or(false);
+        // 只在「还没有密文」时才认这个明文键：非空即迁移，空串/非字符串当作没有
+        let has_enc = raw
+            .as_ref()
+            .and_then(|v| v.get("last_url_enc"))
+            .and_then(|v| v.as_str())
+            .map(|h| !h.trim().is_empty())
+            .unwrap_or(false);
+        if !has_enc {
+            legacy_last_url = raw
+                .as_ref()
+                .and_then(|v| v.get("last_url"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .filter(|u| !u.trim().is_empty());
+        }
         serde_json::from_str::<Config>(&s).unwrap_or_default()
     } else {
         // 自动迁移旧目录 com.dsh.launcher → com.dsh.desktop，避免升级后配置丢失
@@ -513,7 +536,30 @@ pub fn load(app: &AppHandle) -> Config {
             cfg.appearance = t;
         }
     }
+    // 明文 last_url 的迁移落到盘上：只动 `last_url` / `last_url_enc` 两个键，
+    // **不整文件重写** —— 否则会把上面自动检测填好的路径顺手固化进用户配置
+    //（autofill_from_detection 的约定是「只在内存生效，写盘仍由用户保存触发」）。
+    // 加密失败时什么都不写：保留旧键让本次运行仍能复用地址，下次启动再试，
+    // 绝不给明文换一个键名再存一遍。
+    if let Some(url) = legacy_last_url {
+        let _ = migrate_plaintext_last_url(app, &url);
+    }
     cfg
+}
+
+/// 把 ≤1.2.5 留在 config.json 里的明文 `last_url` 迁移成 DPAPI 密文 `last_url_enc`
+/// （读取-修改-写回，只动这两个键，其它字段原样保留）。
+/// 返回 true = 盘上已处理完（明文键已消失）；false = 加密不可用或文件异常，什么都没动。
+fn migrate_plaintext_last_url(app: &AppHandle, url: &str) -> bool {
+    let Some(hex) = secret::seal(url) else { return false };
+    let path = config_path(app);
+    let Ok(s) = std::fs::read_to_string(&path) else { return false };
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&s) else { return false };
+    let Some(obj) = root.as_object_mut() else { return false };
+    obj.insert("last_url_enc".to_string(), serde_json::Value::String(hex));
+    obj.remove("last_url");
+    let Ok(text) = serde_json::to_string_pretty(&root) else { return false };
+    std::fs::write(&path, text).is_ok()
 }
 
 pub fn save(app: &AppHandle, cfg: &Config) -> Result<(), String> {
@@ -531,31 +577,66 @@ pub fn save(app: &AppHandle, cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
-// ---------- 最近加载地址记忆（last_url） ----------
+// ---------- 最近加载地址记忆（last_url_enc） ----------
 //
-// last_url 只记录「最近一次成功交给内嵌 WebView 的 DSH 完整地址」（可能带
-// `?token=...` 会话令牌）。它不走 Config 结构体：不经过自动检测填充、不随
-// 用户保存整体写盘，避免把内存态路径固化；写入采用读取-修改-写回，只动这一个
-// 键。读取侧每次使用前在 process.rs 里重新校验形状与端口，被手改/损坏的
-// 记录会被忽略——它最多影响「连接现有服务 / 页面重开」时加载哪个本机地址，
-// 那个 webview 没有任何 capability（remote origin + 无权限），不存在提权面。
+// 这条记忆只记录「最近一次成功交给内嵌 WebView 的 DSH 完整地址」——它可能带
+// `?token=<base64url>` 会话令牌，而该令牌能换取 30 天有效期的签名 cookie，
+// 等于用户的 DSH 会话身份。所以（安全审查 MEDIUM-2）：
+//
+// - **明文绝不落盘**：写之前一律先 secret::seal()（Windows DPAPI，CurrentUser 作用域），
+//   文件里只留十六进制密文；加密失败就干脆不记，绝不回落明文（代价只是这次不记地址）；
+// - 它是**运行时记忆**、不是用户设置：不走设置页那套整体写盘。save_config 收到的是前端
+//   按字段拼出来的 Config（不含本字段），所以那里显式沿用磁盘上的密文，见 process.rs；
+// - 读取侧每次使用前在 process.rs::remembered_url_for 重新校验形状与端口；被手改、
+//   损坏、换 Windows 用户解不开的记录一律当「没有」。它最多影响「连接现有服务 / 页面
+//   重开」时加载哪个本机地址，那个 webview 没有任何 capability（remote origin + 无权限），
+//   不存在提权面。
+//
+// 为什么不干脆删掉这条记忆：next 频道的裸地址会返回 401，没有它的话「连接现有服务」
+// 与「页面重开」两个场景都要用户重新认证一次。
 
-/// 只更新 config.json 里的 last_url 字段（读取-修改-写回），失败静默。
+/// 更新 config.json 里的 `last_url_enc` 字段（读取-修改-写回，只动这一个键），失败静默。
+/// 传空串 = 清除记录；密文写不进去时保持原值，**任何情况下都不会回落到明文**。
 pub fn set_last_url(app: &AppHandle, url: &str) {
+    let sealed = if url.trim().is_empty() {
+        String::new()
+    } else {
+        match secret::seal(url) {
+            Some(h) => h,
+            // 加密不可用/失败：不写盘（保留原有记录），保持「没有明文落盘」这条不变量
+            None => return,
+        }
+    };
     let path = config_path(app);
     let Ok(s) = std::fs::read_to_string(&path) else { return };
     let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&s) else { return };
-    root["last_url"] = serde_json::Value::String(url.to_string());
+    // 磁盘上的 JSON 若被手改成非对象（数组/数字/字符串），直接放弃而不是 panic
+    let Some(obj) = root.as_object_mut() else { return };
+    obj.insert("last_url_enc".to_string(), serde_json::Value::String(sealed));
+    // ≤1.2.5 留下的明文键：顺手删掉（只删这一个键，其它字段原样保留）
+    obj.remove("last_url");
     if let Ok(text) = serde_json::to_string_pretty(&root) {
         let _ = std::fs::write(&path, text);
     }
 }
 
-/// 读取 last_url 原始字符串；缺失/非字符串/文件异常一律返回空串（校验在 process.rs）。
+/// 读取最近一次记录的 DSH 页面地址（解开 `last_url_enc` 的密文）。
+/// 缺失/空/解不开（换了 Windows 用户或机器、被手改）一律返回空串，形状校验在 process.rs。
+///
+/// 升级窗口：文件里可能还留着 ≤1.2.5 的明文 `last_url`（load() 启动时会把它加密成
+/// `last_url_enc` 并整文件覆盖）。这里保留一条**只读**兼容分支，保证迁移落地前的同一次
+/// 运行内行为不变；任何写路径（load 的迁移、set_last_url、save_config 保存）都会让那个
+/// 明文键消失，所以它不会长期存在。
 pub fn last_url(app: &AppHandle) -> String {
     let path = config_path(app);
     let Ok(s) = std::fs::read_to_string(&path) else { return String::new() };
     let Ok(root) = serde_json::from_str::<serde_json::Value>(&s) else { return String::new() };
+    if let Some(hex) = root["last_url_enc"].as_str() {
+        if !hex.trim().is_empty() {
+            return secret::unseal(hex).unwrap_or_default();
+        }
+    }
+    // 兼容分支：明文键只在迁移尚未落地时出现（见函数注释），同样是只读、用完即弃。
     root["last_url"].as_str().unwrap_or("").to_string()
 }
 

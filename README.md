@@ -103,7 +103,7 @@ No local Rust toolchain needed — GitHub Actions builds the installers for you 
 
 Install with the NSIS setup exe, or just run the portable exe. On first launch the environment check wizard appears once (it disappears permanently once `%APPDATA%\com.dsh.desktop\config.json` exists).
 
-**Verify what you downloaded.** Every build publishes a `SHA256SUMS.txt` — attached to the release if the maintainer copied it there, and in every case inside that build's artifacts as `DSH-Desktop-windows-sha256` — **and** records a signed build-provenance attestation against the artifacts of that run. Both come from the build itself, not from whoever hands you the file; that is the whole point: get the bytes from anywhere, check them against a source the file's host does not control.
+**Verify what you downloaded.** Every build publishes a `SHA256SUMS.txt` — attached to the release when the maintainer put it there — **and** records a signed build-provenance attestation against the artifacts of that run. Both come from the build itself, not from whoever hands you the file; that is the whole point: get the bytes from anywhere, check them against a source the file's host does not control. The same checksums are printed at the end of every build log (the "生成 SHA-256 校验清单" step), which is the quickest place to read them without downloading anything.
 
 ```powershell
 # 1) Hash check: compare against the line for this file in SHA256SUMS.txt (case-insensitive)
@@ -210,6 +210,16 @@ The launcher document itself is served under a strict CSP (`script-src 'self'`, 
 > A desktop shell's CSP and prototype freezing do **not** protect DSH's own web application from itself. Anything that renders untrusted model output is an injection target in its own origin, so the equivalent defenses — escaping every interpolated value, never building code out of data, keeping session tokens out of reach — have to live in the DSH web app itself.
 
 > Tauri delivers this policy by injecting a `<meta http-equiv="Content-Security-Policy">` tag into the built HTML (`tauri_utils::html::create_csp_meta_tag`), **not** an HTTP header. Per the CSP spec, `frame-ancestors`, `sandbox` and `report-uri` are ignored in `<meta>`, so they are deliberately left out here — every directive configured above is one that actually takes effect. If a header-delivered policy is ever needed, `app.security.headers` is the mechanism.
+
+### Session token at rest
+
+DSH's `next` channel prints its listen address as `http://127.0.0.1:<port>/?token=<base64url>`. That token can be exchanged for a 30-day signed cookie — it *is* your DSH session — so the launcher treats it as a credential rather than a URL detail.
+
+It is still remembered, because **Connect to existing service** and **re-open page** read no process output and would otherwise make you authenticate again. What changed in 1.2.6 (security review M-2) is that the remembered address is not readable on disk any more:
+
+- **`config.json` keeps it encrypted.** The address is sealed with Windows DPAPI (`CryptProtectData`, **CurrentUser** scope, plus an app-specific entropy string) and stored hex-encoded as `last_url_enc`. A plaintext `last_url` written by ≤ 1.2.5 is migrated to the encrypted key on the next start and the plaintext key is deleted. A hand-edited or undecryptable blob is simply ignored (the page then loads the bare `http://127.0.0.1:<port>`), and **no failure path ever falls back to writing plaintext** — if sealing fails, the address just is not remembered this time. DPAPI is a Windows facility, and this launcher only ships for Windows.
+- **Logs are masked.** DSH prints that address to its own stdout, so the raw text used to land in `desktop.log`, in `<home>\logs\dsh.log` and in the log panel (where *复制日志 / 复制错误信息* can put it on the clipboard). Every line now goes through a redactor that replaces the value of any `token=` parameter with `***` — you will see `?token=***` — before it reaches either file, the panel or the clipboard. Nothing else in the output is altered.
+- **What this does and does not cover.** DPAPI binds the ciphertext to your Windows user account: another user on the machine, a copy of the file taken off the disk (backup, sync folder, support bundle, screenshot) or a stolen disk image cannot read it. It does **not** stop another process running as *you* — the entropy is compiled into the binary rather than kept secret, and DPAPI will decrypt for any code in your session. "Malware already running as this user" is out of scope for this layer; DSH itself also still holds the token in its process memory and the resulting session cookie in the WebView2 profile directory.
 
 ## Language
 
@@ -324,7 +334,7 @@ Files rotate to `*.old` past 5 MB. In the UI:
 - **复制错误信息** — copies the current error line to the clipboard (shown on error/port-busy states).
 - **复制日志** — copies the whole visible log text.
 
-DSH stdout/stderr are never hidden: they stream live to the log dialog and to both files.
+DSH stdout/stderr are never hidden: they stream live to the log dialog and to both files — with one exception: the session token inside DSH's own authentication URL is masked to `?token=***` on its way to the panel, the clipboard and both files (see [Session token at rest](#session-token-at-rest)).
 
 ## Troubleshooting
 

@@ -4,6 +4,7 @@ mod i18n;
 mod logger;
 mod process;
 mod safe;
+mod secret;
 
 use std::time::Duration;
 use tauri::{

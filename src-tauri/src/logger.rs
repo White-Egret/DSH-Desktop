@@ -5,6 +5,10 @@
 //!
 //! 全部为追加写入，超过 5MB 时滚动为 *.old；任何写入失败都静默忽略，
 //! 绝不影响主流程（日志只是辅助设施）。
+//!
+//! 写盘前统一过一道会话令牌脱敏（`secret::redact`，安全审查 MEDIUM-2）：
+//! DSH 打印的认证地址里带 `?token=...`，而本模块是**所有**日志文件的唯一出口，
+//! 防线放在这一层，新增调用点也不会漏。
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -104,7 +108,7 @@ pub fn append_line(path: &Path, line: &str) {
         }
     }
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
-        let clean = line.replace('\r', "");
+        let clean = crate::secret::redact(&line.replace('\r', ""));
         let _ = writeln!(f, "[{}] {}", utc_now_string(), clean);
     }
 }

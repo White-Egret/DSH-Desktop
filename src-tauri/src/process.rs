@@ -2721,7 +2721,7 @@ fn try_download_curl(
 ) -> bool {
     // 来源守卫放最前面：不认识的地址，连探大小都不做
     if !is_node_dist_url(url) {
-        *last_err = i18n::fmt("setup_dl_bad_url", &[url]);
+        *last_err = i18n::fmt("setup_dl_bad_url", &[&url]);
         return false;
     }
     let Some(curl) = detect::where_lookup("curl.exe") else {
@@ -2823,7 +2823,7 @@ fn try_download_curl(
 fn try_download_powershell(url: &str, dest: &Path) -> Result<(), String> {
     // 与 curl 路径同一道来源守卫 —— 不能只有 curl 那条路受保护（M-4 第 3 点）
     if !is_node_dist_url(url) {
-        return Err(i18n::fmt("setup_dl_bad_url", &[url]));
+        return Err(i18n::fmt("setup_dl_bad_url", &[&url]));
     }
     // 契约（M-4 第 2 点）：能走到这里的地址必须是「常量前缀 + 白名单版本号」拼出来的。
     // 写成断言是为了让将来改 URL 来源的人在 `cargo test` 里就撞上，而不是在用户机上。
@@ -3367,7 +3367,7 @@ mod tests {
         assert_eq!(ps_single_quote(""), "");
         // 这个函数不幂等，且**不该**幂等：再跑一次会继续翻倍。
         // 把语义（一次替换 = 一次转义）钉在这里，防止有人误加「防重复」分支。
-        assert_eq!(ps_single_quote(ps_single_quote("'")), "''''");
+        assert_eq!(ps_single_quote(&ps_single_quote("'")), "''''");
     }
 
     // ---------- L-5：用系统浏览器打开链接 ----------

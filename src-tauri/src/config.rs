@@ -821,7 +821,7 @@ mod tests {
         // 必须与目标**同目录**：`rename` 只在同卷内原子替换，丢到 %TEMP% 就白做了
         assert_eq!(tmp.parent(), target.parent());
         assert_eq!(
-            tmp.file_name().unwrap().to_string_lossy(),
+            tmp.file_name().unwrap().to_string_lossy().as_ref(),
             "config.json.tmp-4321-7"
         );
         // 临时名 ≠ 目标名 —— 否则「先写临时文件」就退化成「直接覆盖目标」了

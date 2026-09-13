@@ -246,6 +246,9 @@ pub fn t(key: &str) -> &'static str {
         "safe_cred_msg_empty" => if en { "The daily credential file is empty ({0}) and was NOT borrowed; safe mode runs DSH's first-run flow." } else { "日常模式的凭据文件为空（{0}），未借用；安全模式将由 DSH 走首跑流程。" },
         "safe_cred_msg_failed" => if en { "Credential borrowing failed: {0}. Entry was not blocked — handle it manually inside safe mode if needed." } else { "凭据借用失败：{0}。进入未被阻断——如有需要请在安全模式内手动处理。" },
         "safe_cred_too_large" => if en { "the credential file is implausibly large ({0} bytes), so it was not copied" } else { "凭据文件体积异常（{0} 字节），未拷贝" },
+        // 窗口布局记忆（window_state.rs）：进入安全模式时冻结日常布局，退出时恢复
+        "log_safe_layout_frozen" => if en { "[safe] Window layout: the daily layout was saved and locked, and the window was reset to the default size/position from tauri.conf.json (window changes inside safe mode are never written to disk)" } else { "[safe] 窗口布局：日常布局已保存并冻结，窗口重置为 tauri.conf.json 的默认大小与位置（安全模式期间的窗口变化不会写入磁盘）" },
+        "log_safe_layout_restored" => if en { "[safe] Window layout: restoring the daily window layout..." } else { "[safe] 窗口布局：正在恢复日常模式的窗口布局…" },
 
         // 未知 key：返回静态标记（正常路径不会命中；出现即说明 key 拼写有遗漏）
         _ => "[i18n-key-missing]",

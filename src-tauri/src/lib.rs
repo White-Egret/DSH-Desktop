@@ -5,6 +5,7 @@ mod logger;
 mod process;
 mod safe;
 mod secret;
+mod window_state;
 
 use std::time::Duration;
 use tauri::{
@@ -19,6 +20,13 @@ use tauri::{
 ///   process::start_internal 在延迟 12 秒后静默拉起；用户点托盘图标恢复窗口。
 ///   为 false（用户手动双击）时 setup 中立即 show 主窗口，行为与旧版一致。
 pub fn run(launched_by_autostart: bool) {
+    // 启动期只判定一次：安全模式专用入口（`--safe` / `--safe-mode` / `DSH_SAFE_MODE=1`）下
+    // 关闭整条窗口布局记忆，让窗口老老实实取 tauri.conf.json 的初始大小与位置。
+    // 说明：安全模式本身是"停掉日常实例、用独立家目录重启安全实例"，但**桌面外壳不重启**
+    // （同一个进程、同一个 main 窗口），所以点按钮进出时这里恒为 false —— 那条路径的
+    // 窗口隔离由 window_state 的显式接管负责。这个开关是为「安全模式将来作为独立入口
+    // 重新拉起本程序」预留的，接上后窗口记忆这边不用再改。
+    let launch_safe = window_state::is_safe_mode_at_launch();
     tauri::Builder::default()
         // 单实例锁必须最先注册：第二次启动时聚焦已有窗口，而不是再启动一个 DSH
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -33,6 +41,10 @@ pub fn run(launched_by_autostart: bool) {
                 .app_name("DSH Desktop")
                 .build(),
         )
+        // 窗口布局记忆（大小 / 位置 / 最大化）：官方 tauri-plugin-window-state。
+        // 必须在窗口创建之前注册 —— 插件靠 on_window_ready 钩子做首次恢复。
+        // 运行期进安全模式的隔离见 window_state.rs 的模块文档。
+        .plugin(window_state::plugin(launch_safe))
         .manage(process::AppState::with_autostart(launched_by_autostart))
         // 安全模式状态（Child 句柄 / 激活标志 / 进入报告）：应用退出与窗口销毁时
         // 由 process::cleanup_sync → safe::cleanup_safe_sync 兜底清理，防孤儿进程占用 3081
@@ -225,9 +237,20 @@ pub fn run(launched_by_autostart: bool) {
         .build(tauri::generate_context!())
         .expect("failed to build tauri application")
         .run(|app, event| {
-            // 退出兜底清理：无论正常退出还是异常退出路径，都尝试结束 DSH 进程树
-            if let RunEvent::ExitRequested { .. } | RunEvent::Exit = event {
-                process::cleanup_sync(app);
+            match event {
+                // 退出兜底（ExitRequested 早于 Exit 且窗口尚在）：本次会话进过安全模式时，
+                // 把日常布局写回窗口并落盘，别让安全模式的窗口尺寸留在 .window-state.json 里。
+                // 之所以放在 ExitRequested 而不是 Exit：Exit 阶段窗口可能已被销毁，
+                // 那时 get_webview_window 返回 None，兜底会静默失效。
+                RunEvent::ExitRequested { .. } => {
+                    window_state::persist_before_exit(app);
+                    process::cleanup_sync(app);
+                }
+                // 退出兜底清理：无论正常退出还是异常退出路径，都尝试结束 DSH 进程树
+                RunEvent::Exit => {
+                    process::cleanup_sync(app);
+                }
+                _ => {}
             }
         });
 }

@@ -35,6 +35,7 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 - **Node.js minimum-version guard (22.19.0)**: detects an installed-but-too-old Node.js, warns with the exact versions, offers a one-click upgrade to the official LTS (same verified installer flow), keeps a "download it myself" link and a "keep this version and continue" escape hatch, and refuses to start DSH with a plain-language reason instead of letting it die on an opaque error — see [Node.js version check](#nodejs-version-check)
 - **Bilingual UI (Chinese / English)**: choose a language in Preferences; the whole launcher (toolbar, status, dialogs, logs, tray menu) switches, and DSH's own web UI follows via its `settings.yaml`
 - **Light / Dark / Follow-system appearance**: pick it in Preferences; the launcher (toolbar, dialogs, wizard, native title bar) and the embedded DSH page switch together through `ui-theme.preference` in DSH's `settings.yaml` — open DSH pages follow **live, no DSH restart needed**
+- **Window layout memory**: the main window's size, position and maximized state are remembered and restored on the next launch (official `tauri-plugin-window-state`); the plugin validates coordinates against the monitors that are actually attached, so a window can never come back off-screen after a monitor is unplugged — see [Window layout](#window-layout)
 - Single-instance lock: launching a second copy just focuses the existing window
 
 ## Requirements
@@ -149,7 +150,7 @@ Artifacts land in `src-tauri/target/release/bundle/nsis/`, `.../msi/`, and the r
 
 ## Usage
 
-1. Install/start **DSH Desktop**. Default window is 1200×760.
+1. Install/start **DSH Desktop**. Default window is 1392×783.
 2. On first run the setup wizard checks Node.js / npm / DSH:
    - Everything installed → click "完成，进入主界面" (done).
    - Something missing → use the guided buttons or skip and continue to the main UI anyway.
@@ -272,6 +273,16 @@ Same three-way semantics as DSH's own "General settings → Appearance", with th
 - Upgrade compatibility: an old `config.json` without the appearance field inherits DSH's current theme on first load (reading `settings.yaml`), so upgrading the launcher never re-skins your DSH page by itself. From then on, saving in Preferences takes over the value.
 - Changing the appearance inside DSH's own settings affects the DSH page only; the launcher keeps whatever was last saved in its Preferences.
 
+## Window layout
+
+The main window's **size, position and maximized state** are remembered and restored on the next launch. This uses Tauri's official `tauri-plugin-window-state`; there is deliberately **no hand-rolled debounce + JSON persistence**.
+
+- **Why the official plugin matters**: the failure mode of a home-grown implementation is not saving, it is **restoring** — after a monitor is unplugged, the coordinates on disk may point at a screen that no longer exists, so the window reopens outside the visible area and the only way out is deleting the state file. The plugin walks the *currently attached* monitors and only applies the saved coordinates when some monitor **intersects** the saved position + size. That is the official fix for exactly that bug. This app's own code only decides *when not to remember*.
+- **What is tracked**: `POSITION | SIZE | MAXIMIZED` — deliberately **not `VISIBLE`**. Closing to tray (the default) leaves the window hidden at exit, so restoring visibility would come back "hidden" and look like "clicking the tray icon does nothing" (the very failure `show_main_window`'s repaint fallback exists to fix). Decorations and fullscreen are likewise left to `tauri.conf.json` instead of being rewritten by history.
+- **State file**: `%APPDATA%\com.dsh.desktop\.window-state.json` (the plugin's default location). To *reset* the layout, **close the app first, then delete that file**; the next launch is back to the `tauri.conf.json` default of 1392×783, centered. A corrupt file (hand-edited, truncated) is treated as "nothing recorded" rather than a startup failure — which is also why legacy files need no cleanup: an unrecognized format simply means no state.
+- **Safe Mode is completely unaffected**: entering Safe Mode **tears down the entire daily DSH instance** and starts a brand-new safe instance from a separate home (`.dsh-safe`, port 3081) — at the *runtime* layer that is a clean restart. The **desktop shell and its window do not restart, though** (it is still the same window), so the two paths are isolated separately: launched through a safe-mode entry point (`--safe` / `--safe-mode` / `DSH_SAFE_MODE=1`) the plugin neither restores nor saves anything; pressing the button in-app first freezes the daily layout (snapshot + flush to disk) and then **resets the window to the `tauri.conf.json` default geometry**, so nothing you drag or resize while Safe Mode is active is ever written to disk, and the daily layout comes back on exit. See [Safe Mode](#safe-mode).
+- Sizes are stored in **physical pixels** and positions are validated against the current monitors, so the geometry does not drift as you change DPI or move between displays.
+
 ## Default port
 
 - The default port is **3080**.
@@ -332,6 +343,8 @@ Like an operating system's safe mode: DSH is started from a **separate, pristine
 
 **Visual distinction**: the window title is prefixed with "[Safe Mode]" (localized), the toolbar switches to an amber accent with a 🛡 badge, and an onboarding banner states the three key facts (you are in safe mode / the daily home path / the credential-borrowing result). Daily control buttons are disabled while safe mode is active.
 
+**Window layout**: window memory is strictly isolated from Safe Mode. Safe Mode *is* a restart into a separate environment — the daily DSH instance is torn down entirely and the safe instance starts fresh from its own home on 3081; but the desktop shell and the window itself do not restart, so the isolation is taken over explicitly by the window-memory side: on entry the daily layout is frozen (snapshot + flushed to disk) and the window is reset to the `tauri.conf.json` default size and position; anything you drag or resize while Safe Mode is active is **never** written to disk; on exit (including quitting the app straight from Safe Mode) the daily layout is restored verbatim. See [Window layout](#window-layout).
+
 **Exit & repair-verification loop**: "Exit Safe Mode" kills the safe instance (the Child handle lives in Tauri State; app quit and window destruction clean it up too, and a hard-kill of the desktop app is covered by the Windows Job Object at kernel level — no orphan process keeps 3081), then restarts the daily instance through the normal path. If the daily instance is not ready within the verification window (default 80 s, configurable in Preferences, 0 = off), the app prompts "the repair may not have succeeded" and offers a one-click **return to Safe Mode**.
 
 **Logs**: the safe instance's output streams into the Log panel and `desktop.log`, but **no** mirror file is written into `.dsh-safe` (the "empty apart from credentials" factory baseline stays intact).
@@ -365,6 +378,7 @@ DSH stdout/stderr are never hidden: they stream live to the log dialog and to bo
 - **配置路径无效 (Invalid path)** — the error names the exact path; fix it in Preferences (auto-detect usually repairs it).
 - **Closed the window but it's still running** — X hides to tray by default; use tray → Exit to quit. Change this in Preferences ("点击窗口 X 时").
 - **Tray icon doesn't reopen the window** — fixed pattern already implemented (show/unminimize/set-focus on main thread + WebView repaint nudge); if you still hit it, report with the desktop.log attached.
+- **Reset the window size/position (or the window ended up off-screen)** — close the app, then delete `%APPDATA%\com.dsh.desktop\.window-state.json`; the next launch is back to 1392×783, centered. Switching monitors normally needs none of this: on restore the plugin only applies coordinates that **intersect an attached monitor**. See [Window layout](#window-layout).
 - **Update failed** — check the npm output in the log; typically network issues or global-directory permissions (this app never requests admin). If the install succeeded but DSH misbehaves, that usually means config written by a *different* version — restore the DSH home dir backup you took before switching channels, then retry.
 - **WebView2 missing** — the NSIS/MSI installers guide you through installing the WebView2 runtime (usually preinstalled with Edge).
 

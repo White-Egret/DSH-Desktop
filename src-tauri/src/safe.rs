@@ -31,7 +31,7 @@ use crate::process::{
     port_in_use, resolve_dsh_prog, resolve_npm_for_path, run_taskkill, set_status,
     spawn_log_reader, AppState,
 };
-use crate::{detect, i18n};
+use crate::{detect, i18n, window_state};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -233,6 +233,9 @@ fn deactivate(app: &AppHandle) {
     if let Some(s) = app.try_state::<SafeState>() {
         s.active.store(false, Ordering::SeqCst);
     }
+    // 同步清掉窗口布局记忆那边的「正在安全模式」标记（闪退 / 超时停止也走这里）；
+    // 「本次会话进过安全模式」的标记不清，应用退出兜底还要用它。
+    window_state::mark_safe_mode_inactive();
 }
 
 // ---------- 路径与时间戳 ----------
@@ -640,6 +643,11 @@ fn enter_safe_blocking(app: &AppHandle) -> Result<SafeReport, String> {
     sstate.active.store(true, Ordering::SeqCst);
     set_status(app, "starting", None);
 
+    // 窗口布局记忆：冻结日常布局（快照 + 落盘）并把窗口重置为 tauri.conf.json 的
+    // 默认几何。放在 spawn 成功之后 —— 失败路径不该动用户的窗口。
+    window_state::on_enter_safe_mode(app);
+    emit_log(app, "launcher", i18n::t("log_safe_layout_frozen").to_string());
+
     let report = SafeReport {
         safe_home: safe_home.clone(),
         daily_home: daily_home.clone(),
@@ -799,6 +807,13 @@ pub async fn exit_safe_mode(app: AppHandle) -> Result<(), String> {
             emit_log(&app2, "launcher", i18n::fmt("log_taskkill_fail", &[&e]));
         }
         emit_safe_change(&app2, false, "exited", None, None);
+        // 窗口布局记忆：把日常布局写回窗口并落盘（安全模式期间的拖动/缩放到此作废）
+        emit_log(
+            &app2,
+            "launcher",
+            i18n::t("log_safe_layout_restored").to_string(),
+        );
+        window_state::on_exit_safe_mode(&app2);
         app2.state::<SafeState>().busy.store(false, Ordering::SeqCst);
 
         // 2) 等 3081 释放后再起日常实例（端口/文件交接避免竞态）

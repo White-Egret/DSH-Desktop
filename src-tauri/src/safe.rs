@@ -338,7 +338,9 @@ fn borrow_credentials(daily_home: &str, safe_home: &Path) -> (String, String) {
             i18n::fmt("safe_cred_msg_empty", &[&src.display().to_string()]),
         );
     }
-    if let Err(e) = std::fs::write(&dest, &bytes) {
+    // 原子替换（安全审查 L-6 的同款问题）：半截写出的凭据文件会让安全模式下的 DSH
+    // 直接认证失败，而这里返回的是「成功」—— 用户看到的是「凭据已就位」却用不了。
+    if let Err(e) = crate::config::write_atomic(&dest, &bytes) {
         return (
             "failed".to_string(),
             i18n::fmt("safe_cred_msg_failed", &[&e.to_string()]),

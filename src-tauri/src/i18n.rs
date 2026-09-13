@@ -172,6 +172,7 @@ pub fn t(key: &str) -> &'static str {
         "err_lang_persist_fail" => if en { "[launcher] Failed to persist the language choice: {0}" } else { "[launcher] 语言选择保存失败: {0}" },
         "setup_curl_fallback" => if en { "curl download unavailable ({0}); falling back to PowerShell..." } else { "curl 下载不可用（{0}），改用 PowerShell…" },
         "setup_no_dl_tool" => if en { "No usable download tool found" } else { "未找到可用的下载工具" },
+        "setup_dl_bad_url" => if en { "Refusing to download from an unexpected address: {0} (only https://nodejs.org/dist/ is allowed)." } else { "拒绝从非预期地址下载：{0}（只允许 https://nodejs.org/dist/）。" },
         "setup_no_curl" => if en { "curl.exe not found" } else { "未找到 curl.exe" },
         "setup_curl_fail" => if en { "curl failed: {0}" } else { "curl 执行失败: {0}" },
         "setup_net_denied" => if en { "Cannot reach the network or access was denied" } else { "无法连接网络或访问被拒绝" },

@@ -2109,14 +2109,38 @@ pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// `%SystemRoot%\System32\rundll32.exe`（拿不到 SystemRoot 时退回裸名）。
+fn rundll32_path() -> PathBuf {
+    rundll32_in(std::env::var("SystemRoot").ok().as_deref())
+}
+
+/// 纯函数版本，便于单测：`system_root` 为 `None` 或全空白 = 拿不到。
+fn rundll32_in(system_root: Option<&str>) -> PathBuf {
+    match system_root.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(root) => PathBuf::from(root).join("System32").join("rundll32.exe"),
+        None => PathBuf::from("rundll32.exe"),
+    }
+}
+
 /// 用系统默认浏览器打开链接（仅允许 http/https，用于引导页打开官网等）
+///
+/// 安全审查 L-5：原来是 `explorer <url>`。参数经 argv 直传、本来就没有 shell 注入，
+/// 但 explorer 首先是个文件管理器、其次才是协议启动器，它对含特殊字符的 URL 有自己的
+/// 解析规则；`rundll32 url.dll,FileProtocolHandler` 则明确地把参数交给 ShellExecute
+/// 的 URL 处理路径，行为可预期得多。
+///
+/// 顺带用 `rundll32_path()` 给出 **System32 的绝对路径**：CreateProcess 的搜索顺序里
+/// 「当前目录」排在系统目录之前，裸名字等于把「在启动器自己的 cwd 里放一个同名 exe」
+/// 变成一条可执行路径 —— 没有任何理由为这行代码留这个口子。
 #[tauri::command]
 pub fn open_in_browser(url: String) -> Result<(), String> {
     let u = url.trim();
     if !(u.starts_with("http://") || u.starts_with("https://")) {
         return Err(i18n::fmt("err_bad_url", &[&u.to_string()]));
     }
-    Command::new("explorer")
+    Command::new(rundll32_path())
+        .arg("url.dll,FileProtocolHandler")
+        // URL 作为**独立 argv** 传给 rundll32，不经任何字符串拼接
         .arg(u)
         .spawn()
         .map_err(|e| i18n::fmt("err_browser_open", &[&e.to_string()]))?;
@@ -2202,7 +2226,11 @@ const NODE_MSI_MAX_BYTES: u64 = 200 * 1024 * 1024;
 // - 只为算一次哈希就引入 sha2/ring 并不划算，而且要连带重新生成 Cargo.lock（需联网）；
 // - certutil / Get-FileHash 会把安全性寄托在可被 PATH 劫持的外部程序 + 本地化文本
 //   解析上（中文 Windows 的 certutil 输出行是本地化的），反而更脆。
-// 下面这份实现按 FIPS 180-4 的三个标准测试向量（""、"abc"、56 字节串）核对过。
+// 代价是「手写密码学原语」这件事本身 —— 所以它的向量测试**必须**入库（安全审查 L-4）：
+// 见本文件 tests 模块里的 sha256_fips180_4_standard_vectors / sha256_padding_boundaries
+// / sha256_output_shape。以前那句「已按 FIPS 向量核对过」只写在注释里，任何人都可能
+// 在不知情的情况下把它改坏而 CI 毫无感知；现在改坏会直接让 `cargo test --lib` 失败。
+// 改这段实现时请先跑测试，不要凭「看起来等价」下结论。
 
 /// SHA-256 轮常量（FIPS 180-4 §4.2.2：前 64 个质数立方根小数部分的前 32 位）
 const SHA_K: [u32; 64] = [
@@ -2299,9 +2327,24 @@ fn sha256_hex(data: &[u8]) -> String {
     out
 }
 
-/// 不用 rand 依赖的随机后缀：纳秒时间戳 ^ 进程 ID ^ 计数，再经 xorshift64 打散。
-/// 目的是让「攻击者猜不到我们这次的落盘路径」，而不是做密码学用途。
+/// 临时目录名的随机后缀（安全审查 L-3）。
+///
+/// 优先用**系统 CSPRNG**（Windows 走 `BCryptGenRandom`，见 `secret::fill_random`）取 8 字节。
+/// 原实现是 `纳秒 ^ pid ^ 计数` 再过一遍 xorshift64 —— 目的是防「同用户进程抢注同名目录 /
+/// 预置符号链接」，但纳秒时间戳与 pid 对同机攻击者而言是可观测或可枚举的，其实猜得动；
+/// 只是 `create_dir` 是排他创建、撞名只会让我们换个名字重试，才没被当成实际漏洞。
+///
+/// 拿不到系统随机源时退回原来那套。这不是「可以接受的降级」，而是**有明确上限的兜底**：
+/// 该环境下撞名仍然得不了手（`create_private_temp_dir` 的排他创建 + 重试才是真正的防线），
+/// 只是随机性变弱。也就是说本函数的返回值只需要「不易猜」，安全性并不建立在它上面。
 fn random_temp_suffix(counter: u32) -> String {
+    let mut bytes = [0u8; 8];
+    if crate::secret::fill_random(&mut bytes) {
+        // counter 只用来保证「同一次运行内多次重试不重名」；
+        // 与未知的随机数异或不会削弱随机性（已知量与未知量异或，结果仍是未知量）。
+        let n = u64::from_be_bytes(bytes) ^ ((counter as u64) << 1);
+        return format!("{:016x}", n);
+    }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
@@ -2611,9 +2654,14 @@ fn emit_download_progress(app: &AppHandle, done: u64, total: Option<u64>) {
 
 /// 用 curl HEAD 探测下载总大小（失败只影响百分比显示，不阻断下载）。
 /// `-sIL`：静默 + HEAD + 跟随重定向；取最后一个 content-length（重定向后的生效值）。
+/// 同样限制协议（M-3）：这次请求只是探大小，但没理由是唯一一条允许降级的请求。
 fn probe_content_length(curl: &Path, url: &str) -> Option<u64> {
     let args: Vec<String> = vec![
         "-sIL".into(),
+        "--proto".into(),
+        "=https".into(),
+        "--proto-redir".into(),
+        "=https".into(),
         "--max-time".into(),
         "20".into(),
         url.to_string(),
@@ -2631,6 +2679,37 @@ fn probe_content_length(curl: &Path, url: &str) -> Option<u64> {
     len
 }
 
+/// 下载来源守卫（安全审查 M-4 第 3 点）：只允许官方 dist 目录的 https 地址。
+///
+/// 现在所有 URL 都由 `detect.rs` 用常量前缀 + 经 `is_safe_node_version` 校验过的版本号拼出，
+/// 构造上越不了界 —— 但那是**上游的性质**，不是这两个下载函数的性质。在这里显式拒绝，
+/// 才能把「将来有人改了版本号来源（例如改成从 HTML 解析）」挡在下载动作之外，
+/// 而不是指望每个调用方都记得自己已经校验过。
+fn is_node_dist_url(url: &str) -> bool {
+    url.starts_with("https://nodejs.org/dist/")
+}
+
+/// PowerShell 单引号字符串里，字面单引号要写成两个（`''`）。
+///
+/// 这**不是**注入防线（脚本已整体 base64 化，命令行上没有待解释的字符了），
+/// 而是为了正确性：路径里的撇号（例如用户名 `O'Brien` 让 `%TEMP%` 带上单引号）
+/// 会让脚本里的单引号字符串提前闭合，PowerShell 直接报语法错、下载失败。
+fn ps_single_quote(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// 把 PowerShell 脚本编成 `-EncodedCommand` 需要的 Base64(UTF-16LE)。
+///
+/// 两个细节都是 PowerShell 的硬要求：**UTF-16 小端**（不是 UTF-8、也不是本机 ANSI 代码页），
+/// 以及标准 base64 的 `=` 填充。
+fn encode_powershell_command(script: &str) -> String {
+    let mut utf16 = Vec::with_capacity(script.len() * 2);
+    for unit in script.encode_utf16() {
+        utf16.extend_from_slice(&unit.to_le_bytes());
+    }
+    crate::secret::to_base64(&utf16)
+}
+
 /// curl 下载官方 Node.js 安装包：spawn 后轮询落盘文件大小，
 /// 通过 setup-status 事件实时回报「已下载字节 / 百分比」（约 0.4s 一次）。
 /// 返回 true 表示下载成功；失败原因写入 last_err。
@@ -2640,6 +2719,11 @@ fn try_download_curl(
     last_err: &mut String,
     app: Option<&AppHandle>,
 ) -> bool {
+    // 来源守卫放最前面：不认识的地址，连探大小都不做
+    if !is_node_dist_url(url) {
+        *last_err = i18n::fmt("setup_dl_bad_url", &[url]);
+        return false;
+    }
     let Some(curl) = detect::where_lookup("curl.exe") else {
         *last_err = i18n::t("setup_no_curl").to_string();
         return false;
@@ -2648,6 +2732,16 @@ fn try_download_curl(
 
     let args: Vec<String> = vec![
         "-fL".into(),
+        // 只允许 https，**重定向后也只允许 https**（安全审查 M-3）。
+        // curl 默认允许 HTTPS→HTTP 的降级重定向：一旦出现（代理劫持、上游改了跳转策略），
+        // 后面整段下载就走明文；而我们的完整性校验用的 SHASUMS256.txt 也是同一条信道上
+        // 取回来的，攻击者可以同时替换清单与 MSI 让比对自洽 —— 校验等于作废。
+        // 两个开关都给上，不依赖某个 curl 版本里 --proto 是否自动继承到重定向：
+        // 前者管首次请求，后者管重定向（`=https` 是「只留 https」的严格写法）。
+        "--proto".into(),
+        "=https".into(),
+        "--proto-redir".into(),
+        "=https".into(),
         "--retry".into(),
         "2".into(),
         "--connect-timeout".into(),
@@ -2718,19 +2812,44 @@ fn try_download_curl(
     }
 }
 
+/// 回退下载：用 PowerShell 的 `Invoke-WebRequest` 取官方安装包。
+///
+/// 脚本通过 `-EncodedCommand` 以 Base64(UTF-16LE) 传入（安全审查 M-4）。
+/// 原实现是 `format!` 拼一个含单引号的脚本再走 `-Command`，值里出现一个 `'`
+/// 就能提前闭合字符串 —— 当下 URL 已被 `is_safe_node_version` 限成纯数字加点、
+/// 路径是随机十六进制目录，所以不可注入，但安全性完全依赖上游白名单，属于「靠巧合」。
+/// 改成编码命令后，命令行上只剩一个不透明的 base64 串，引号 / `$` / `;` 的语义全部消失：
+/// 即便将来 URL 来源放宽（比如改成从 HTML 解析版本号），也不会变成命令注入。
 fn try_download_powershell(url: &str, dest: &Path) -> Result<(), String> {
+    // 与 curl 路径同一道来源守卫 —— 不能只有 curl 那条路受保护（M-4 第 3 点）
+    if !is_node_dist_url(url) {
+        return Err(i18n::fmt("setup_dl_bad_url", &[url]));
+    }
+    // 契约（M-4 第 2 点）：能走到这里的地址必须是「常量前缀 + 白名单版本号」拼出来的。
+    // 写成断言是为了让将来改 URL 来源的人在 `cargo test` 里就撞上，而不是在用户机上。
+    debug_assert!(
+        url.starts_with("https://nodejs.org/dist/v")
+            || url.starts_with("https://nodejs.org/dist/latest-v"),
+        "PowerShell 下载路径收到了非预期的 URL 形状：{url}"
+    );
+
     let script = format!(
         "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{}' -OutFile '{}'",
-        url,
-        dest.display()
+        ps_single_quote(url),
+        ps_single_quote(&dest.display().to_string())
     );
     let args: Vec<String> = vec![
         "-NoProfile".into(),
         "-NonInteractive".into(),
+        // 保留 `-ExecutionPolicy Bypass` 是有意的：执行策略管的是**脚本文件**（.ps1），
+        // `-EncodedCommand` 是内联命令，本来就不受它约束；而脚本内容 100% 由本函数生成、
+        // 没有任何外部输入能进入，所以这个开关不放大攻击面。反过来，去掉它却可能让回退
+        // 下载路径在某些受管策略下失败（那等于用户彻底装不上 Node），风险不对称。
+        // M-4 要修掉的是「引号拼接」，不是这个开关。
         "-ExecutionPolicy".into(),
         "Bypass".into(),
-        "-Command".into(),
-        script,
+        "-EncodedCommand".into(),
+        encode_powershell_command(&script),
     ];
     match run_cmd_capture("powershell", &args, "", Duration::from_secs(15 * 60)) {
         Ok((true, _)) => Ok(()),
@@ -3122,5 +3241,153 @@ mod tests {
         assert_eq!(extract_local_url("http://127.0.0.1"), None);
         assert_eq!(extract_local_url("http://127.0.0.1:99999"), None);
         assert_eq!(extract_local_url("no url on this line at all"), None);
+    }
+
+    // ---------- L-4：手写 SHA-256 的入库向量 ----------
+    //
+    // `sha256_hex` 的注释一直写着「按 FIPS 180-4 三个标准测试向量核对过」，但那些核对
+    // 从来没进过仓库 —— 等于任何人都可能在不知情的情况下把它改坏，而 CI 毫无感知。
+    // 这个函数守的是「下载到的 Node 安装包究竟是不是官方那一个」，一旦改坏，
+    // 完整性校验就形同虚设（比不校验更糟：它还在显示「已校验」）。所以把向量测试入库，
+    // 是允许这段手写密码学原语留在仓库里的前提条件。
+
+    /// FIPS 180-4 附录 B 的标准测试向量。
+    #[test]
+    fn sha256_fips180_4_standard_vectors() {
+        // B.1 空消息：纯粹考验初始常量与填充
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        // B.2 短消息
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        // B.3 448 位（56 字节）消息：正好卡在「补完 0x80 需要再开一个块」的边界上，
+        // 填充逻辑最容易写错的位置就是这里
+        assert_eq!(
+            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        // 官方第 3 个向量：一百万个 'a'。多块 + 大长度，顺带证明长度字段用的是**位**不是字节
+        assert_eq!(
+            sha256_hex(&vec![b'a'; 1_000_000]),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+    }
+
+    /// 填充边界的逐长度回归。FIPS 的向量只落在 0 / 3 / 56 / 1000000 字节上，
+    /// 而填充 bug 恰恰爱藏在 55↔56（补 0x80 后是否要开新块）与 63/64/65（块边界）附近。
+    /// 期望值由 Python `hashlib.sha256` 独立生成 —— 与这份手写实现没有共同来源，
+    /// 所以能真正起到互证作用，而不是「用自己校验自己」。
+    #[test]
+    fn sha256_padding_boundaries() {
+        for (len, want) in [
+            (1usize, "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"),
+            (55, "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"),
+            (56, "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a"),
+            (57, "f13b2d724659eb3bf47f2dd6af1accc87b81f09f59f2b75e5c0bed6589dfe8c6"),
+            (63, "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34"),
+            (64, "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"),
+            (65, "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0"),
+            (119, "31eba51c313a5c08226adf18d4a359cfdfd8d2e816b13f4af952f7ea6584dcfb"),
+            (120, "2f3d335432c70b580af0e8e1b3674a7c020d683aa5f73aaaedfdc55af904c21c"),
+            (128, "6836cf13bac400e9105071cd6af47084dfacad4e5e302c94bfed24e013afb73e"),
+        ] {
+            assert_eq!(sha256_hex(&vec![b'a'; len]), want, "{len} 字节");
+        }
+    }
+
+    /// 输出形态：64 位**小写**十六进制。下游是纯文本比对（`SHASUMS256.txt` 里就是小写），
+    /// 谁把它改成大写、加前缀或换成带分隔符的写法，校验会**全部**失败 —— 这类退化必须有测试兜着。
+    #[test]
+    fn sha256_output_shape() {
+        let h = sha256_hex(b"abc");
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+        assert_eq!(h, h.to_ascii_lowercase());
+    }
+
+    // ---------- M-4：下载来源守卫与 PowerShell 命令编码 ----------
+
+    #[test]
+    fn node_dist_url_guard_accepts_only_official_dist() {
+        assert!(is_node_dist_url("https://nodejs.org/dist/v22.23.2/node-v22.23.2-x64.msi"));
+        assert!(is_node_dist_url("https://nodejs.org/dist/v22.23.2/SHASUMS256.txt"));
+        assert!(is_node_dist_url("https://nodejs.org/dist/latest-v22/SHASUMS256.txt"));
+        // 协议降级
+        assert!(!is_node_dist_url("http://nodejs.org/dist/v22.23.2/SHASUMS256.txt"));
+        // 前缀伪装 / 换个主机
+        assert!(!is_node_dist_url("https://nodejs.org.evil.example/dist/SHASUMS256.txt"));
+        assert!(!is_node_dist_url("https://evil.example/nodejs.org/dist/x"));
+        assert!(!is_node_dist_url("https://nodejs.org/download/x"));
+        // scheme/host 在 URL 语义上不区分大小写，但这里刻意只认规范写法：
+        // 所有地址都由 detect.rs 用同一个常量前缀拼出，出现变体就说明有人绕过了构造路径
+        assert!(!is_node_dist_url("HTTPS://nodejs.org/dist/x"));
+        assert!(!is_node_dist_url(""));
+    }
+
+    #[test]
+    fn powershell_command_encoding_is_base64_utf16le() {
+        // 空脚本 → 空 base64（编码器自身的边界）
+        assert_eq!(encode_powershell_command(""), "");
+        // UTF-16LE 是「每个 ASCII 字符后跟一个 0x00」，用最短样本把这条钉死；
+        // 若有人误改成 UTF-8 或本机 ANSI 代码页，PowerShell 会直接报错退出
+        assert_eq!(encode_powershell_command("A"), "QQA=");
+        assert_eq!(encode_powershell_command("AB"), "QQBCAA==");
+        assert_eq!(encode_powershell_command("ABC"), "QQBCAEMA");
+        // 非 ASCII 必须按 UTF-16 码元走（'中' = 0x4E2D → 小端字节 2D 4E）
+        assert_eq!(encode_powershell_command("中"), "LU4=");
+        assert_eq!(
+            encode_powershell_command("Hello, 世界"),
+            "SABlAGwAbABvACwAIAAWTkx1"
+        );
+        // 编码结果必须是合法 base64（长度 4 的倍数 + 受限字符集），否则 PowerShell 直接拒绝
+        for s in ["", "a", "ab", "abc", "abcd", "Hello, 世界", "$x = 'y'; 'z'"] {
+            let e = encode_powershell_command(s);
+            assert_eq!(e.len() % 4, 0, "{s:?}");
+            assert!(e
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+        }
+        // 这正是 M-4 要的效果：命令行上只剩不透明的 base64，
+        // 引号 / `$` / `;` / 反引号一个都不剩，也就没东西可供「逃逸」。
+        let dangerous = encode_powershell_command("$ProgressPreference='SilentlyContinue'; `rm` 'x'");
+        for c in ['\'', '$', ';', '`', '"'] {
+            assert!(!dangerous.contains(c), "编码结果里不该出现 {c:?}");
+        }
+    }
+
+    #[test]
+    fn ps_single_quote_doubles_quotes() {
+        assert_eq!(ps_single_quote("plain"), "plain");
+        assert_eq!(ps_single_quote("O'Brien"), "O''Brien");
+        assert_eq!(ps_single_quote("a''b"), "a''''b");
+        assert_eq!(ps_single_quote(""), "");
+        // 这个函数不幂等，且**不该**幂等：再跑一次会继续翻倍。
+        // 把语义（一次替换 = 一次转义）钉在这里，防止有人误加「防重复」分支。
+        assert_eq!(ps_single_quote(ps_single_quote("'")), "''''");
+    }
+
+    // ---------- L-5：用系统浏览器打开链接 ----------
+
+    #[test]
+    fn rundll32_path_prefers_system32() {
+        // 有 SystemRoot 就用绝对路径：CreateProcess 会先搜「当前目录」，
+        // 裸名等于允许被启动器 cwd 里的同名 exe 顶替
+        assert_eq!(
+            rundll32_in(Some(r"C:\Windows")),
+            PathBuf::from(r"C:\Windows\System32\rundll32.exe")
+        );
+        // 环境变量两边带空白（真的会有人这么设）
+        assert_eq!(
+            rundll32_in(Some("  C:\\Windows  ")),
+            PathBuf::from(r"C:\Windows\System32\rundll32.exe")
+        );
+        // 拿不到 / 空白 → 退回裸名，交给 CreateProcess 自己找
+        assert_eq!(rundll32_in(None), PathBuf::from("rundll32.exe"));
+        assert_eq!(rundll32_in(Some("")), PathBuf::from("rundll32.exe"));
+        assert_eq!(rundll32_in(Some("   ")), PathBuf::from("rundll32.exe"));
     }
 }

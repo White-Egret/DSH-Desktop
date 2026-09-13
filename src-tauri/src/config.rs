@@ -388,7 +388,8 @@ fn sync_dsh_setting(home_dir: &str, block: &str, pref: &str) -> Result<(), Strin
     if !text.ends_with('\n') {
         text.push('\n');
     }
-    std::fs::write(&path, text).map_err(|e| format!("{}: {}", path.display(), e))?;
+    // 原子替换（L-6）：settings.yaml 是 DSH 自己在读的文件，半截内容会被它读进去
+    write_atomic(&path, text.as_bytes()).map_err(|e| format!("{}: {}", path.display(), e))?;
     Ok(())
 }
 
@@ -547,6 +548,84 @@ pub fn load(app: &AppHandle) -> Config {
     cfg
 }
 
+// ---------- 原子写盘（安全审查 L-6） ----------
+//
+// 这些文件以前一律用 `fs::write` 直接覆盖，而它是「打开 + 截断 + 写入」三步：
+// 崩溃 / 断电 / 被杀进程恰好发生在这中间时，磁盘上留下的是**半截**文件。
+// 加载侧对 config.json 用的是 `serde_json::from_str(...).unwrap_or_default()`，
+// 读到半截 JSON 就静默回落默认值 —— 用户一次崩溃就换来「所有设置被抹掉」
+// （不构成提权，但属于会真实发生的数据丢失）；settings.yaml 那侧更麻烦，
+// 因为我们只做「最小行编辑」，半截 YAML 会被 DSH 自己读进去。
+
+/// 同一进程内保证每次调用用的临时文件名都不同（跨进程靠 pid 区分）。
+static TMP_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// 临时文件路径：与目标**同目录**（`rename` 的原子性要求），名字带 pid 与进程内序号。
+fn tmp_path_for(path: &std::path::Path, pid: u32, seq: u32) -> PathBuf {
+    let stem = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "config".to_string());
+    path.with_file_name(format!("{}.tmp-{}-{}", stem, pid, seq))
+}
+
+/// 原子写盘：写同目录临时文件 → fsync → `rename` 覆盖目标。
+///
+/// 三个细节都是必要的：
+/// - 临时文件必须与目标**同目录**：`rename` 只在同卷内是原子替换（`std::fs::rename`
+///   跨卷时直接报错），放到 `%TEMP%` 就完全失去意义了；
+/// - 用 `create_new` 而不是 `create`：目标名已存在时（可能是别人预置的符号链接）**失败**，
+///   绝不顺着链接写到别处去；
+/// - 先 `sync_all` 再 `rename`：否则崩溃后可能出现「目录项已指向新文件、内容还在缓存里」。
+///
+/// Windows 上 `std::fs::rename` 走 `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`，
+/// 对已存在的目标是覆盖式替换；POSIX `rename(2)` 语义相同。
+///
+/// 注意（留给 Linux 移植）：`rename` 会换掉 inode，目标原有的权限位不会自动继承，
+/// 新文件拿到的是默认模式。当前调用点写的都不是敏感内容、且 Windows 下权限由目录 ACL
+/// 决定，所以无影响；将来若在 Unix 上写需要 0600 的文件，要先 set_permissions 再 rename。
+pub(crate) fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = tmp_path_for(path, std::process::id(), seq);
+
+    // 连临时文件都建不起来时，目标文件一个字节都没动 —— 正是我们要的失败语义
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    let mut failed = f.write_all(contents).err();
+    if failed.is_none() {
+        failed = f.sync_all().err();
+    }
+    drop(f);
+    if let Some(e) = failed {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // `rename` 可能被杀毒软件 / 备份/同步工具短暂占住目标文件而失败：它们打开文件时
+    // 不带 FILE_SHARE_DELETE，而 MoveFileEx 需要目标文件的 DELETE 权限。这类占用通常
+    // 只持续几毫秒，而「保存设置失败」是个用户很难自解释的错误 —— 所以做几次有界重试。
+    // 重试仍失败就如实报错，**绝不退化成「直接覆盖写」**那条非原子路径。
+    let mut attempts_left = 3u32;
+    loop {
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                attempts_left -= 1;
+                if attempts_left == 0 {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
+        }
+    }
+}
+
 /// 把 ≤1.2.5 留在 config.json 里的明文 `last_url` 迁移成 DPAPI 密文 `last_url_enc`
 /// （读取-修改-写回，只动这两个键，其它字段原样保留）。
 /// 返回 true = 盘上已处理完（明文键已消失）；false = 加密不可用或文件异常，什么都没动。
@@ -559,7 +638,7 @@ fn migrate_plaintext_last_url(app: &AppHandle, url: &str) -> bool {
     obj.insert("last_url_enc".to_string(), serde_json::Value::String(hex));
     obj.remove("last_url");
     let Ok(text) = serde_json::to_string_pretty(&root) else { return false };
-    std::fs::write(&path, text).is_ok()
+    write_atomic(&path, text.as_bytes()).is_ok()
 }
 
 pub fn save(app: &AppHandle, cfg: &Config) -> Result<(), String> {
@@ -569,7 +648,8 @@ pub fn save(app: &AppHandle, cfg: &Config) -> Result<(), String> {
     })?;
     let path = config_path(app);
     let s = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    std::fs::write(&path, s).map_err(|e| {
+    // 原子替换（L-6）：写坏一次就等于把用户的全部设置抹成默认值
+    write_atomic(&path, s.as_bytes()).map_err(|e| {
         i18n::fmt("err_cfg_write", &[&path.display().to_string(), &e.to_string()])
     })?;
     // config.json 一旦存在，语言以其中的 language 字段为准，sidecar 完成使命
@@ -616,7 +696,7 @@ pub fn set_last_url(app: &AppHandle, url: &str) {
     // ≤1.2.5 留下的明文键：顺手删掉（只删这一个键，其它字段原样保留）
     obj.remove("last_url");
     if let Ok(text) = serde_json::to_string_pretty(&root) {
-        let _ = std::fs::write(&path, text);
+        let _ = write_atomic(&path, text.as_bytes());
     }
 }
 
@@ -663,7 +743,7 @@ pub fn remember_node_min_ack(app: &AppHandle, min_version: &str) -> Result<(), S
     }
     root["node_min_ack"] = serde_json::Value::String(min_version.trim().to_string());
     let text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text)
+    write_atomic(&path, text.as_bytes())
         .map_err(|e| i18n::fmt("err_cfg_write", &[&path.display().to_string(), &e.to_string()]))
 }
 
@@ -681,7 +761,7 @@ pub fn set_ui_language_override(app: &AppHandle, lang: &str) -> Result<(), Strin
     let dir = config_dir(app);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let value = if lang.eq_ignore_ascii_case("en") { "en" } else { "zh" };
-    std::fs::write(ui_language_sidecar_path(app), value).map_err(|e| e.to_string())
+    write_atomic(&ui_language_sidecar_path(app), value.as_bytes()).map_err(|e| e.to_string())
 }
 
 /// 读取 sidecar；内容非法（被手改）时忽略，回落默认 zh。
@@ -694,5 +774,108 @@ fn read_ui_language_override(app: &AppHandle) -> Option<String> {
         Some("zh".to_string())
     } else {
         None
+    }
+}
+
+// ---------- 原子写盘的离线回归（安全审查 L-6） ----------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::Ordering;
+
+    /// 下面有两个用例要「预测 `TMP_SEQ` 的下一个值」来制造临时名碰撞，而
+    /// `cargo test` 默认多线程跑同一个二进制里的用例 —— 并行会让预测失效。
+    /// 用一个全局锁把它们串起来（锁被 panic 毒化时直接复用内部值，不让它再传染）。
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn bytes(s: &str) -> Vec<u8> {
+        s.as_bytes().to_vec()
+    }
+
+    /// 独占创建一个测试用临时目录。**不用 `create_dir_all`**：名字撞上就直接失败，
+    /// 不顺着已有目录往下写（与 `write_atomic` 用 `create_new` 是同一个思路）。
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "dsh-config-test-{}-{}-{}",
+            tag,
+            std::process::id(),
+            seq
+        ));
+        std::fs::create_dir(&dir).expect("创建测试临时目录失败");
+        dir
+    }
+
+    #[test]
+    fn tmp_path_for_stays_in_target_dir() {
+        let _g = lock();
+        let target = Path::new(r"C:\Users\me\AppData\Roaming\com.dsh.desktop\config.json");
+        let tmp = tmp_path_for(target, 4321, 7);
+
+        // 必须与目标**同目录**：`rename` 只在同卷内原子替换，丢到 %TEMP% 就白做了
+        assert_eq!(tmp.parent(), target.parent());
+        assert_eq!(
+            tmp.file_name().unwrap().to_string_lossy(),
+            "config.json.tmp-4321-7"
+        );
+        // 临时名 ≠ 目标名 —— 否则「先写临时文件」就退化成「直接覆盖目标」了
+        assert_ne!(tmp, target.to_path_buf());
+    }
+
+    #[test]
+    fn write_atomic_creates_and_truncates() {
+        let _g = lock();
+        let dir = scratch_dir("replace");
+        let target = dir.join("config.json");
+
+        write_atomic(&target, &bytes(r#"{"port":3080}"#)).expect("首次写入");
+        assert_eq!(std::fs::read(&target).unwrap(), bytes(r#"{"port":3080}"#));
+
+        // 关键：第二次内容**更短**，必须把旧内容截断干净。
+        // `fs::write` 也能截断，但它是「打开 + 截断 + 写入」三步，崩在中间就是半截
+        // JSON（加载侧 `unwrap_or_default()` 会静默回落默认值 = 设置被抹掉）。
+        // 这里用「内容恰好相等」顺带挡住「追加写」这类退步。
+        write_atomic(&target, &bytes("{}")).expect("覆盖写入");
+        assert_eq!(std::fs::read(&target).unwrap(), bytes("{}"));
+
+        // 目录里只该剩下目标文件：临时文件必须已经被 rename 走（失败时则被清理掉）
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["config.json".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_atomic_refuses_preexisting_temp_name() {
+        let _g = lock();
+        let dir = scratch_dir("create_new");
+        let target = dir.join("settings.yaml");
+
+        // 预置一个「与即将使用的临时名完全相同」的文件：`write_atomic` 必须以
+        // `create_new` 失败收场，而不是顺着这个已存在的文件（可能是别人放的符号链接）
+        // 把内容写到别处去。
+        let seq = TMP_SEQ.load(Ordering::Relaxed);
+        let colliding = tmp_path_for(&target, std::process::id(), seq);
+        std::fs::write(&colliding, b"attacker").unwrap();
+
+        assert!(
+            write_atomic(&target, &bytes("port: 3080\n")).is_err(),
+            "临时名已存在时必须失败"
+        );
+        // 预置文件一个字节都没被动过，目标文件也不该被建出来
+        assert_eq!(std::fs::read(&colliding).unwrap(), bytes("attacker"));
+        assert!(!target.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -14,6 +14,14 @@
 //!    和日志面板之前统一换成 `***` —— 只加密配置文件而放任日志明文，等于没修
 //!    （核查确认 1.2.5 的 token 同时散落在两个日志文件与界面日志里）。
 //!
+//! 另外收着三个「别的修复用得上、但都不值得单独开一个模块」的小原语 —— 它们的共同点是
+//! **需要 FFI 或手写编码，而本仓库刻意不为这些能力引第三方依赖**（见 `sha256_hex` 的
+//! 同类说明），集中在这里可以让全部 `extern` 声明不出同一个文件：
+//! - `to_base64`：标准 base64，供 M-4 把 PowerShell 脚本编成 `-EncodedCommand`；
+//! - `to_hex` / `from_hex`：DPAPI 密文与磁盘文本之间的编码；
+//! - `fill_random`：系统 CSPRNG（Windows `BCryptGenRandom` / 非 Windows `/dev/urandom`），
+//!   供 L-3 生成不可预测的临时目录名。
+//!
 //! ## 边界（如实写进了 README，不要当成万能锁）
 //! - DPAPI 的保护范围是 **Windows 用户账户**：跨用户、离线拷走文件、备份/同步目录、
 //!   截图与支持包都拿不到明文；但**同用户下运行的其他进程仍能解开**（熵是我们自己传的
@@ -45,7 +53,8 @@ mod imp {
     ///
     /// 这里按官方头文件的内存布局自己声明，而不是启用 `windows-sys` 的
     /// `Win32_Security_Cryptography` feature：少一个只在 CI 上才可能暴露写错的
-    /// feature 开关，FFI 面也缩到最小（两个函数 + 一个 LocalFree）。
+    /// feature 开关，FFI 面也缩到最小（本文件一共只声明 4 个 Win32 函数：
+    /// 两个 DPAPI + 一个 LocalFree + 一个 BCryptGenRandom）。
     /// `repr(C)` 与 Win32 头文件一致：`u32` 后跟 8 字节对齐的指针，结构体大小 16 字节。
     #[repr(C)]
     struct Blob {
@@ -82,6 +91,21 @@ mod imp {
     extern "system" {
         fn LocalFree(h_mem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
     }
+
+    // 系统 CSPRNG（bcrypt.dll）。用 `BCRYPT_USE_SYSTEM_PREFERRED_RNG` 时 hAlgorithm 必须是 NULL。
+    // 与上面两处同样：extern 块不接受文档注释，所以这里用普通注释。
+    #[link(name = "bcrypt")]
+    extern "system" {
+        fn BCryptGenRandom(
+            h_algorithm: *mut core::ffi::c_void,
+            pb_buffer: *mut u8,
+            cb_buffer: u32,
+            dw_flags: u32,
+        ) -> i32;
+    }
+
+    /// `BCRYPT_USE_SYSTEM_PREFERRED_RNG` = 2：让系统挑它的首选 RNG，不必自己开算法句柄。
+    const USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
 
     /// `CRYPTPROTECT_UI_FORBIDDEN` = 1：绝不弹交互式 UI。
     /// 我们是在后台线程（日志读取线程 / 启动流程）里调用的，任何弹窗都等于把界面卡死。
@@ -166,6 +190,26 @@ mod imp {
             take_output(out)
         }
     }
+
+    /// 用系统 CSPRNG 填充 `buf`。返回 false = 拿不到系统随机源（见外层 [`super::fill_random`]）。
+    pub fn fill_random(buf: &mut [u8]) -> bool {
+        if buf.is_empty() {
+            return true;
+        }
+        // 单次请求超过 u32::MAX 字节是不存在的调用方；直接判失败而不是截断
+        if buf.len() > u32::MAX as usize {
+            return false;
+        }
+        unsafe {
+            // NTSTATUS 的 STATUS_SUCCESS 就是 0
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                USE_SYSTEM_PREFERRED_RNG,
+            ) == 0
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -182,6 +226,19 @@ mod imp {
 
     pub fn unprotect(_blob: &[u8]) -> Option<Vec<u8>> {
         None
+    }
+
+    /// 非 Windows：读 `/dev/urandom`（唯一一处能拿到系统熵且不引依赖的途径）。
+    /// 读不到就返回 false —— 让调用方自己决定兜底，而不是在这里假装成功。
+    pub fn fill_random(buf: &mut [u8]) -> bool {
+        use std::io::Read;
+        if buf.is_empty() {
+            return true;
+        }
+        match std::fs::File::open("/dev/urandom") {
+            Ok(mut f) => f.read_exact(buf).is_ok(),
+            Err(_) => false,
+        }
     }
 }
 
@@ -237,6 +294,45 @@ pub fn from_hex(s: &str) -> Option<Vec<u8>> {
         i += 2;
     }
     Some(out)
+}
+
+/// 标准 base64 编码（RFC 4648 §4，带 `=` 填充）。
+///
+/// 目前唯一的用途是把 PowerShell 脚本编成 `-EncodedCommand` 要求的
+/// Base64(UTF-16LE)（安全审查 M-4）：脚本一旦变成不透明的 base64，
+/// 命令行里就不再有引号、`$`、`;` 等等待解释的字符，拼接语义彻底消失。
+/// 和 `to_hex` 一样手写，不引第三方依赖。
+pub fn to_base64(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (chunk[0] as u32) << 16
+            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
+            | (*chunk.get(2).unwrap_or(&0) as u32);
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        // 不足 3 字节的尾组：缺的那几组填 `=`
+        out.push(if chunk.len() > 1 {
+            T[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// 用操作系统 CSPRNG 填充缓冲区。`false` = 本机拿不到系统随机源。
+///
+/// 用途是「让攻击者猜不到我们这一次的落盘路径」（安全审查 L-3），不是生成密钥；
+/// 即便这样也只认系统 CSPRNG —— 拿不到就如实返回 false，绝不在这里悄悄退化成
+/// 时间戳之类的可预测来源。兜底策略由调用方决定（见 `process.rs::random_temp_suffix`）。
+pub fn fill_random(buf: &mut [u8]) -> bool {
+    imp::fill_random(buf)
 }
 
 /// 把文本里所有 `token=<值>` 的值替换成 `***`（键名保留）。
@@ -379,6 +475,49 @@ mod tests {
         assert!(from_hex("zz").is_none());
         assert!(from_hex("").is_none());
         assert!(from_hex("0g").is_none());
+    }
+
+    #[test]
+    fn base64_matches_rfc4648_vectors() {
+        // RFC 4648 §10 的规范向量，三种尾部对齐各覆盖到（无填充 / 一个 `=` / 两个 `=`）
+        for (raw, want) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(to_base64(raw.as_bytes()), want, "base64({raw:?})");
+        }
+        // 高位字节：必须按**字节**编码，不能当成 UTF-8 字符（0x80/0xff 不是合法 UTF-8 起点）
+        assert_eq!(to_base64(&[0x00, 0x01, 0x7f, 0x80, 0xff]), "AAF/gP8=");
+        // 长度恒为 4 的倍数，字符集受限 —— 这两条是 PowerShell `-EncodedCommand` 的前提
+        for len in 0..32usize {
+            let s = to_base64(&vec![0xa5u8; len]);
+            assert_eq!(s.len() % 4, 0, "len={len}");
+            assert!(s
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+        }
+    }
+
+    /// 系统 CSPRNG。CI（Windows）走 `BCryptGenRandom`。
+    /// 拿不到随机源的极端环境（受限服务账户 / 沙箱）不算代码问题 —— 与 DPAPI 那条同样跳过。
+    #[test]
+    fn fill_random_returns_bytes() {
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        if !fill_random(&mut a) || !fill_random(&mut b) {
+            eprintln!("本环境拿不到系统 CSPRNG，跳过随机性断言");
+            return;
+        }
+        // 这才是真正的断言：2^-256 的碰撞概率下「两次相同」只可能是实现坏了，不是运气
+        assert_ne!(a, b, "两次取随机数返回了同一串");
+        // 空缓冲区应当直接成功（显式绑定而不是 `&mut []`，免得元素类型要靠推断）
+        let mut empty: [u8; 0] = [];
+        assert!(fill_random(&mut empty), "空缓冲区应当直接成功");
     }
 
     #[test]

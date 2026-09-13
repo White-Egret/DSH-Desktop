@@ -82,6 +82,12 @@ pub struct AppState {
     last_stderr: Mutex<Option<String>>,
     /// 从 DSH 输出中解析出的实际监听地址 (url, port)；就绪后优先按它加载页面
     pub detected_url: Mutex<Option<(String, u16)>>,
+    /// 最近一次真正交给内嵌 webview 的地址（可能带 `?token=...`）。
+    /// 只在内存里：进程退出即忘，落盘的那份是 DPAPI 密文（config::set_last_url）。
+    /// 用途是「同一个地址的日志行反复出现时不要反复重导航」，见 spawn_log_reader。
+    /// 这里刻意不拿磁盘记录来比对：磁盘那份要解密、还可能因换用户/加密不可用而读不到，
+    /// 一个只在内存里的字符串才是「刚才是谁加载的」这个问题的可靠答案。
+    last_loaded_url: Mutex<String>,
     /// 首次运行引导安装互斥标志（同一时间只允许一个引导任务）
     pub setup_busy: AtomicBool,
     /// 当前进程是否由「开机自启」触发（main.rs 检测 --autostart 参数后置 true）。
@@ -766,9 +772,10 @@ pub fn sync_dsh_webview_size(app: &AppHandle) {
     }
 }
 
-/// 取上次记录的 DSH 页面地址，仅当形状合法且端口与给定端口一致时才返回。
+/// 取上次记录的 DSH 页面地址（含会话令牌），仅当形状合法且端口与给定端口一致时才返回。
 /// 形状：`http://127.0.0.1:<port>` 或 `http://localhost:<port>`（可带路径/查询串）。
-/// 被手改、损坏或指向别的端口的记录一律忽略，调用方回退到按配置端口构造的裸地址。
+/// 被手改、损坏、解不开（换了 Windows 用户或机器）或指向别的端口一律忽略，调用方回退到
+/// 按配置端口构造的裸地址 —— 那时多走一次认证，但绝不会加载一个来路不明的地址。
 fn remembered_url_for(app: &AppHandle, port: u16) -> Option<String> {
     let raw = config::last_url(app);
     let trimmed = raw.trim();

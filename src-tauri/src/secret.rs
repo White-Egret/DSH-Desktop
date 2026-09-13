@@ -75,8 +75,9 @@ mod imp {
         ) -> i32;
     }
 
-    /// 输出缓冲区由 DPAPI 用 `LocalAlloc` 分配，必须用 `LocalFree` 归还（kernel32）。
-    /// 忘了归还 = 每次加载页面泄漏一块内存。
+    // 输出缓冲区由 DPAPI 用 `LocalAlloc` 分配，必须用 `LocalFree` 归还（kernel32）。
+    // 忘了归还 = 每次加载页面泄漏一块内存。
+    // （extern 块不接受文档注释，这里用普通注释，否则触发 unused_doc_comments 告警）
     #[link(name = "kernel32")]
     extern "system" {
         fn LocalFree(h_mem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;

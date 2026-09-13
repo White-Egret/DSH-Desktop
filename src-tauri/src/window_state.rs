@@ -344,8 +344,11 @@ mod tests {
         // 装饰与全屏跟随 tauri.conf.json，不由历史状态改写
         assert!(!TRACKED_FLAGS.contains(StateFlags::DECORATIONS));
         assert!(!TRACKED_FLAGS.contains(StateFlags::FULLSCREEN));
-        // 默认的 StateFlags::default() 是 all，这里必须是显式的子集
-        assert_ne!(TRACKED_FLAGS, StateFlags::all());
+        // 默认的 StateFlags::default() 是 all，这里必须是显式的子集。
+        // 注意：bitflags 2 生成的类型**不实现 PartialEq**（插件只 derive 了 Clone/Copy/Debug），
+        // 所以不能对 StateFlags 直接用 == / != / assert_eq! / assert_ne!，
+        // 只能比 `.bits()` 这个底层 u32；`contains` 不受影响，可以照用。
+        assert_ne!(TRACKED_FLAGS.bits(), StateFlags::all().bits());
     }
 
     /// 默认几何的来源是 tauri.conf.json，而不是代码里的常量。

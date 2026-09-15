@@ -9,7 +9,18 @@
   <title>DSH Desktop</title>
 </head>
 <body>
+  <!-- 自动隐藏模式的两个辅助层（只在 body.tb-auto 时显示，见 style.css）：
+       #tb-band    = 工具栏滑出/收回动画期间露出的「工具栏面」，颜色与工具栏一致，
+                     避免 0.25 秒里闪出一条页面底色；收起到位后被 DSH 页面盖住。
+       #tb-hotzone = 那条 8px 透明触发条，鼠标进入即展开工具栏。
+       注意：自动隐藏生效时 DSH 页面是铺满整窗的原生子 webview，会盖住这条触发条，
+       那时「鼠标回到顶部」由外壳读光标位置兜底（见 main.js startToolbarProbe）。 -->
+  <div id="tb-band"></div>
+  <div id="tb-hotzone"></div>
+
   <!-- 顶部工具栏（高度 43.2px，与 Rust 端 TOOLBAR_H 常量一致，DSH 页面内嵌在此栏下方）。
+       固定显示模式下它就是文档流的第一行；自动隐藏模式下由 body.tb-auto 接管成
+       悬浮层（脱离文档流 + translateY 动画），此时内嵌页面的位置由 Rust 侧同步。
        静态文案通过 data-i18n 由 i18n.js 按设置语言渲染（默认中文）。 -->
   <header id="toolbar">
     <div class="tb-left">
@@ -165,6 +176,13 @@
             <input id="set-safe-verify" type="number" min="0" max="3600" />
           </label>
         </div>
+        <!-- 工具栏显示模式：勾选 = 自动隐藏（鼠标到窗口顶部滑出、移开约半秒收起）。
+             只对日常模式生效 —— 安全模式下强制固定显示，选择会保留但当场禁用（见 main.js）。
+             没有挂 data-i18n 的动态文案，只有这一行静态说明。 -->
+        <label class="field field-switch">
+          <span data-i18n="lbl_toolbar_auto">自动隐藏工具栏（鼠标移到窗口顶部时滑出，移开后约半秒收起；快捷键 Ctrl+Shift+H 可随时切换；安全模式下始终固定显示，不可更改）</span>
+          <input type="checkbox" id="set-toolbar-auto" />
+        </label>
         <label class="field field-switch">
           <span data-i18n="lbl_autostart">开机自动启动（系统登录后静默拉起，可在托盘恢复窗口；首启先延迟 12 秒错开冷启动高峰）</span>
           <input type="checkbox" id="set-autostart" />

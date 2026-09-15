@@ -75,6 +75,11 @@
     opt_lang_zh: '中文', opt_lang_en: 'English',
     lbl_appearance: '外观（保存后立即生效，桌面与 DSH 页面同步切换）',
     opt_app_light: '浅色', opt_app_dark: '深色', opt_app_system: '跟随系统',
+    // 工具栏显示模式（固定显示 / 自动隐藏；自动隐藏只对日常模式生效）
+    lbl_toolbar_auto: '自动隐藏工具栏（鼠标移到窗口顶部时滑出，移开后约半秒收起；快捷键 Ctrl+Shift+H 可随时切换；安全模式下始终固定显示，不可更改）',
+    toast_toolbar_auto_on: '工具栏已切换为「自动隐藏」：鼠标移到窗口顶部即滑出',
+    toast_toolbar_auto_off: '工具栏已切换为「固定显示」：始终可见',
+    toast_toolbar_safe_locked: '安全模式下工具栏固定显示，无法切换',
     lbl_extra: '附加启动参数（追加在 dsh web --port N --no-open 之后，可留空）',
     ph_extra: '例如: --trusted-host example.com',
     lbl_pkg_name: 'DSH 的 npm 包名（用于查询 dist-tags 与拼装更新命令）',
@@ -320,6 +325,11 @@
     opt_lang_zh: '中文', opt_lang_en: 'English',
     lbl_appearance: 'Appearance (applies immediately; Desktop and the DSH page switch together)',
     opt_app_light: 'Light', opt_app_dark: 'Dark', opt_app_system: 'Follow system',
+    // Toolbar display mode (pinned / auto-hide; auto-hide only applies to daily mode)
+    lbl_toolbar_auto: 'Auto-hide the toolbar (slides down when the cursor reaches the top edge and slides back about half a second after the cursor leaves; Ctrl+Shift+H toggles it anytime; always pinned in Safe Mode)',
+    toast_toolbar_auto_on: 'Toolbar switched to "auto-hide": move the cursor to the top edge to reveal it',
+    toast_toolbar_auto_off: 'Toolbar switched to "pinned": always visible',
+    toast_toolbar_safe_locked: 'The toolbar stays pinned in Safe Mode',
     lbl_extra: 'Extra launch args (appended after dsh web --port N --no-open; may be empty)',
     ph_extra: 'e.g. --trusted-host example.com',
     lbl_pkg_name: 'DSH npm package name (used for dist-tags queries and the update command)',

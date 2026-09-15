@@ -58,6 +58,11 @@ pub fn run(launched_by_autostart: bool) {
             process::restart_dsh,
             process::connect_existing,
             process::set_dsh_webview_visible,
+            // 工具栏模式（固定显示 / 自动隐藏）：收起状态由前端上报，光标探测兜底
+            // 「鼠标回到窗口顶部」这件事（收起时触发条被原生子 webview 盖住）
+            process::set_toolbar_hidden,
+            process::probe_toolbar_hotzone,
+            process::set_toolbar_mode,
             process::refresh_dsh_page,
             process::check_versions,
             process::update_dsh,

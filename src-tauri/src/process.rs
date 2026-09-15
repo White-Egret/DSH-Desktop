@@ -88,6 +88,10 @@ pub struct AppState {
     /// 这里刻意不拿磁盘记录来比对：磁盘那份要解密、还可能因换用户/加密不可用而读不到，
     /// 一个只在内存里的字符串才是「刚才是谁加载的」这个问题的可靠答案。
     last_loaded_url: Mutex<String>,
+    /// 自动隐藏模式下工具栏当前是否「收起」（true = 收起，内嵌 DSH 页面顶到 y=0 铺满整窗）。
+    /// 这是**运行时**状态而非配置（配置里存的是 toolbar_mode 偏好）：由前端
+    /// set_toolbar_hidden 命令驱动，安全模式激活时恒为 false —— 见 content_offset_for。
+    pub toolbar_hidden: AtomicBool,
     /// 首次运行引导安装互斥标志（同一时间只允许一个引导任务）
     pub setup_busy: AtomicBool,
     /// 当前进程是否由「开机自启」触发（main.rs 检测 --autostart 参数后置 true）。
@@ -113,6 +117,7 @@ impl AppState {
             last_stderr: Mutex::new(None),
             detected_url: Mutex::new(None),
             last_loaded_url: Mutex::new(String::new()),
+            toolbar_hidden: AtomicBool::new(false),
             setup_busy: AtomicBool::new(false),
             launched_by_autostart: AtomicBool::new(launched_by_autostart),
             #[cfg(windows)]
@@ -165,6 +170,17 @@ impl AppState {
     /// 读最近一次交给 webview 的地址；没有则空串
     pub(crate) fn last_loaded_url(&self) -> String {
         self.last_loaded_url.lock().unwrap().clone()
+    }
+
+    /// 自动隐藏模式下工具栏是否处于「收起」状态（见字段注释）
+    pub(crate) fn toolbar_hidden(&self) -> bool {
+        self.toolbar_hidden.load(Ordering::SeqCst)
+    }
+
+    /// 写入「收起」状态（返回写入后的值，便于调用方把实际生效结果回报给前端）
+    pub(crate) fn set_toolbar_hidden(&self, hidden: bool) -> bool {
+        self.toolbar_hidden.store(hidden, Ordering::SeqCst);
+        hidden
     }
 }
 
@@ -671,15 +687,59 @@ fn run_cmd_capture(
 
 // ---------- DSH Webview（内嵌在主窗口工具栏下方） ----------
 
-/// 主窗口内容区的逻辑尺寸（宽, 高-工具栏）
-fn main_content_size(app: &AppHandle) -> (f64, f64) {
+// ---------- 工具栏模式与内容区几何（固定显示 / 自动隐藏） ----------
+//
+// 内嵌的 DSH 页面是一个**原生子 webview**（label="dsh"），它盖在 launcher 页面之上，
+// 位置与大小只能由 Rust 设置 —— Tauri 没有暴露子 webview 的 z-order 控制，
+// 所以"工具栏浮在内容之上"不可能靠 CSS 层叠实现。本程序的做法是让内容区**真的**
+// 占满窗口，再用偏移把它让出来：
+//   - 工具栏收起（自动隐藏）：内容区从 y=0 铺满整窗；
+//   - 工具栏展开 / 固定显示：内容区整体下移一个 TOOLBAR_H。
+// 这与"悬浮"在视觉上等价（工具栏不透明，展开时本来就挡住内容顶部 43.2px），
+// 区别是顶部不会留下一条遮不住也点不到的空白。
+
+/// 自动隐藏模式下的顶部触发条高度（逻辑像素）。
+/// 三处必须一致：这里、前端 CSS 的 `#tb-hotzone` 高度、main.js 的 TOOLBAR_HOT_ZONE_PX。
+pub const TOOLBAR_HOT_ZONE: f64 = 8.0;
+
+/// 纯函数：由「配置里的模式 + 是否安全模式 + 工具栏是否收起」推出内容区顶部偏移。
+///
+/// 安全模式**强制**返回 TOOLBAR_H，这是不可绕过的硬约束：安全模式的退出入口
+/// （工具栏上的「退出安全模式」按钮与琥珀色徽标）都在工具栏上，一旦让内容区铺满整窗，
+/// 那个原生 webview 会把入口一起盖住，用户只能靠一条看不见的触发条自己找回来。
+/// 单拎成纯函数是为了让离线单测能把这个矩阵钉死（见本文件 tests 模块）。
+fn content_offset_for(mode: &str, safe_mode: bool, hidden: bool) -> f64 {
+    if safe_mode {
+        return TOOLBAR_H;
+    }
+    if mode != "auto" {
+        return TOOLBAR_H;
+    }
+    if hidden {
+        0.0
+    } else {
+        TOOLBAR_H
+    }
+}
+
+/// 当前生效的内容区顶部偏移（读配置里的模式 + 安全模式状态 + 收起标志）
+fn toolbar_content_offset(app: &AppHandle) -> f64 {
+    let cfg = config::load(app);
+    let hidden = app.state::<AppState>().toolbar_hidden();
+    content_offset_for(&cfg.toolbar_mode, crate::safe::is_active(app), hidden)
+}
+
+/// 主窗口内容区的逻辑几何 `(顶部偏移, 宽, 高)`：
+/// 自动隐藏且收起时顶部为 0、高度为整窗；取不到窗口尺寸时按固定模式的默认几何兜底。
+fn main_content_rect(app: &AppHandle) -> (f64, f64, f64) {
+    let top = toolbar_content_offset(app);
     if let Some(win) = app.get_webview_window("main") {
         if let (Ok(scale), Ok(size)) = (win.scale_factor(), win.inner_size()) {
             let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
-            return (logical.width, (logical.height - TOOLBAR_H).max(0.0));
+            return (top, logical.width, (logical.height - top).max(0.0));
         }
     }
-    (1024.0, 640.0)
+    (top, 1024.0, 640.0)
 }
 
 /// 在主窗口内创建（或刷新）内嵌的 DSH Webview。
@@ -744,13 +804,14 @@ fn open_dsh_webview(app: &AppHandle, url: &str) {
         emit_log(app, "launcher", i18n::t("log_no_main_window").to_string());
         return;
     };
-    let (w, h) = main_content_size(app);
+    // 位置与大小都按当前工具栏模式算：自动隐藏且收起时，内嵌页面要顶到 y=0 铺满整窗
+    let (top, w, h) = main_content_rect(app);
     let result = win.add_child(
         tauri::WebviewBuilder::new(
             "dsh",
             tauri::WebviewUrl::External(parsed),
         ),
-        tauri::LogicalPosition::new(0.0, TOOLBAR_H),
+        tauri::LogicalPosition::new(0.0, top),
         tauri::LogicalSize::new(w, h),
     );
     if let Err(e) = result {
@@ -758,18 +819,91 @@ fn open_dsh_webview(app: &AppHandle, url: &str) {
     }
 }
 
-/// 窗口尺寸变化时同步内嵌 webview 大小（由主窗口 Resized 事件调用）
+/// 同步内嵌 webview 的位置与大小（由主窗口 Resized 事件调用，工具栏模式变化时也调用）。
+/// 位置必须一起设：自动隐藏且收起时它要顶到 y=0 并铺满整窗，只改大小是不够的。
 pub fn sync_dsh_webview_size(app: &AppHandle) {
     let Some(wv) = app.get_webview("dsh") else { return };
-    let Some(win) = app.get_webview_window("main") else { return };
-    let Ok(scale) = win.scale_factor() else { return };
-    if let Ok(size) = win.inner_size() {
-        let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
-        let _ = wv.set_size(tauri::LogicalSize::new(
-            logical.width,
-            (logical.height - TOOLBAR_H).max(0.0),
-        ));
+    let (top, w, h) = main_content_rect(app);
+    let _ = wv.set_position(tauri::LogicalPosition::new(0.0, top));
+    let _ = wv.set_size(tauri::LogicalSize::new(w, h));
+}
+
+// ---------- 工具栏模式：前端 ↔ 外壳的协作命令 ----------
+
+/// 前端驱动的工具栏「收起 / 展开」。
+///
+/// 为什么要过 Rust：内嵌 DSH 页面是原生子 webview，它该不该铺满整窗只有外壳能改
+/// （见本节开头的说明）。返回值是**实际生效**的收起状态：安全模式下恒定 false，
+/// 前端用返回值纠偏自己的界面状态（避免两边不一致把工具栏盖住）。
+#[tauri::command]
+pub fn set_toolbar_hidden(app: AppHandle, hidden: bool) -> bool {
+    let effective = hidden && !crate::safe::is_active(&app);
+    app.state::<AppState>().set_toolbar_hidden(effective);
+    sync_dsh_webview_size(&app);
+    effective
+}
+
+/// 顶部触发条的命中探测：光标是否位于主窗口客户区顶部 `TOOLBAR_HOT_ZONE` 像素内。
+///
+/// 为什么必须由外壳探测：自动隐藏时内嵌 DSH 页面铺满整窗，launcher 页面（连同那条
+/// 透明触发条）**收不到任何鼠标事件**，DOM 的 mouseenter 根本不会触发。
+///
+/// 坐标系（已核对 tao 实现，别凭直觉改）：`Window::cursor_position()` 最终调用
+/// Win32 `GetCursorPos`，返回的是**屏幕物理坐标**（tao 的 `util::cursor_position`
+/// 只做 GetCursorPos，不做 ScreenToClient），所以要减去 `inner_position()`
+/// （客户区左上角的屏幕坐标）才是窗口内的位置，再除以 scale_factor 得到逻辑像素。
+#[tauri::command]
+pub fn probe_toolbar_hotzone(app: AppHandle) -> bool {
+    let Some(win) = app.get_webview_window("main") else { return false };
+    // 窗口被隐藏到托盘 / 已最小化时一律不算命中：此时 inner_position 没有意义，
+    // 而且用户根本看不到窗口（若照常判定会出现"点一下托盘就弹出一条工具栏"的怪现象）
+    if !win.is_visible().unwrap_or(false) || win.is_minimized().unwrap_or(false) {
+        return false;
     }
+    let (Ok(cursor), Ok(inner), Ok(scale)) =
+        (win.cursor_position(), win.inner_position(), win.scale_factor())
+    else {
+        return false;
+    };
+    if scale <= 0.0 {
+        return false;
+    }
+    let rel_y = (cursor.y - inner.y as f64) / scale;
+    if rel_y < 0.0 || rel_y > TOOLBAR_HOT_ZONE {
+        return false;
+    }
+    let width = win
+        .inner_size()
+        .map(|s| s.to_logical::<f64>(scale).width)
+        .unwrap_or(0.0);
+    let rel_x = (cursor.x - inner.x as f64) / scale;
+    rel_x >= 0.0 && rel_x <= width
+}
+
+/// 切换工具栏模式（快捷键 Ctrl+Shift+H 走这条；首选项「保存」仍走 save_config）。
+/// 只改 `toolbar_mode` 一个键；切到固定显示时顺手清掉「收起」状态 —— 否则内嵌页面
+/// 仍按 0 偏移铺满整窗，工具栏明明是固定模式却看不出来。返回归一化后的模式。
+#[tauri::command]
+pub fn set_toolbar_mode(app: AppHandle, mode: String) -> Result<String, String> {
+    let normalized = config::normalize_toolbar_mode(&mode);
+    config::set_toolbar_mode(&app, normalized)?;
+    if normalized != "auto" {
+        force_toolbar_shown(&app);
+    }
+    emit_log(
+        &app,
+        "launcher",
+        i18n::fmt("log_toolbar_mode_changed", &[&normalized]),
+    );
+    Ok(normalized.to_string())
+}
+
+/// 强制把工具栏置回「展开」并同步内容区几何。
+/// 与 `set_toolbar_hidden` 的区别：这个不看模式、不接受参数，只用来消除
+/// 「安全模式激活 + 上一刻还处于收起状态」这个组合（见 content_offset_for 的硬约束）。
+pub(crate) fn force_toolbar_shown(app: &AppHandle) {
+    app.state::<AppState>().set_toolbar_hidden(false);
+    sync_dsh_webview_size(app);
 }
 
 /// 取上次记录的 DSH 页面地址（含会话令牌），仅当形状合法且端口与给定端口一致时才返回。
@@ -1442,7 +1576,19 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     if config.last_url_enc.trim().is_empty() && !old_cfg.last_url_enc.trim().is_empty() {
         config.last_url_enc = old_cfg.last_url_enc.clone();
     }
+    // 工具栏模式：空值（老版本前端不认识这个键）沿用磁盘上的值，其余只认 pinned / auto，
+    // 非法值归一为 pinned —— 与上面两个键同样的「缺字段就别动它」策略
+    let requested_mode = if config.toolbar_mode.trim().is_empty() {
+        old_cfg.toolbar_mode.clone()
+    } else {
+        config.toolbar_mode.clone()
+    };
+    config.toolbar_mode = config::normalize_toolbar_mode(&requested_mode).to_string();
     config::save(&app, &config)?;
+    // 固定显示模式下「收起」没有意义：顺手清掉，免得前端漏同步时内容区仍按 0 偏移
+    if config.toolbar_mode != "auto" {
+        force_toolbar_shown(&app);
+    }
 
     // 语言切换即时生效：本会话后续的 launcher 日志、托盘菜单文字（前端自行切换界面文案）。
     // DSH 自身界面语言通过 settings.yaml 联动，需 DSH 重启后变化。
@@ -3389,5 +3535,36 @@ mod tests {
         assert_eq!(rundll32_in(None), PathBuf::from("rundll32.exe"));
         assert_eq!(rundll32_in(Some("")), PathBuf::from("rundll32.exe"));
         assert_eq!(rundll32_in(Some("   ")), PathBuf::from("rundll32.exe"));
+    }
+
+    // ---------- 工具栏模式 → 内容区顶部偏移 ----------
+
+    /// 四种组合的完整矩阵。这里要钉住两件事：
+    /// ① 自动隐藏且收起时内容区顶部为 0（内容真的占满整窗 —— 功能的全部意义）；
+    /// ② 安全模式下无论配置写什么、收起标志是什么，都必须是 TOOLBAR_H（硬约束：
+    ///    安全模式的退出入口长在工具栏上，藏起来等于把用户困住）。
+    #[test]
+    fn content_offset_follows_mode_and_safe_mode() {
+        // 固定显示：始终让出一个工具栏高度，收起标志无效
+        assert_eq!(content_offset_for("pinned", false, false), TOOLBAR_H);
+        assert_eq!(content_offset_for("pinned", false, true), TOOLBAR_H);
+        // 自动隐藏：展开时下移一个工具栏高度，收起时顶到 0
+        assert_eq!(content_offset_for("auto", false, false), TOOLBAR_H);
+        assert_eq!(content_offset_for("auto", false, true), 0.0);
+        // 安全模式：任何模式下都强制固定显示（含"自动隐藏 + 收起"这种最危险组合）
+        assert_eq!(content_offset_for("auto", true, true), TOOLBAR_H);
+        assert_eq!(content_offset_for("auto", true, false), TOOLBAR_H);
+        assert_eq!(content_offset_for("pinned", true, true), TOOLBAR_H);
+        // 未知模式串按固定显示处理（与 config::normalize_toolbar_mode 的回落一致）
+        assert_eq!(content_offset_for("", false, true), TOOLBAR_H);
+        assert_eq!(content_offset_for("auto-hide", false, true), TOOLBAR_H);
+    }
+
+    /// 触发条高度必须与前端 CSS / main.js 里的同名常量一致，而这里只能钉住 Rust 侧
+    /// 的一个事实：它是个正数且远小于工具栏高度（否则"热区"会盖住半个工具栏）。
+    #[test]
+    fn hot_zone_is_a_thin_band_above_the_toolbar() {
+        assert!(TOOLBAR_HOT_ZONE > 0.0);
+        assert!(TOOLBAR_HOT_ZONE < TOOLBAR_H / 2.0);
     }
 }

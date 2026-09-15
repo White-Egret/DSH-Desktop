@@ -36,6 +36,7 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 - **Bilingual UI (Chinese / English)**: choose a language in Preferences; the whole launcher (toolbar, status, dialogs, logs, tray menu) switches, and DSH's own web UI follows via its `settings.yaml`
 - **Light / Dark / Follow-system appearance**: pick it in Preferences; the launcher (toolbar, dialogs, wizard, native title bar) and the embedded DSH page switch together through `ui-theme.preference` in DSH's `settings.yaml` — open DSH pages follow **live, no DSH restart needed**
 - **Window layout memory**: the main window's size, position and maximized state are remembered and restored on the next launch (official `tauri-plugin-window-state`); the plugin validates coordinates against the monitors that are actually attached, so a window can never come back off-screen after a monitor is unplugged — see [Window layout](#window-layout)
+- **Toolbar display mode (pinned / auto-hide)**: keep the toolbar always visible, or let it tuck away above the window and slide down when the mouse reaches the top 8px strip; leaving the toolbar hides it again half a second later (in auto mode the content area fills the whole window and the toolbar floats above it). `Ctrl+Shift+H` toggles it. **Safe Mode always forces pinned** — see [Toolbar display mode](#toolbar-display-mode)
 - Single-instance lock: launching a second copy just focuses the existing window
 
 ## Requirements
@@ -273,6 +274,34 @@ Same three-way semantics as DSH's own "General settings → Appearance", with th
 - Upgrade compatibility: an old `config.json` without the appearance field inherits DSH's current theme on first load (reading `settings.yaml`), so upgrading the launcher never re-skins your DSH page by itself. From then on, saving in Preferences takes over the value.
 - Changing the appearance inside DSH's own settings affects the DSH page only; the launcher keeps whatever was last saved in its Preferences.
 
+## Toolbar display mode (pinned / auto-hide)
+
+The toolbar across the top has two display modes, switched in **⚙ Preferences → Auto-hide toolbar**. The choice is stored as `toolbar_mode` in `config.json` (`pinned` / `auto`) and applied on the next launch:
+
+- **Pinned (`pinned`, default)**: the toolbar is always visible and the embedded DSH page sits below it. This is the historical behaviour and the default after upgrading, so an upgrade alone never changes how the app feels.
+- **Auto-hide (`auto`)**: the toolbar starts parked above the window and the embedded page fills the **entire** window height; moving the mouse into the 8px strip at the top of the window slides the toolbar down, and moving off the toolbar hides it again after 500ms.
+
+**Shortcut**: `Ctrl+Shift+H` toggles between the two modes. Note it only works while this launcher page holds keyboard focus — when focus is inside the embedded DSH page the keystroke belongs to DSH; in that case just move the mouse to the very top edge of the window.
+
+**Animation**: purely `transform: translateY(-100%)` ↔ `translateY(0)` with `transition: transform 0.25s ease-in-out`. **Nothing animates `top` / `height` / `margin`**, so this runs on the compositor thread and never triggers per-frame reflow. In auto-hide mode the toolbar carries a subtle drop shadow so it reads as a layer above the content once it has slid out.
+
+**Why not just use CSS stacking**: the embedded DSH page is not an `<iframe>` — it is a Tauri **native child webview**. Its z-order is always above the launcher page, and its position and size can only be set from the Rust side, so no CSS trick can make it yield space to a floating toolbar. The approach here is therefore to let the content area genuinely fill the whole window and have the shell draw the toolbar on top of it:
+
+1. The frontend tells Rust whether the toolbar is hidden, via the `set_toolbar_hidden` command;
+2. Rust computes the child webview's Y offset with the pure function `content_offset_for(mode, is_safe_mode, hidden)` (toolbar height, 43.2px, for pinned / Safe Mode; `0` for auto-hide while collapsed) and syncs its position and size;
+3. Once collapsed, the top 8px of the page is covered by the child webview, so mouse events never reach the launcher page. That case is covered by the **shell reading the system cursor position**: the frontend calls `probe_toolbar_hotzone` every 120ms, and Rust takes the screen coordinates from `GetCursorPos`, subtracts the client-area origin, divides by the scale factor, and checks whether the cursor is back inside the top strip. This is only a fallback poll while collapsed — with the toolbar showing, everything goes through ordinary DOM events (`mouseenter` / `mouseleave`).
+
+Two more details: auto-hide is suspended while a toolbar dropdown or dialog is open, otherwise the menu would slide away with the toolbar; and collapsing happens in **two stages** — the toolbar slides up first, and only after the 260ms animation finishes does the content area expand to the full window. Moving the mouse back to the top during that window cancels the collapse.
+
+**Safe Mode always forces pinned (hard constraint)**: the "Exit Safe Mode" button and the amber badge live on the toolbar, so hiding it would trap the user inside Safe Mode. Four safeguards enforce this:
+
+- On the Rust side, `content_offset_for` puts `safe_mode` in the **first, short-circuiting branch**;
+- The `set_toolbar_hidden` command computes `hidden && !is_active` and returns the **value that actually took effect** so the frontend can correct itself;
+- Entering Safe Mode calls `force_toolbar_shown` to clear any leftover collapsed state;
+- The preference toggle is disabled in Safe Mode, with a "Safe Mode forces the toolbar to stay pinned" note.
+
+**One more caveat**: auto-hide only takes effect once the DSH page is ready. Before DSH has started (or while it is still coming up) the status area *is* the whole content, so the toolbar has to stay — pinned behaviour is used in that case. If the toggle looks like it is doing nothing, check whether DSH is actually running.
+
 ## Window layout
 
 The main window's **size, position and maximized state** are remembered and restored on the next launch. This uses Tauri's official `tauri-plugin-window-state`; there is deliberately **no hand-rolled debounce + JSON persistence**.
@@ -341,7 +370,7 @@ Like an operating system's safe mode: DSH is started from a **separate, pristine
 3. **Credential borrowing**: the daily home's `.credentials.yaml` is **overwritten-copied** into `.dsh-safe` on every entry (always the currently valid key). It is the only file copied; a missing/empty source does not block entry (the banner tells you and DSH runs its first-run flow). **The content is never logged, never sent to the frontend over IPC, and never placed in environment variables**; permissions are tightened to 0600 on Unix.
 4. **Launch**: the child process also gets `DSH_DAILY_HOME=<daily home>` so a repair agent naturally knows the repair target (path only, never secrets), and the page is loaded through the exact same output-parsing / readiness-wait / embed logic as the daily mode, using the auth URL on 3081.
 
-**Visual distinction**: the window title is prefixed with "[Safe Mode]" (localized), the toolbar switches to an amber accent with a 🛡 badge, and an onboarding banner states the three key facts (you are in safe mode / the daily home path / the credential-borrowing result). Daily control buttons are disabled while safe mode is active.
+**Visual distinction**: the window title is prefixed with "[Safe Mode]" (localized), the toolbar switches to an amber accent with a 🛡 badge, and an onboarding banner states the three key facts (you are in safe mode / the daily home path / the credential-borrowing result). Daily control buttons are disabled while safe mode is active, and the toolbar is **forced to stay pinned** — the "Auto-hide toolbar" preference has no effect here, because the exit button and the badge live on the toolbar and hiding it would trap you in Safe Mode (see [Toolbar display mode](#toolbar-display-mode)).
 
 **Window layout**: window memory is strictly isolated from Safe Mode. Safe Mode *is* a restart into a separate environment — the daily DSH instance is torn down entirely and the safe instance starts fresh from its own home on 3081; but the desktop shell and the window itself do not restart, so the isolation is taken over explicitly by the window-memory side: on entry the daily layout is frozen (snapshot + flushed to disk) and the window is reset to the `tauri.conf.json` default size and position; anything you drag or resize while Safe Mode is active is **never** written to disk; on exit (including quitting the app straight from Safe Mode) the daily layout is restored verbatim. See [Window layout](#window-layout).
 
@@ -407,6 +436,12 @@ Right after login, disk IO spikes and Node/network may not be ready; the delay a
 
 **DSH worked before, then stopped starting — could Node.js be the cause?**
 Yes, if your Node.js is older than 22.19.0 (for example 21.x). The launcher now refuses such a launch and tells you the detected version and the required one instead of showing DSH's opaque exit; upgrade the Node.js runtime with the wizard / Preferences button, or tick "Keep this version and start anyway" if you want to try regardless. See [Node.js version check](#nodejs-version-check).
+
+**The toolbar disappeared — it only shows up when I move the mouse to the very top edge?**
+That is the "auto-hide toolbar" mode (turn it off in ⚙ Preferences). The toolbar starts parked above the window, slides down when the mouse enters the 8px strip at the top, and hides again half a second after the mouse leaves it; `Ctrl+Shift+H` switches back to pinned. Two things to note: auto-hide only kicks in once the DSH page is **ready** (while DSH is not running the toolbar stays visible), and the shortcut only works while this launcher page holds focus — if focus is inside the embedded DSH page, move the mouse to the very top edge instead. See [Toolbar display mode](#toolbar-display-mode).
+
+**Why can't the toolbar auto-hide in Safe Mode?**
+The "Exit Safe Mode" button and the amber badge live on the toolbar, so hiding it would trap you in Safe Mode. Safe Mode therefore **forces pinned**, and the preference toggle is disabled while it is active. See [Toolbar display mode](#toolbar-display-mode).
 
 ## License
 

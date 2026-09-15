@@ -188,6 +188,13 @@ pub fn emit_safe_change(
     message: Option<String>,
 ) {
     apply_safe_window_title(app, active);
+    // 安全模式的工具栏恒为固定显示：这里把「收起」状态一并清掉。
+    // 两道防线都要有 —— content_offset_for 会在渲染时按安全模式强制让出工具栏高度，
+    // 但如果前端漏同步（或收起状态残留），内嵌页面仍可能顶到 y=0 把工具栏连同
+    // 「退出安全模式」入口一起盖住，用户只能靠看不见的触发条自己找回来。
+    if active {
+        crate::process::force_toolbar_shown(app);
+    }
     let _ = app.emit(
         "safe-mode-change",
         SafeModeChange {

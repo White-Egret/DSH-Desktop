@@ -191,6 +191,61 @@ body {
 .tb-right b { font-weight: 600; }
 .tb-right .sep { color: var(--sep); }
 
+/* ---------- 工具栏自动隐藏（模式由 main.js 挂在 body 上） ----------
+   body.tb-auto          自动隐藏生效中（日常模式 + 用户选了自动隐藏 + DSH 页面已就绪）
+   body.tb-auto.tb-shown 工具栏当前展开；没有这个类就 translateY(-100%) 收在窗口上沿之外
+
+   只有这两种状态会用到本段规则：固定显示 / 安全模式既不挂 .tb-auto 也不受影响，
+   #toolbar 仍是文档流里的第一行、高度精确 43.2px（Rust 端 TOOLBAR_H 依赖这个值）。
+   动画一律只用 transform（GPU 合成），**不要**改成 top / margin-top / height ——
+   那会触发逐帧重排，且内嵌 DSH 页面是原生子 webview，布局抖动会同步抖到它。 */
+
+body.tb-auto #toolbar {
+  position: fixed;            /* 脱离文档流：#stage 因此占满整窗（内容不被挤压） */
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 60;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18);   /* 悬浮态：与内容区分开 */
+  transform: translateY(-100%);
+  transition: transform 0.25s ease-in-out;
+  will-change: transform;
+}
+
+body.tb-auto.tb-shown #toolbar { transform: translateY(0); }
+
+/* 动画期间露出的「工具栏面」：颜色与工具栏一致，遮住 0.25 秒里本该露出的页面底色。
+   收起到位后它被铺满整窗的 DSH 页面整个盖住，平时看不见也不挡事。 */
+#tb-band {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 43.2px;             /* 与 #toolbar 高度一致 */
+  background: var(--toolbar-bg);
+  border-bottom: 1px solid var(--toolbar-border);
+  z-index: 54;
+}
+body.tb-auto #tb-band { display: block; }
+
+/* 透明触发条：鼠标进入即展开工具栏。z-index 低于工具栏、高于 #tb-band，
+   于是「展开后」它是被工具栏盖住的（不会拦住按钮的点击）。 */
+#tb-hotzone {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 8px;                /* 与 main.js 的 TOOLBAR_HOT_ZONE_PX、Rust 的 TOOLBAR_HOT_ZONE 一致 */
+  background: transparent;
+  z-index: 55;
+}
+body.tb-auto #tb-hotzone { display: block; }
+
+/* 刷新提示层要盖住内容区：自动隐藏模式下工具栏不占位，它从 y=0 开始 */
+body.tb-auto .refresh-overlay { top: 0; }
+
 /* 状态圆点（两主题共用同一组饱和色，深底上同样可辨） */
 .dot {
   width: 9px;

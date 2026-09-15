@@ -86,6 +86,8 @@ pub fn t(key: &str) -> &'static str {
         "err_theme_sync_fail" => if en { "[launcher] Warning: failed to write the appearance into DSH settings.yaml: {0}" } else { "[launcher] 警告：写入 DSH settings.yaml 外观设置失败：{0}" },
         "log_appearance_changed" => if en { "[launcher] Appearance switched to \"{0}\" (Desktop chrome and the DSH page both follow)." } else { "[launcher] 外观已切换为「{0}」，桌面端与 DSH 页面同步生效。" },
         "log_lang_changed" => if en { "[launcher] Interface language switched to {0}. Tray/menu texts update immediately; a restart is never required." } else { "[launcher] 界面语言已切换为「{0}」。托盘菜单等文字已同步更新；无需重启即可生效（重启后同样生效）。" },
+        // 工具栏模式（固定显示 / 自动隐藏；自动隐藏只对日常模式生效，安全模式恒为固定）
+        "log_toolbar_mode_changed" => if en { "[launcher] Toolbar mode switched to {0} (pinned = always visible; auto = slides down when the cursor reaches the top edge). Safe Mode always stays pinned." } else { "[launcher] 工具栏模式已切换为 {0}（pinned = 固定显示；auto = 自动隐藏，鼠标移到窗口顶部时滑出）。安全模式下恒为固定显示。" },
         "err_cmd_timeout" => if en { "Command timed out after {0} s" } else { "命令执行超时（{0} 秒）" },
         "err_cmd_spawn" => if en { "Cannot start {0}: {1}" } else { "无法启动 {0}: {1}" },
         "err_cmd_wait" => if en { "Failed to wait for the command to exit: {0}" } else { "等待命令退出失败: {0}" },

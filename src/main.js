@@ -147,6 +147,14 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && (e.key === 'r' || e.key === 'R'))) {
     e.preventDefault();
     refreshPage();
+    return;
+  }
+  // Ctrl+Shift+H：固定显示 ⇄ 自动隐藏（与浏览器/系统快捷键不冲突）。
+  // 只有焦点在本页面上时才收得到 —— 焦点在内嵌 DSH 页面里时按键归它，
+  // 那种情况下用鼠标到窗口顶部触发即可（见 README 的说明）。
+  if (e.ctrlKey && e.shiftKey && !e.altKey && (e.key === 'H' || e.key === 'h')) {
+    e.preventDefault();
+    toggleToolbarMode();
   }
 });
 
@@ -165,12 +173,17 @@ function syncWebviewVisibility() {
 
 function showModal(id) {
   $(id).classList.remove('hidden');
+  // 弹窗（首选项 / 日志 / 更新 / 安全模式）打开期间禁止工具栏自动收起：
+  // 这里的定时器不允许跨弹窗存活，收起判定里还有一道 anyModalOpen() 兜底。
+  cancelToolbarHideTimer();
   syncWebviewVisibility();
 }
 
 function hideModal(id) {
   $(id).classList.add('hidden');
   syncWebviewVisibility();
+  // 弹窗关掉后按正常规则重新计时：鼠标若不在工具栏上，500ms 后自动收起
+  scheduleToolbarHide();
 }
 
 // ---------- 等待秒表（starting 期间显示已等待秒数） ----------
@@ -375,6 +388,9 @@ function onStatus(p) {
     autoCheckVersions();
   }
 
+  // 工具栏显示模式重新结算：它依赖「DSH 页面是否已就绪」（见 syncToolbarForStatus）
+  syncToolbarForStatus();
+
   refreshButtons();
 }
 
@@ -441,6 +457,14 @@ function applySafeUI(active, report) {
   $('safe-badge').classList.toggle('hidden', !active);
   renderSafeButton();
   if (active) fillSafeModal(safeReport);
+  // 安全模式的工具栏恒为固定显示（不可更改）：选项当场禁用，但勾选状态照旧反映
+  // 用户已保存的偏好 —— 保存时也按偏好写回，不会因为"在安全模式里点了一次保存"被改掉。
+  const toolbarBox = $('set-toolbar-auto');
+  if (toolbarBox) {
+    toolbarBox.disabled = active;
+    toolbarBox.checked = toolbarPrefAuto();
+  }
+  applyToolbarMode();
   refreshButtons();
 }
 
@@ -507,6 +531,172 @@ async function exitSafeMode() {
     toast(t('toast_safe_exit_fail', e), true);
   }
 }
+// ---------- 工具栏模式（固定显示 / 自动隐藏） ----------
+//
+// 布局真相：工具栏在本页面（launcher 的 label="main" webview）里，而内容区是一个
+// **原生子 webview**（label="dsh"），它盖在本页面之上，位置与大小只能由 Rust 改。
+// 所以自动隐藏是前后端协作的：
+//   - 前端：工具栏 translateY(-100%) 滑出 / translateY(0) 滑入（CSS transform，GPU 加速），
+//     负责悬停判定、500ms 延迟、弹窗期间禁止收起，并把「收起」状态上报给后端；
+//   - 后端：把内嵌页面按当前状态摆好 —— 收起时顶到 y=0 铺满整窗（内容真的占满窗口），
+//     展开 / 固定显示时下移一个工具栏高度（process.rs 的 content_offset_for）。
+// 另一件事只能由后端做：收起时那条透明触发条被原生子 webview 盖住，本页面收不到任何
+// 鼠标事件，所以「鼠标回到窗口顶部」要由外壳读光标位置后通知（probe_toolbar_hotzone）。
+//
+// 生效范围：只有「日常模式 + DSH 页面已就绪」才自动隐藏 ——
+//   * 安全模式强制固定显示（退出入口就长在工具栏上，藏起来等于把用户困住）；
+//   * DSH 没起来时状态区就是全部内容，工具栏必须留着（启动/停止/重试都靠它）。
+
+const TOOLBAR_HOT_ZONE_PX = 8;   // 与 style.css 的 #tb-hotzone 高度、Rust 的 TOOLBAR_HOT_ZONE 一致
+const TOOLBAR_ANIM_MS = 260;     // 与 CSS 的 transition 0.25s 对应（留一点余量）
+const AUTO_HIDE_DELAY_MS = 500;  // 鼠标离开工具栏后的收起延迟
+const HOT_PROBE_MS = 120;        // 收起状态下探测光标「是否回到顶部」的间隔
+
+let toolbarLive = false;      // 内嵌 DSH 页面是否已就绪（决定自动隐藏有没有意义）
+let toolbarHovered = false;   // 鼠标是否停在工具栏上
+let toolbarHideTimer = null;  // 离开工具栏后的收起倒计时
+let toolbarSettleTimer = null;// 滑出动画结束后「把内容区扩到整窗」的定时器
+let toolbarProbeTimer = null; // 收起状态下的光标探测定时器
+let toolbarProbeBusy = false; // 上一次探测还没回来时跳过本轮（避免 IPC 堆积）
+
+function toolbarPrefAuto() { return !!(config && config.toolbar_mode === 'auto'); }
+function dshPageLive() { return status === 'running' || status === 'running-external'; }
+/// 自动隐藏此刻是否真的生效（安全模式 / 未选自动隐藏 / DSH 页面未就绪 都不生效）
+function toolbarAutoActive() { return toolbarPrefAuto() && !safeMode && toolbarLive; }
+
+/// 把「收起」状态同步给后端：内嵌页面是原生子 webview，只有 Rust 能改它的位置 ——
+/// 收起时顶到 y=0 铺满整窗，展开时下移一个工具栏高度。
+/// 返回值是后端**实际生效**的收起状态（安全模式会拒绝收起），前端据此纠偏，
+/// 免得两边状态不一致：界面以为收起了、后端却让内容铺满整窗，把工具栏和入口一起盖住。
+function setToolbarHidden(hidden) {
+  invoke('set_toolbar_hidden', { hidden: !!hidden })
+    .then((effective) => {
+      if (hidden && effective === false) document.body.classList.add('tb-shown');
+    })
+    .catch(() => {});
+}
+
+function stopToolbarProbe() {
+  if (toolbarProbeTimer) {
+    clearInterval(toolbarProbeTimer);
+    toolbarProbeTimer = null;
+  }
+}
+
+/// 收起状态下开始探测「鼠标是否回到窗口顶部」。
+/// 不能在页面里直接听 mousemove：收起时原生子 webview 铺满整窗，
+/// 本页面（连同那条透明触发条）收不到任何鼠标事件。
+function startToolbarProbe() {
+  if (toolbarProbeTimer) return;
+  toolbarProbeTimer = setInterval(() => {
+    // 模式已经不生效（切回固定显示 / 进了安全模式 / DSH 页面没了）：自己停掉，
+    // 免得留下一个每 120ms 空转的定时器
+    if (!toolbarAutoActive()) { stopToolbarProbe(); return; }
+    if (document.hidden || toolbarProbeBusy) return;
+    toolbarProbeBusy = true;
+    invoke('probe_toolbar_hotzone')
+      .then((hot) => { if (hot) showToolbar(); })
+      .catch(() => {})
+      .then(() => { toolbarProbeBusy = false; });
+  }, HOT_PROBE_MS);
+}
+
+function cancelToolbarHideTimer() {
+  if (toolbarHideTimer) { clearTimeout(toolbarHideTimer); toolbarHideTimer = null; }
+}
+
+function cancelToolbarSettleTimer() {
+  if (toolbarSettleTimer) { clearTimeout(toolbarSettleTimer); toolbarSettleTimer = null; }
+}
+
+/// 展开工具栏（鼠标进入触发条 / 工具栏，或后端探测到光标靠近顶部时调用）
+function showToolbar() {
+  if (!toolbarAutoActive()) return;
+  stopToolbarProbe();            // 已经展开了，探测器先停（收起时再开）
+  cancelToolbarHideTimer();
+  cancelToolbarSettleTimer();
+  if (document.body.classList.contains('tb-shown')) return;
+  document.body.classList.add('tb-shown');
+  setToolbarHidden(false);
+}
+
+/// 收起工具栏（两段式）：先让 CSS 把工具栏滑上去（此时内嵌页面还在下移后的位置，
+/// 露出的那条是 #tb-band），动画结束后再让内容区扩到整窗。
+/// 中间若鼠标回到热区（showToolbar 会取消 settle 定时器），不会出现「刚滑出来又被盖住」。
+function hideToolbar() {
+  if (!toolbarAutoActive() || toolbarHovered || anyModalOpen()) return;
+  if (!document.body.classList.contains('tb-shown')) {
+    startToolbarProbe();         // 已经是收起态：保证探测器在跑
+    return;
+  }
+  document.body.classList.remove('tb-shown');
+  cancelToolbarSettleTimer();
+  toolbarSettleTimer = setTimeout(() => {
+    toolbarSettleTimer = null;
+    if (!toolbarAutoActive() || toolbarHovered) return;
+    setToolbarHidden(true);
+    startToolbarProbe();
+  }, TOOLBAR_ANIM_MS);
+}
+
+/// 鼠标离开工具栏后启动延迟收起（延迟期间回到工具栏会被 showToolbar 取消）
+function scheduleToolbarHide() {
+  if (!toolbarAutoActive()) return;
+  cancelToolbarHideTimer();
+  toolbarHideTimer = setTimeout(() => {
+    toolbarHideTimer = null;
+    hideToolbar();
+  }, AUTO_HIDE_DELAY_MS);
+}
+
+/// 应用工具栏模式：固定显示 / 安全模式 / DSH 页面就绪状态变化时都会调用。
+/// 自动隐藏时先展开一次（鼠标不在工具栏上就由 500ms 延迟自然收起），
+/// 免得刚切过来、鼠标还在别处时整条工具栏凭空消失。
+function applyToolbarMode() {
+  toolbarLive = dshPageLive();
+  const auto = toolbarAutoActive();
+  document.body.classList.toggle('tb-auto', auto);
+  cancelToolbarHideTimer();
+  cancelToolbarSettleTimer();
+  if (!auto) {
+    document.body.classList.add('tb-shown');  // 固定显示：始终展开（该类只在 .tb-auto 下有样式）
+    stopToolbarProbe();
+    setToolbarHidden(false);
+    return;
+  }
+  if (!document.body.classList.contains('tb-shown')) {
+    document.body.classList.add('tb-shown');
+    setToolbarHidden(false);
+  }
+  if (!toolbarHovered) scheduleToolbarHide();
+}
+
+/// DSH 页面就绪状态**变化**时才重算（普通状态事件不该重置收起的倒计时）
+function syncToolbarForStatus() {
+  if (dshPageLive() === toolbarLive) return;
+  applyToolbarMode();
+}
+
+/// 快捷键 Ctrl+Shift+H：在「固定显示 / 自动隐藏」之间快速切换，并把偏好写回配置。
+/// 焦点必须在本页面（Launcher）上；焦点在内嵌 DSH 页面里时按键归它处理（见 README）。
+async function toggleToolbarMode() {
+  if (safeMode) {
+    toast(t('toast_toolbar_safe_locked'), true);
+    return;
+  }
+  const next = toolbarPrefAuto() ? 'pinned' : 'auto';
+  try {
+    const mode = await invoke('set_toolbar_mode', { mode: next });
+    if (config) config.toolbar_mode = mode;
+    const box = $('set-toolbar-auto');
+    if (box) box.checked = mode === 'auto';
+    applyToolbarMode();
+    toast(mode === 'auto' ? t('toast_toolbar_auto_on') : t('toast_toolbar_auto_off'));
+  } catch (e) {
+    toast(String(e), true);
+  }
+}
+
 // ---------- 事件监听 + 初始化 ----------
 
 async function init() {
@@ -545,6 +735,10 @@ async function init() {
     if (s && s.active) applySafeUI(true, s.report);
   } catch (_) { /* 查询失败按非安全模式处理 */ }
 
+  // 工具栏显示模式（固定 / 自动隐藏）：必须赶在 DSH 启动、内嵌页面被创建之前生效，
+  // 否则那个原生子 webview 会先按固定模式摆好位置、再被纠正一次（看得见的跳动）
+  applyToolbarMode();
+
   bindUI();
 
   // 从托盘恢复窗口时刷新状态，并确保内嵌 DSH Webview 重新显示
@@ -553,6 +747,14 @@ async function init() {
     if (!document.hidden) {
       syncWebviewVisibility();
       invoke('get_status').then(onStatus).catch(() => {});
+      // 窗口从托盘恢复：悬停状态可能在隐藏期间失真（mouseleave 收不到），
+      // 这里重置一次并按正常规则重新计时，免得工具栏卡在"以为鼠标还在上面"
+      toolbarHovered = false;
+      scheduleToolbarHide();
+    } else {
+      // 隐藏到托盘：清掉悬停与倒计时，恢复时重新判定
+      toolbarHovered = false;
+      cancelToolbarHideTimer();
     }
   });
 
@@ -684,6 +886,9 @@ function openSettings() {
   $('set-appearance').value = ['light', 'dark', 'system'].includes(config.appearance) ? config.appearance : 'system';
   $('set-extra-args').value = config.extra_args;
   $('set-package-name').value = config.package_name;
+  // 工具栏显示模式：勾选 = 自动隐藏（安全模式下强制固定显示，故当场禁用）
+  $('set-toolbar-auto').checked = toolbarPrefAuto();
+  $('set-toolbar-auto').disabled = safeMode;
   // 安全模式：基线重置开关（默认关闭：取不到字段也按关闭显示）与修复验证等待秒数（默认 80）
   $('set-safe-reset').checked = config.safe_reset_baseline === true;
   const sv = Number(config.safe_verify_secs);
@@ -728,6 +933,11 @@ async function saveSettings() {
     close_action: $('set-close-action').value === 'quit' ? 'quit' : 'tray',
     language: $('set-language').value === 'en' ? 'en' : 'zh',
     appearance,
+    // 工具栏显示模式：安全模式下该选项被禁用，此时按内存里已有的偏好原样带上，
+    // 别把"在安全模式里点了一次保存"当成"用户把偏好改成了固定显示"
+    toolbar_mode: safeMode
+      ? ((config && config.toolbar_mode) || 'pinned')
+      : ($('set-toolbar-auto').checked ? 'auto' : 'pinned'),
     // 0 = 一直等待，是合法值，不能用 || 兜底
     health_timeout_secs: Number.isFinite(timeout) && timeout >= 0 ? timeout : 300,
     extra_args: $('set-extra-args').value.trim(),
@@ -762,6 +972,8 @@ async function saveSettings() {
     $('set-config-path').textContent = config.config_path;
     $('port-val').textContent = config.port;
     toast(t('toast_saved'));
+    // 工具栏模式即时生效（保存后的 config 里已带归一化后的值）
+    applyToolbarMode();
     refreshButtons();
     hideModal('settings-modal');
     const st = await invoke('get_status');
@@ -1365,6 +1577,20 @@ function bindUI() {
   $('btn-change-port').onclick = openSettings;
   // 错误状态里的「打开首选项」直达按钮（Node 版本过低 → 一键升级 / 保留并继续都在里面）
   $('btn-fix-node').onclick = () => openSettings();
+
+  // ---- 工具栏自动隐藏：进入触发条 / 工具栏即展开，离开工具栏 500ms 后收起 ----
+  // 触发条只在自动隐藏模式下可见（固定显示时它是 display:none）。
+  $('tb-hotzone').addEventListener('mouseenter', () => showToolbar());
+  const toolbarEl = $('toolbar');
+  toolbarEl.addEventListener('mouseenter', () => {
+    toolbarHovered = true;
+    showToolbar();          // 已展开时是空操作；内部会取消收起倒计时
+    cancelToolbarHideTimer();
+  });
+  toolbarEl.addEventListener('mouseleave', () => {
+    toolbarHovered = false;
+    scheduleToolbarHide();
+  });
 
   // 端口占用面板：重新检测端口（不杀任何进程，只探测）
   $('btn-recheck-port').onclick = async () => {

@@ -59,6 +59,12 @@ pub struct Config {
     /// 日常实例在该时间内未就绪则提示「修复可能未成功」并提供返回安全模式入口。
     /// 0 = 不做验证提示。保存时非 0 值会被收敛到 5~3600 秒（与就绪超时同一刻度）。
     pub safe_verify_secs: u64,
+    /// 工具栏模式："pinned" = 固定显示（默认，等同历史行为）；"auto" = 自动隐藏
+    /// （鼠标移到窗口顶部约 8px 的触发条时滑出，移开工具栏半秒后收起）。
+    /// 这里只存**用户偏好**：实际生效判定在 process.rs（`content_offset_for`），
+    /// 且只在日常模式生效 —— 安全模式强制固定显示，因为安全模式的退出按钮与
+    /// 琥珀色徽标就长在工具栏上，把它藏起来等于把用户困在安全模式里。
+    pub toolbar_mode: String,
 }
 
 impl Default for Config {
@@ -87,6 +93,8 @@ impl Default for Config {
             safe_reset_baseline: false,
             // 修复验证默认等 80 秒
             safe_verify_secs: 80,
+            // 工具栏默认固定显示（= 历史行为）：升级后不会突然变成"工具栏不见了"
+            toolbar_mode: "pinned".to_string(),
         }
     }
 }
@@ -300,6 +308,16 @@ pub fn normalize_appearance(raw: &str) -> &'static str {
         "light" => "light",
         "dark" => "dark",
         _ => "system",
+    }
+}
+
+/// 工具栏模式归一化：只接受 pinned / auto，其余（含老配置缺字段、手改的非法值）
+/// 一律回落 **pinned** —— 那是历史行为，升级后工具栏不会莫名消失。
+/// 顺手接受 auto-hide / auto_hide 这类等价写法，免得前端换个拼法就被静默忽略。
+pub fn normalize_toolbar_mode(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "auto" | "auto-hide" | "autohide" => "auto",
+        _ => "pinned",
     }
 }
 
@@ -720,17 +738,16 @@ pub fn last_url(app: &AppHandle) -> String {
     root["last_url"].as_str().unwrap_or("").to_string()
 }
 
-// ---------- 「Node 版本过低」告警的确认记忆（node_min_ack） ----------
+// ---------- 「单键」写入（运行时记忆 / 单一偏好） ----------
 //
-// 为什么单独做一个键、而不是让前端 save_config 带上它：
-// 用户点的是「忽略告警，仍要继续」这一个动作，语义上只该改这一个键。
-// 走读取-修改-写回（与 last_url 同款）就不会顺手覆盖其它字段——save_config
-// 是整体结构体写盘，前端一旦漏字段就可能把用户的确认/其它设置抹掉。
+// 为什么单独做这条路、而不是让前端 save_config 带上它们：
+// 这些字段对应的是「一个动作只该改一个键」的操作（记住 Node 版本告警已确认、
+// 用快捷键切换工具栏模式……）。走读取-修改-写回就不会顺手覆盖其它字段——
+// save_config 是整体结构体写盘，前端一旦漏字段就可能把用户的确认/设置抹掉。
 
-/// 记下「用户已知 Node 低于 <min_version>，仍选择继续」；传空串 = 取消这个选择
-/// （首选项里取消勾选时走这里），恢复「版本过低就拦截启动」。
-/// 写入的是**当时的下限**：以后程序把下限提高了，比对不相等就会重新告警。
-pub fn remember_node_min_ack(app: &AppHandle, min_version: &str) -> Result<(), String> {
+/// 只改 config.json 里的一个字符串键（读取-修改-写回）。
+/// 写盘仍然走 L-6 的原子替换（`write_atomic`），**绝不回落**成直接覆盖。
+fn write_config_key(app: &AppHandle, key: &str, value: &str) -> Result<(), String> {
     let dir = config_dir(app);
     std::fs::create_dir_all(&dir)
         .map_err(|e| i18n::fmt("err_cfg_dir", &[&dir.display().to_string(), &e.to_string()]))?;
@@ -741,10 +758,24 @@ pub fn remember_node_min_ack(app: &AppHandle, min_version: &str) -> Result<(), S
     if !root.is_object() {
         root = serde_json::to_value(Config::default()).unwrap_or_default();
     }
-    root["node_min_ack"] = serde_json::Value::String(min_version.trim().to_string());
+    root[key] = serde_json::Value::String(value.trim().to_string());
     let text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
     write_atomic(&path, text.as_bytes())
         .map_err(|e| i18n::fmt("err_cfg_write", &[&path.display().to_string(), &e.to_string()]))
+}
+
+/// 记下「用户已知 Node 低于 <min_version>，仍选择继续」；传空串 = 取消这个选择
+/// （首选项里取消勾选时走这里），恢复「版本过低就拦截启动」。
+/// 写入的是**当时的下限**：以后程序把下限提高了，比对不相等就会重新告警。
+pub fn remember_node_min_ack(app: &AppHandle, min_version: &str) -> Result<(), String> {
+    write_config_key(app, "node_min_ack", min_version)
+}
+
+/// 记下工具栏模式偏好（调用方先用 `normalize_toolbar_mode` 归一化）。
+/// 由快捷键 Ctrl+Shift+H 直接切换模式时调用：那条路径没有设置页表单可提交，
+/// 只该动这一个键（首选项「保存」那条路仍走 save_config 整体提交）。
+pub fn set_toolbar_mode(app: &AppHandle, mode: &str) -> Result<(), String> {
+    write_config_key(app, "toolbar_mode", mode)
 }
 
 // ---------- 界面语言 sidecar（首次运行向导专用） ----------
@@ -877,5 +908,34 @@ mod tests {
         assert!(!target.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------- 工具栏模式（pinned / auto） ----------
+
+    /// 归一化：非法值 / 空值一律回落 pinned（历史行为），只认 auto 一族的写法。
+    #[test]
+    fn toolbar_mode_normalization() {
+        assert_eq!(normalize_toolbar_mode("auto"), "auto");
+        assert_eq!(normalize_toolbar_mode("  AUTO  "), "auto");
+        assert_eq!(normalize_toolbar_mode("auto-hide"), "auto");
+        assert_eq!(normalize_toolbar_mode("auto_hide"), "auto");
+        assert_eq!(normalize_toolbar_mode("pinned"), "pinned");
+        assert_eq!(normalize_toolbar_mode(""), "pinned");
+        assert_eq!(normalize_toolbar_mode("floating"), "pinned");
+        assert_eq!(Config::default().toolbar_mode, "pinned");
+    }
+
+    /// 老配置（没有 toolbar_mode 字段）必须反序列化成 pinned：这是「升级不改变行为」的
+    /// 硬要求 —— 哪天有人把默认值改成 auto，所有人的工具栏都会在升级后突然消失。
+    #[test]
+    fn legacy_config_without_toolbar_mode_falls_back_to_pinned() {
+        let legacy: Config =
+            serde_json::from_str(r#"{"port":3080,"language":"zh"}"#).expect("老配置应能解析");
+        assert_eq!(legacy.toolbar_mode, "pinned");
+        assert_eq!(legacy.port, 3080);
+        // 显式写了 auto 时照常生效（键名拼错 / 换写法由 normalize_toolbar_mode 兜底）
+        let current: Config =
+            serde_json::from_str(r#"{"toolbar_mode":"auto"}"#).expect("新配置应能解析");
+        assert_eq!(current.toolbar_mode, "auto");
     }
 }

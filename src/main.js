@@ -291,12 +291,22 @@ function isNodeVersionError(p) {
 function onStatus(p) {
   const prev = status;
   status = p.status;
-  // 防御性同步：状态事件说处于安全模式而本地标记未置（理论上不会发生，
-  // 事件丢失时兜底），从后端补一次完整的 SafeReport 再渲染
+  // 防御性同步：状态事件说处于安全模式而本地标记未置（事件丢失时兜底），
+  // 从后端补一次完整的 SafeReport 再渲染。
+  //
+  // 注意顺序：这里要**先落琥珀标记再继续往下**（同步 applySafeUI），不能只靠
+  // `invoke('get_safe_status').then(...)` 那一路 —— 那是异步的，会晚于本次状态渲染。
+  // 竞态就在这段时间里：安全实例就绪时 Rust 先 `set_status("running")` 再
+  // `open_dsh_webview`（见 process.rs wait_ready_and_embed），于是本函数会带着
+  // `safeMode` 仍为 false 一路跑到 `refreshButtons()` —— 而 refreshButtons 此时已经
+  // 从 `starting` 里出来了，`busy` 变 false，启动/停止/重启/更新四个按钮**不是禁用态**
+  // 而是"可点但没有任何反应"（Rust 侧有门禁，点了没动静）。更关键的是
+  // `applyToolbarMode()` 会在 `safeMode === false` 下算出 `auto = true`，给 body 挂上
+  // `.tb-auto` —— 工具栏立刻按自动隐藏规则滑走，而 `#tb-band` 还是**日常模式的浅灰**，
+  // 于是用户看到的就是"刚进安全模式时工具栏是暗的"，鼠标点一下触发焦点重排才恢复。
+  // 先同步置标记，后面所有判定（refreshButtons / applyToolbarMode）当场就是对的。
   if (p.safe_mode && !safeMode && !safeBusy) {
-    invoke('get_safe_status')
-      .then((s) => { if (s && s.active) applySafeUI(true, s.report); })
-      .catch(() => {});
+    applySafeUI(true, safeReport || { port: p.port });
   }
   statusMessage = p.message || null; // 供 renderWaitLine 显示开机自启延迟等提示（Rust 端已本地化）
   const map = STATUS_META[p.status] || { key: null, dot: 'gray' };
@@ -488,6 +498,13 @@ function onSafeModeChange(p) {
     }
   }
   refreshButtons();
+  // 工具栏显示模式：进入/退出安全模式都会翻转 `toolbarAutoActive()`，必须重算一次 ——
+  // 但要**排在 refreshButtons 之后**，因为 applyToolbarMode 会把 `toolbarLive` 刷成
+  // 当前 `dshPageLive()`。本事件到达时安全实例通常还在 `starting`（Rust 是先 spawn +
+  // set_status("starting")，等 HTTP 就绪才 emit_safe_change("entered")），
+  // 此刻 toolbarLive 应当是 false；等真正 running 时 onStatus → syncToolbarForStatus
+  // 会再算一次并把它纠正过来。顺序反过来会让状态与标记短暂不一致。
+  applyToolbarMode();
 }
 
 /// 修复验证闭环：退出安全模式后 Rust 端监控日常实例就绪情况，超时/失败发 safe-verify
@@ -661,6 +678,11 @@ function applyToolbarMode() {
   if (!auto) {
     document.body.classList.add('tb-shown');  // 固定显示：始终展开（该类只在 .tb-auto 下有样式）
     stopToolbarProbe();
+    // 安全模式下必须显式把「收起」状态清干净：`auto` 为 false 只说明**本函数这次**
+    // 不主动收起，但如果上一刻还挂着 `.tb-auto`（例如刚进入安全模式的那一瞬间），
+    // 工具栏在视觉上就是"滑走上去了"，而 #tb-band 还留着日常模式的浅灰 ——
+    // 表现正是"刚进安全模式时工具栏是暗的，点一下才亮"。这里连同类名一起复位。
+    document.body.classList.remove('tb-hover');
     setToolbarHidden(false);
     return;
   }

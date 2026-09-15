@@ -214,6 +214,19 @@ body.tb-auto #toolbar {
 
 body.tb-auto.tb-shown #toolbar { transform: translateY(0); }
 
+/* 安全模式硬约束的 CSS 兜底：无论 body 上残留了什么类，工具栏都必须留在原位。
+   JS 侧已有四道防线（content_offset_for 的最先短路分支 / set_toolbar_hidden 的
+   `&& !is_active` / force_toolbar_shown / 前端开关禁用），这里再加一道**纯声明式**的：
+   万一将来有人在安全模式期间漏调 applyToolbarMode（例如新增一条不经 refreshButtons
+   的事件路径），工具栏也不会滑走、更不会露出日常模式的浅灰 #tb-band。
+   注意选择器强度：`body.safe-mode.tb-auto #toolbar` 与 `body.tb-auto #toolbar`
+   同为 0,2,1，靠**排在后面**取胜 —— 所以这段必须留在那段之后，别往上挪。 */
+body.safe-mode.tb-auto #toolbar {
+  position: static;
+  transform: none;
+  box-shadow: none;
+}
+
 /* 动画期间露出的「工具栏面」：颜色与工具栏一致，遮住 0.25 秒里本该露出的页面底色。
    收起到位后它被铺满整窗的 DSH 页面整个盖住，平时看不见也不挡事。 */
 #tb-band {
@@ -228,6 +241,12 @@ body.tb-auto.tb-shown #toolbar { transform: translateY(0); }
   z-index: 54;
 }
 body.tb-auto #tb-band { display: block; }
+/* 安全模式下彻底关掉这条底衬。选择器必须写成 `body.safe-mode.tb-auto #tb-band`
+   （0,1,2）才压得住上面那条（0,1,1）—— 只写 `body.safe-mode #tb-band` 是压不住的。
+   #stage 在自动隐藏模式下会铺到 y=0，安全模式又强制固定显示，于是 #toolbar 不在文档流里，
+   这条 43.2px 的底衬就是唯一可能露在工具栏位置上的东西；它默认是**日常模式的浅灰**，
+   一旦露头就成了"工具栏是暗的"那个观感。直接 display:none 最省心。 */
+body.safe-mode.tb-auto #tb-band { display: none; }
 
 /* 透明触发条：鼠标进入即展开工具栏。z-index 低于工具栏、高于 #tb-band，
    于是「展开后」它是被工具栏盖住的（不会拦住按钮的点击）。 */
@@ -1020,6 +1039,17 @@ body.tb-auto .refresh-overlay { top: 0; }
 body.safe-mode #toolbar {
   background: var(--safe-toolbar-bg);
   border-bottom: 2px solid var(--safe-accent);
+}
+/* 工具栏的「面」也要一起换色：自动隐藏模式下 #toolbar 是 fixed 脱离文档流的，
+   #stage 会一直铺到 y=0，那条 43.2px 的底衬平时被两个东西盖着——
+   固定显示时被文档流里的 #toolbar，自动隐藏展开时被滑下来的 #toolbar。
+   两种情况都能盖住，所以默认确实看不见；但在安全模式下如果只剩 #tb-band 露头
+   （工具栏收起中、或 #toolbar 因故与 #tb-band 不同步），它就会以**日常模式的浅灰**
+   出现在琥珀色工具栏的位置上，看上去像"进入安全模式时工具栏是暗的、点一下才亮"。
+   把两者绑定成同一个变量，这种半亮状态就不可能被看见。 */
+body.safe-mode #tb-band {
+  background: var(--safe-toolbar-bg);
+  border-bottom-color: var(--safe-accent);
 }
 body.safe-mode #btn-safe {
   border-color: var(--safe-accent);

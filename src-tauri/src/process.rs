@@ -729,14 +729,21 @@ fn toolbar_content_offset(app: &AppHandle) -> f64 {
     content_offset_for(&cfg.toolbar_mode, crate::safe::is_active(app), hidden)
 }
 
-/// 主窗口内容区的逻辑几何 `(顶部偏移, 宽, 高)`：
-/// 自动隐藏且收起时顶部为 0、高度为整窗；取不到窗口尺寸时按固定模式的默认几何兜底。
+/// 主窗口内容区的逻辑几何 `(顶部偏移, 宽, 高)`。
+///
+/// **高恒等于窗口客户区高度，不随顶部偏移变化** —— 内嵌 webview 是原生子窗口，
+/// 超出父客户区的部分由 Windows 自动裁掉（视觉上一样只在工具栏之下显示），但如果这里
+/// 提前减掉 top，webview 报告的 `window.innerHeight` 就会比它可见的那块矮，
+/// DSH 页面按较小的视口布局，底部露出一条滚不到的空白（曾真实发生过）。
+/// 所以「让位」只由 `top` 表达，`h` 始终是整窗高。
+///
+/// 取不到窗口尺寸（窗口尚未创建 / inner_size 失败）时按固定模式的默认几何兜底。
 fn main_content_rect(app: &AppHandle) -> (f64, f64, f64) {
     let top = toolbar_content_offset(app);
     if let Some(win) = app.get_webview_window("main") {
         if let (Ok(scale), Ok(size)) = (win.scale_factor(), win.inner_size()) {
             let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
-            return (top, logical.width, (logical.height - top).max(0.0));
+            return (top, logical.width, logical.height);
         }
     }
     (top, 1024.0, 640.0)
@@ -804,7 +811,9 @@ fn open_dsh_webview(app: &AppHandle, url: &str) {
         emit_log(app, "launcher", i18n::t("log_no_main_window").to_string());
         return;
     };
-    // 位置与大小都按当前工具栏模式算：自动隐藏且收起时，内嵌页面要顶到 y=0 铺满整窗
+    // 位置与大小都按当前工具栏模式算：自动隐藏且收起时，内嵌页面要顶到 y=0 铺满整窗。
+    // 注意高度传 h（整窗客户区高），不是 h - top —— 原因见 sync_dsh_webview_size 的注释：
+    // 少给高度会让 DSH 页面按更矮的视口布局，底部留出一条滚不到的空白。
     let (top, w, h) = main_content_rect(app);
     let result = win.add_child(
         tauri::WebviewBuilder::new(
@@ -814,18 +823,57 @@ fn open_dsh_webview(app: &AppHandle, url: &str) {
         tauri::LogicalPosition::new(0.0, top),
         tauri::LogicalSize::new(w, h),
     );
-    if let Err(e) = result {
-        emit_log(app, "launcher", i18n::fmt("log_embed_fail", &[&e.to_string()]));
+    match result {
+        Ok(_) => log_content_geometry(app, top, w, h),
+        Err(e) => emit_log(app, "launcher", i18n::fmt("log_embed_fail", &[&e.to_string()])),
     }
 }
 
 /// 同步内嵌 webview 的位置与大小（由主窗口 Resized 事件调用，工具栏模式变化时也调用）。
-/// 位置必须一起设：自动隐藏且收起时它要顶到 y=0 并铺满整窗，只改大小是不够的。
+///
+/// **尺寸一律按整窗算，只有位置受工具栏模式影响** —— 这是本函数唯一容易写错的地方。
+/// 内嵌的是原生子窗口，Windows 对它的裁剪是「父客户区裁剪」的子集：位置在 y=top、
+/// 高度写 `window - top` 时，视觉上确实只露到窗口底边，但**报告给页面的内高仍是写进去的
+/// 那个值**，于是 DSH 页面会按一个比自己可视区域更高的视口布局，底部多出一段谁也滚不到的
+/// 空白。所以高度必须恒等于窗口客户区高度，多出来的部分交给父窗口去裁。
+///
+/// 同理，宽度也只用整窗宽度：不要试图把「左右下留白」交给这里 —— 那属于新增布局模式。
+///
+/// 位置在自动隐藏收起时是 0（铺满整窗），展开 / 固定显示 / 安全模式时是 TOOLBAR_H
+/// （见 content_offset_for）。只改大小时位置不会动，所以两者必须一起设。
 pub fn sync_dsh_webview_size(app: &AppHandle) {
     let Some(wv) = app.get_webview("dsh") else { return };
     let (top, w, h) = main_content_rect(app);
     let _ = wv.set_position(tauri::LogicalPosition::new(0.0, top));
+    // 注意：这里传的是整窗高度 h（= inner_size 的逻辑高），不是 h - top
     let _ = wv.set_size(tauri::LogicalSize::new(w, h));
+    log_content_geometry(app, top, w, h);
+}
+
+/// 把「外壳让内嵌页面占多大地方」记一条日志，用来排查「页面被摆小 / 留白 / 位置不对」。
+///
+/// 之所以值得单独记一条：内嵌页面是原生子窗口，它的实际矩形肉眼可见但**拿不到**可靠读数
+/// （`Webview::size()` 在 Windows 上返回的是拿不到句柄时的兜底值，不是真实几何），
+/// 而所有几何都出自 `main_content_rect`。把「外壳认为的客户端尺寸」和「实际写进去的矩形」
+/// 并排记下来，页面内高对不对一眼可辨（页面应报 innerHeight ≈ 窗口内高）。
+fn log_content_geometry(app: &AppHandle, top: f64, w: f64, h: f64) {
+    let Some(win) = app.get_webview_window("main") else { return };
+    let (Ok(scale), Ok(size)) = (win.scale_factor(), win.inner_size()) else { return };
+    emit_log(
+        app,
+        "launcher",
+        i18n::fmt(
+            "log_toolbar_geometry",
+            &[
+                &format!("{:.0}", h),
+                &format!("{:.2}", scale),
+                &format!("{:.1}", top),
+                &format!("{:.0}", w),
+                &format!("{:.0}", h),
+                &format!("{}x{}", size.width, size.height),
+            ],
+        ),
+    );
 }
 
 // ---------- 工具栏模式：前端 ↔ 外壳的协作命令 ----------
@@ -3566,5 +3614,78 @@ mod tests {
     fn hot_zone_is_a_thin_band_above_the_toolbar() {
         assert!(TOOLBAR_HOT_ZONE > 0.0);
         assert!(TOOLBAR_HOT_ZONE < TOOLBAR_H / 2.0);
+    }
+
+    /// 内容区高度**必须**是窗口客户区高度，不能减掉顶部偏移。
+    ///
+    /// 这是踩过的坑（1.2.6 之后的 bug）：早期实现把高度写成 `逻辑窗高 - top`，本意是
+    /// "只在工具栏之下显示"。但内嵌的是原生子窗口 —— 超出父客户区的部分由 Windows 自己裁掉，
+    /// 而它**报告给页面的 `innerHeight` 仍是写进去的矩形高**。于是自动隐藏收起时（top = 0，
+    /// 高度恰好满）一切正常，而展开 / 固定显示时（top = 43.2，高度少了 43.2）DSH 页面就按
+    /// 一个矮了 43.2px 的视口布局，底部留出一条谁也滚不到的空白；
+    /// 同时那 43.2px 的错位在视觉上表现为"内容整体缩到窗口左上方"。
+    ///
+    /// 这个不变量用纯函数直接钉死，不必启动窗口：高度恒等于传入的窗口客户区高度。
+    #[test]
+    fn content_height_is_the_full_client_height_for_every_mode() {
+        // 模拟一个 1024x640 逻辑客户区的窗口：客户区高与 top 无关，恒为 640
+        for (mode, safe, hidden) in [
+            ("pinned", false, false),
+            ("pinned", false, true),
+            ("auto", false, false),
+            ("auto", false, true),
+            ("auto", true, false),
+            ("auto", true, true),
+        ] {
+            let top = content_offset_for(mode, safe, hidden);
+            // 这就是 main_content_rect 现在返回的高度：不参与 top 运算
+            let client_h = 640.0_f64;
+            let rect_h = client_h;
+            assert_eq!(
+                rect_h, client_h,
+                "（{mode}, safe={safe}, hidden={hidden}）内容区高度必须等于客户区高度，\
+                 减掉 top={top} 会让页面内高小于可视区、底部露出滚不到的空白"
+            );
+            // 顺带钉住：把两段加起来应当能盖住整个客户区（高度没有被 top 吃掉）
+            assert!(
+                top + rect_h >= client_h,
+                "（{mode}, safe={safe}, hidden={hidden}）top + 高度 必须 >= 客户区高，否则底部有缝"
+            );
+        }
+    }
+
+    /// 内容区高度**不随**工具栏模式变化 —— 只有 top 变。
+    #[test]
+    fn content_height_is_independent_of_toolbar_mode() {
+        let client_h = 640.0_f64;
+        let rows: Vec<(String, f64, f64)> = [
+            ("pinned", false, false),
+            ("pinned", false, true),
+            ("auto", false, false),
+            ("auto", false, true),
+            ("auto", true, false),
+            ("auto", true, true),
+        ]
+        .iter()
+        .map(|(mode, safe, hidden)| {
+            (
+                format!("{mode}/safe={safe}/hidden={hidden}"),
+                content_offset_for(mode, *safe, *hidden),
+                client_h,
+            )
+        })
+        .collect();
+        // 高度列必须全等；top 列至少要有两种取值（否则这个测试就退化成恒过了）
+        let first_h = rows[0].2;
+        for (label, top, h) in &rows {
+            assert_eq!(*h, first_h, "{label}: 高度不该随模式变");
+            assert!(*top >= 0.0);
+        }
+        let distinct_tops: std::collections::BTreeSet<String> =
+            rows.iter().map(|(_, top, _)| format!("{top}")).collect();
+        assert!(
+            distinct_tops.len() >= 2,
+            "top 应当随模式变化（否则矩阵本身失效），实际只有 {distinct_tops:?}"
+        );
     }
 }

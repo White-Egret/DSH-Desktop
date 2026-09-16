@@ -729,24 +729,47 @@ fn toolbar_content_offset(app: &AppHandle) -> f64 {
     content_offset_for(&cfg.toolbar_mode, crate::safe::is_active(app), hidden)
 }
 
+/// 内容区几何取不到窗口尺寸时的兜底宽高（逻辑像素）。
+/// 取兜底值本身就意味着「这个窗口没读到」，会由 `log_content_geometry` 记成
+/// `客户区 NO-WINDOW`，不要在别处再复制这两个常量。
+const FALLBACK_CONTENT_W: f64 = 1024.0;
+const FALLBACK_CONTENT_H: f64 = 640.0;
+
+/// 纯函数：内容区高度 = 客户区高 - 顶部偏移（负值归零）。
+///
+/// 内嵌 webview 是**原生子窗口**：位置写 `(0, top)`，高度就必须同步减去 `top`，
+/// 让顶边 `top + h` 正好落在客户区底边。**这是本仓库最容易改反的一处**，所以单独
+/// 抽成纯函数，由离线单测直接钉住方向（不启动窗口也能验）。
+///
+/// 方向写反（把高度写成整窗高）的后果：底边越过父客户区 `top` 像素，Windows 裁掉的
+/// 正是**底部可见内容**，而 WebView2 仍按写进去的完整高度布局 →
+/// 页面底部永远看不到（用户实测「固定模式下底部被切掉」，
+/// resize 时表现为「拉高窗口后页面缩小跳左上」）。
+fn content_height(client_h: f64, top: f64) -> f64 {
+    (client_h - top).max(0.0)
+}
+
+/// 主窗口客户区的**逻辑**尺寸 `(宽, 高)`；窗口句柄或尺寸读不到时返回 `None`。
+fn main_client_size(app: &AppHandle) -> Option<(f64, f64)> {
+    let win = app.get_webview_window("main")?;
+    let scale = win.scale_factor().ok()?;
+    let size = win.inner_size().ok()?;
+    let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
+    Some((logical.width, logical.height))
+}
+
 /// 主窗口内容区的逻辑几何 `(顶部偏移, 宽, 高)`。
 ///
-/// **高恒等于窗口客户区高度，不随顶部偏移变化** —— 内嵌 webview 是原生子窗口，
-/// 超出父客户区的部分由 Windows 自动裁掉（视觉上一样只在工具栏之下显示），但如果这里
-/// 提前减掉 top，webview 报告的 `window.innerHeight` 就会比它可见的那块矮，
-/// DSH 页面按较小的视口布局，底部露出一条滚不到的空白（曾真实发生过）。
-/// 所以「让位」只由 `top` 表达，`h` 始终是整窗高。
-///
-/// 取不到窗口尺寸（窗口尚未创建 / inner_size 失败）时按固定模式的默认几何兜底。
+/// 高度 = 客户区高 - 顶部偏移（见 `content_height`）；宽度用整窗宽。
+/// 取不到窗口尺寸（窗口尚未创建 / inner_size 失败）时按兜底几何，且**不会静默**：
+/// 调用方随后打的 `log_toolbar_geometry` 会显示 `客户区 NO-WINDOW` 且内嵌尺寸正是
+/// `1024x(640-top)` —— 从日志一眼能看出「这里退化了」，不必另外再记一条。
 fn main_content_rect(app: &AppHandle) -> (f64, f64, f64) {
     let top = toolbar_content_offset(app);
-    if let Some(win) = app.get_webview_window("main") {
-        if let (Ok(scale), Ok(size)) = (win.scale_factor(), win.inner_size()) {
-            let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
-            return (top, logical.width, logical.height);
-        }
+    if let Some((w, client_h)) = main_client_size(app) {
+        return (top, w, content_height(client_h, top));
     }
-    (top, 1024.0, 640.0)
+    (top, FALLBACK_CONTENT_W, content_height(FALLBACK_CONTENT_H, top))
 }
 
 /// 在主窗口内创建（或刷新）内嵌的 DSH Webview。
@@ -788,6 +811,16 @@ fn open_dsh_webview(app: &AppHandle, url: &str) {
     // 重新导航」。这样那次判断不必去解密磁盘记录，也不受「换用户后解不开」影响。
     app.state::<AppState>().set_last_loaded_url(parsed.as_str());
 
+    // 入口探针（诊断用，见 i18n 里 log_embed_enter 的注释）。
+    // 必须在分支之前、且**无条件**：它的唯一价值就是「一定出现在日志里」——
+    // 用来把「根本没走到内嵌这段代码」与「走到了但几何日志被吞掉」区分开。
+    let branch = if app.get_webview("dsh").is_some() {
+        "refresh-existing"
+    } else {
+        "create-child"
+    };
+    emit_log(app, "launcher", i18n::fmt("log_embed_enter", &[&branch]));
+
     // 已存在：直接导航到当前 URL（端口可能已变更）。
     // 安全（HIGH-1 修复）：这里原来用 `wv.eval(&format!("window.location.replace('{}')", url))`，
     // 而 url 来自 DSH 子进程输出（模型回复、工具结果都可能进入 stdout/stderr，属于不可信数据）。
@@ -811,9 +844,9 @@ fn open_dsh_webview(app: &AppHandle, url: &str) {
         emit_log(app, "launcher", i18n::t("log_no_main_window").to_string());
         return;
     };
-    // 位置与大小都按当前工具栏模式算：自动隐藏且收起时，内嵌页面要顶到 y=0 铺满整窗。
-    // 注意高度传 h（整窗客户区高），不是 h - top —— 原因见 sync_dsh_webview_size 的注释：
-    // 少给高度会让 DSH 页面按更矮的视口布局，底部留出一条滚不到的空白。
+    // 位置与大小都按当前工具栏模式算：自动隐藏且收起时 top = 0，内嵌页面顶到 y=0 铺满整窗；
+    // 展开 / 固定显示 / 安全模式时 top = TOOLBAR_H，高度已由 main_content_rect 同步减掉 top
+    // （保证「顶边 + 高度 == 客户区高」），底边不会越过客户区，不依赖父窗口裁剪兜底。
     let (top, w, h) = main_content_rect(app);
     let result = win.add_child(
         tauri::WebviewBuilder::new(
@@ -831,21 +864,21 @@ fn open_dsh_webview(app: &AppHandle, url: &str) {
 
 /// 同步内嵌 webview 的位置与大小（由主窗口 Resized 事件调用，工具栏模式变化时也调用）。
 ///
-/// **尺寸一律按整窗算，只有位置受工具栏模式影响** —— 这是本函数唯一容易写错的地方。
-/// 内嵌的是原生子窗口，Windows 对它的裁剪是「父客户区裁剪」的子集：位置在 y=top、
-/// 高度写 `window - top` 时，视觉上确实只露到窗口底边，但**报告给页面的内高仍是写进去的
-/// 那个值**，于是 DSH 页面会按一个比自己可视区域更高的视口布局，底部多出一段谁也滚不到的
-/// 空白。所以高度必须恒等于窗口客户区高度，多出来的部分交给父窗口去裁。
+/// **位置是 `(0, top)`，高度是「客户区高 - top」** —— 两者必须一起设，且方向必须一致：
+/// 只改大小时位置不会动，反之亦然。
 ///
-/// 同理，宽度也只用整窗宽度：不要试图把「左右下留白」交给这里 —— 那属于新增布局模式。
+/// 方向为什么不能反（这里写反过一次，用户实测复现）：内嵌的是**原生子窗口**，它的矩形
+/// 相对父客户区。位置给 `top` 而高度给整窗高时，底边 `top + h` 会越过客户区 `top` 像素；
+/// Windows 把越界部分裁掉，而**被裁掉的正是底部可见内容**，WebView2 却仍按写进去的完整
+/// 高度布局 —— 于是页面底部永远看不到，resize 时表现为「页面缩小并跳到左上」。
+/// 正确做法是让高度同步缩减，保证 `top + h == 客户区高`（`content_height`）。
 ///
-/// 位置在自动隐藏收起时是 0（铺满整窗），展开 / 固定显示 / 安全模式时是 TOOLBAR_H
-/// （见 content_offset_for）。只改大小时位置不会动，所以两者必须一起设。
+/// 宽度只用整窗宽度：不要试图把「左右留白」交给这里 —— 那属于新增布局模式。
 pub fn sync_dsh_webview_size(app: &AppHandle) {
     let Some(wv) = app.get_webview("dsh") else { return };
     let (top, w, h) = main_content_rect(app);
     let _ = wv.set_position(tauri::LogicalPosition::new(0.0, top));
-    // 注意：这里传的是整窗高度 h（= inner_size 的逻辑高），不是 h - top
+    // h 已经是「客户区高 - top」（见 main_content_rect / content_height）
     let _ = wv.set_size(tauri::LogicalSize::new(w, h));
     log_content_geometry(app, top, w, h);
 }
@@ -857,20 +890,30 @@ pub fn sync_dsh_webview_size(app: &AppHandle) {
 /// 而所有几何都出自 `main_content_rect`。把「外壳认为的客户端尺寸」和「实际写进去的矩形」
 /// 并排记下来，页面内高对不对一眼可辨（页面应报 innerHeight ≈ 窗口内高）。
 fn log_content_geometry(app: &AppHandle, top: f64, w: f64, h: f64) {
-    let Some(win) = app.get_webview_window("main") else { return };
-    let (Ok(scale), Ok(size)) = (win.scale_factor(), win.inner_size()) else { return };
+    // ⚠️ 这里**不允许**再用 `let ... else { return }` 静默退出。
+    // 这行日志是「页面被摆错」唯一的外部可观测出口，守卫一旦静默，日志里就彻底没有这条记录，
+    // 排查时很容易把「读不到窗口」误判成「这段代码根本没跑」（真实踩过：7 次内嵌、0 条几何日志）。
+    // 现在读不到窗口也照常打一条，并把异常写进日志的取值里：
+    //   缩放列 = -1.00、窗口内高列 = -1、客户区列 = NO-WINDOW  →  窗口句柄/尺寸读不到。
+    let client = app.get_webview_window("main").and_then(|win| {
+        let scale = win.scale_factor().ok()?;
+        let size = win.inner_size().ok()?;
+        let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
+        Some((scale, format!("{}x{}", size.width, size.height), logical.height))
+    });
+    let (scale, client_text, client_h) = client.unwrap_or((-1.0, "NO-WINDOW".to_string(), -1.0));
     emit_log(
         app,
         "launcher",
         i18n::fmt(
             "log_toolbar_geometry",
             &[
-                &format!("{:.0}", h),
+                &format!("{:.0}", client_h),
                 &format!("{:.2}", scale),
                 &format!("{:.1}", top),
                 &format!("{:.0}", w),
                 &format!("{:.0}", h),
-                &format!("{}x{}", size.width, size.height),
+                &client_text,
             ],
         ),
     );
@@ -3616,19 +3659,15 @@ mod tests {
         assert!(TOOLBAR_HOT_ZONE < TOOLBAR_H / 2.0);
     }
 
-    /// 内容区高度**必须**是窗口客户区高度，不能减掉顶部偏移。
+    /// 内容区高度**必须**等于「客户区高 - 顶部偏移」，让「顶边 + 高度」正好落在客户区底边。
     ///
-    /// 这是踩过的坑（1.2.6 之后的 bug）：早期实现把高度写成 `逻辑窗高 - top`，本意是
-    /// "只在工具栏之下显示"。但内嵌的是原生子窗口 —— 超出父客户区的部分由 Windows 自己裁掉，
-    /// 而它**报告给页面的 `innerHeight` 仍是写进去的矩形高**。于是自动隐藏收起时（top = 0，
-    /// 高度恰好满）一切正常，而展开 / 固定显示时（top = 43.2，高度少了 43.2）DSH 页面就按
-    /// 一个矮了 43.2px 的视口布局，底部留出一条谁也滚不到的空白；
-    /// 同时那 43.2px 的错位在视觉上表现为"内容整体缩到窗口左上方"。
-    ///
-    /// 这个不变量用纯函数直接钉死，不必启动窗口：高度恒等于传入的窗口客户区高度。
+    /// ⚠️ 这个方向曾经写反过（把高度写成整窗高），用户实测复现「固定模式下底部被切掉」。
+    /// 上一版这个测试**根本没调用被测函数**：它把 `client_h = 640.0` 写成字面量，再断言
+    /// `rect_h == client_h`，于是代码写反时照样全绿 —— CI 拦不住就是栽在这。
+    /// 现在改为直接调用 `content_height`（`main_content_rect` 用的就是它）。
     #[test]
-    fn content_height_is_the_full_client_height_for_every_mode() {
-        // 模拟一个 1024x640 逻辑客户区的窗口：客户区高与 top 无关，恒为 640
+    fn content_height_is_the_client_height_minus_the_toolbar_offset() {
+        let client_h = 640.0_f64;
         for (mode, safe, hidden) in [
             ("pinned", false, false),
             ("pinned", false, true),
@@ -3638,25 +3677,33 @@ mod tests {
             ("auto", true, true),
         ] {
             let top = content_offset_for(mode, safe, hidden);
-            // 这就是 main_content_rect 现在返回的高度：不参与 top 运算
-            let client_h = 640.0_f64;
-            let rect_h = client_h;
+            let h = content_height(client_h, top);
             assert_eq!(
-                rect_h, client_h,
-                "（{mode}, safe={safe}, hidden={hidden}）内容区高度必须等于客户区高度，\
-                 减掉 top={top} 会让页面内高小于可视区、底部露出滚不到的空白"
+                h,
+                client_h - top,
+                "（{mode}, safe={safe}, hidden={hidden}）高度必须是客户区高减 top"
             );
-            // 顺带钉住：把两段加起来应当能盖住整个客户区（高度没有被 top 吃掉）
+            // 关键不变量：顶边 + 高度 == 客户区高（**相等**，不是 >=）。
+            // 写成 >= 会把「越界 top 像素」判成合格，正是上一版的错误。
+            let bottom = top + h;
             assert!(
-                top + rect_h >= client_h,
-                "（{mode}, safe={safe}, hidden={hidden}）top + 高度 必须 >= 客户区高，否则底部有缝"
+                (bottom - client_h).abs() < 1e-9,
+                "（{mode}, safe={safe}, hidden={hidden}）top({top}) + h({h}) = {bottom} \
+                 必须等于客户区高 {client_h}：多一分底部被裁掉，少一分底部露白"
             );
         }
+        // 边界：客户区比工具栏还矮时归零，不产生负高度
+        assert_eq!(content_height(10.0, TOOLBAR_H), 0.0);
+        // 收起（top = 0）时铺满整窗
+        assert_eq!(content_height(640.0, 0.0), 640.0);
     }
 
-    /// 内容区高度**不随**工具栏模式变化 —— 只有 top 变。
+    /// 高度必须**跟着 top 变**：top 有几种取值，高度就有几种。
+    ///
+    /// 上一版叫 `content_height_is_independent_of_toolbar_mode`，断言的正是反过来的事
+    /// （"高度不随模式变"）—— 名字和断言体一起错，所以改名 + 翻转断言。
     #[test]
-    fn content_height_is_independent_of_toolbar_mode() {
+    fn content_height_tracks_the_toolbar_offset() {
         let client_h = 640.0_f64;
         let rows: Vec<(String, f64, f64)> = [
             ("pinned", false, false),
@@ -3668,24 +3715,33 @@ mod tests {
         ]
         .iter()
         .map(|(mode, safe, hidden)| {
+            let top = content_offset_for(mode, *safe, *hidden);
             (
                 format!("{mode}/safe={safe}/hidden={hidden}"),
-                content_offset_for(mode, *safe, *hidden),
-                client_h,
+                top,
+                content_height(client_h, top),
             )
         })
         .collect();
-        // 高度列必须全等；top 列至少要有两种取值（否则这个测试就退化成恒过了）
-        let first_h = rows[0].2;
-        for (label, top, h) in &rows {
-            assert_eq!(*h, first_h, "{label}: 高度不该随模式变");
-            assert!(*top >= 0.0);
-        }
+        // top 列至少要有两种取值（否则这个测试退化成恒过了）
         let distinct_tops: std::collections::BTreeSet<String> =
             rows.iter().map(|(_, top, _)| format!("{top}")).collect();
         assert!(
             distinct_tops.len() >= 2,
             "top 应当随模式变化（否则矩阵本身失效），实际只有 {distinct_tops:?}"
+        );
+        // 每个组合都必须满足不变量，且高度要跟着 top 分档
+        let mut heights = std::collections::BTreeSet::new();
+        for (label, top, h) in &rows {
+            assert!(
+                (*top + *h - client_h).abs() < 1e-9,
+                "{label}: top {top} + h {h} 必须等于客户区高 {client_h}"
+            );
+            heights.insert(format!("{h}"));
+        }
+        assert!(
+            heights.len() >= 2,
+            "高度应当随 top 变化（收起时铺满整窗、展开时让出工具栏），实际只有 {heights:?}"
         );
     }
 }

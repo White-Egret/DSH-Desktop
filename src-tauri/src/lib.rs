@@ -103,6 +103,16 @@ pub fn run(launched_by_autostart: bool) {
                     let _ = main.show();
                     let _ = main.set_focus();
                 }
+                // 预填主窗口尺寸缓存：几何同步的真值来源（见 process::AppState 字段注释）。
+                // 必须在首次内嵌 add_child 之前做 —— 之后 get_webview_window("main") 会读不到。
+                // 即便这里失败也无妨：第一次 Resized 会用事件自带的窗口句柄补上。
+                if let (Ok(scale), Ok(size)) = (main.scale_factor(), main.inner_size()) {
+                    let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
+                    app.state::<process::AppState>().set_main_window_logical(
+                        logical.width,
+                        logical.height,
+                    );
+                }
             }
 
             // ---- 2. 构建托盘菜单（文案随界面语言） ----
@@ -229,8 +239,31 @@ pub fn run(launched_by_autostart: bool) {
                     let _ = window.hide();
                 }
             }
-            // 窗口尺寸变化时同步内嵌 DSH Webview 的大小（工具栏 43.2px 之下填满）
-            WindowEvent::Resized(_) if window.label() == "main" => {
+            // 窗口尺寸变化时同步内嵌 DSH Webview 的大小（工具栏 43.2px 之下填满）。
+            // 先刷新尺寸缓存：用**事件自带的窗口句柄**读，不查 get_webview_window —
+            // 内嵌 webview 创建后那个查找会读不到，而缓存才是几何真值来源
+            // （v1.3.2 日志实证：resize 全部退回 1024x640 兜底 → 页面缩小跳左上）。
+            WindowEvent::Resized(size) if window.label() == "main" => {
+                if let Ok(scale) = window.scale_factor() {
+                    let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
+                    window
+                        .app_handle()
+                        .state::<process::AppState>()
+                        .set_main_window_logical(logical.width, logical.height);
+                }
+                process::sync_dsh_webview_size(window.app_handle());
+            }
+            // 跨显示器拖放导致的 DPI 缩放变化：Windows 不保证一定伴随 Resized，
+            // 逻辑尺寸可能因此变化，同样用事件自带的句柄刷新缓存再同步。
+            WindowEvent::ScaleFactorChanged {
+                scale_factor,
+                new_inner_size,
+            } if window.label() == "main" => {
+                let logical: tauri::LogicalSize<f64> = new_inner_size.to_logical(*scale_factor);
+                window
+                    .app_handle()
+                    .state::<process::AppState>()
+                    .set_main_window_logical(logical.width, logical.height);
                 process::sync_dsh_webview_size(window.app_handle());
             }
             // 真正销毁时清理 DSH 进程（CloseRequested 已被拦截转 hide，正常路径不会到这里）

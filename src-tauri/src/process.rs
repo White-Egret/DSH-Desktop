@@ -92,6 +92,16 @@ pub struct AppState {
     /// 这是**运行时**状态而非配置（配置里存的是 toolbar_mode 偏好）：由前端
     /// set_toolbar_hidden 命令驱动，安全模式激活时恒为 false —— 见 content_offset_for。
     pub toolbar_hidden: AtomicBool,
+    /// 主窗口客户区**逻辑尺寸**缓存 `(宽, 高)`，是内嵌 webview 几何的**唯一真值来源**：
+    /// 启动时填一次，之后每次 `WindowEvent::Resized` / `ScaleFactorChanged` 用事件自带的
+    /// 窗口句柄刷新（见 lib.rs）。
+    ///
+    /// 为什么不实时 `get_webview_window("main")` 去读：v1.3.2 日志实证 —— 首次
+    /// `add_child` **之前**同样的调用能读到真实尺寸（内嵌 1460x739），`add_child`
+    /// **之后**全部失败（每条几何日志都是 `客户区 NO-WINDOW` + 缩放 `-1.00`，
+    /// resize 同步全部退回 1024x640 兜底 → 页面缩小跳左上）。到底是「查找返回 None」
+    /// 还是「inner_size/scale_factor 报错」无从区分、也不重要：热路径不依赖这次调用即可。
+    main_window_logical: Mutex<Option<(f64, f64)>>,
     /// 首次运行引导安装互斥标志（同一时间只允许一个引导任务）
     pub setup_busy: AtomicBool,
     /// 当前进程是否由「开机自启」触发（main.rs 检测 --autostart 参数后置 true）。
@@ -118,6 +128,7 @@ impl AppState {
             detected_url: Mutex::new(None),
             last_loaded_url: Mutex::new(String::new()),
             toolbar_hidden: AtomicBool::new(false),
+            main_window_logical: Mutex::new(None),
             setup_busy: AtomicBool::new(false),
             launched_by_autostart: AtomicBool::new(launched_by_autostart),
             #[cfg(windows)]
@@ -160,6 +171,16 @@ impl AppState {
     /// pub(crate)：安全模式启动前也要清掉上一轮的 stderr 记忆（与日常启动同款处理）
     pub(crate) fn take_last_stderr(&self) -> Option<String> {
         self.last_stderr.lock().unwrap().take()
+    }
+
+    /// 记录主窗口客户区逻辑尺寸（启动时 / Resized / ScaleFactorChanged 时调用）。
+    pub fn set_main_window_logical(&self, w: f64, h: f64) {
+        *self.main_window_logical.lock().unwrap() = Some((w, h));
+    }
+
+    /// 最近一次已知的主窗口客户区逻辑尺寸；还没记录过则 None（几何走兜底）。
+    pub fn main_window_logical(&self) -> Option<(f64, f64)> {
+        *self.main_window_logical.lock().unwrap()
     }
 
     /// 记下「刚把哪个地址交给了 webview」（含令牌的完整地址，只在内存里）
@@ -749,21 +770,32 @@ fn content_height(client_h: f64, top: f64) -> f64 {
     (client_h - top).max(0.0)
 }
 
-/// 主窗口客户区的**逻辑**尺寸 `(宽, 高)`；窗口句柄或尺寸读不到时返回 `None`。
+/// 主窗口客户区的**逻辑**尺寸 `(宽, 高)`；从未记录过时返回 `None`。
+///
+/// 优先读 `AppState` 缓存（启动时 + 每次 Resized 刷新，见该字段注释）。
+/// 缓存还没建立时（正常不会发生）退回实时读一次并回填 —— 注意这次实时读在首个
+/// 内嵌 webview 创建之后会失败（v1.3.2 日志实证，见 AppState 字段注释），
+/// 所以它只是冷启动兜底，绝不是热路径依赖。
 fn main_client_size(app: &AppHandle) -> Option<(f64, f64)> {
+    let state = app.state::<AppState>();
+    if let Some(size) = state.main_window_logical() {
+        return Some(size);
+    }
     let win = app.get_webview_window("main")?;
     let scale = win.scale_factor().ok()?;
     let size = win.inner_size().ok()?;
     let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
+    state.set_main_window_logical(logical.width, logical.height);
     Some((logical.width, logical.height))
 }
 
 /// 主窗口内容区的逻辑几何 `(顶部偏移, 宽, 高)`。
 ///
 /// 高度 = 客户区高 - 顶部偏移（见 `content_height`）；宽度用整窗宽。
-/// 取不到窗口尺寸（窗口尚未创建 / inner_size 失败）时按兜底几何，且**不会静默**：
-/// 调用方随后打的 `log_toolbar_geometry` 会显示 `客户区 NO-WINDOW` 且内嵌尺寸正是
-/// `1024x(640-top)` —— 从日志一眼能看出「这里退化了」，不必另外再记一条。
+/// 尺寸来自 AppState 缓存（见 `main_client_size`）；缓存从未建立（窗口尚未创建、
+/// 启动预填失败）时按兜底几何，且**不会静默**：调用方随后打的 `log_toolbar_geometry`
+/// 会显示 `客户区 NO-CACHE` 且内嵌尺寸正是 `1024x(640-top)` —— 从日志一眼能看出
+/// 「这里退化了」，不必另外再记一条。
 fn main_content_rect(app: &AppHandle) -> (f64, f64, f64) {
     let top = toolbar_content_offset(app);
     if let Some((w, client_h)) = main_client_size(app) {
@@ -894,14 +926,20 @@ fn log_content_geometry(app: &AppHandle, top: f64, w: f64, h: f64) {
     // 这行日志是「页面被摆错」唯一的外部可观测出口，守卫一旦静默，日志里就彻底没有这条记录，
     // 排查时很容易把「读不到窗口」误判成「这段代码根本没跑」（真实踩过：7 次内嵌、0 条几何日志）。
     // 现在读不到窗口也照常打一条，并把异常写进日志的取值里：
-    //   缩放列 = -1.00、窗口内高列 = -1、客户区列 = NO-WINDOW  →  窗口句柄/尺寸读不到。
-    let client = app.get_webview_window("main").and_then(|win| {
-        let scale = win.scale_factor().ok()?;
-        let size = win.inner_size().ok()?;
-        let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
-        Some((scale, format!("{}x{}", size.width, size.height), logical.height))
-    });
-    let (scale, client_text, client_h) = client.unwrap_or((-1.0, "NO-WINDOW".to_string(), -1.0));
+    //   窗口内高列 = -1、客户区列 = NO-CACHE  →  尺寸缓存从未建立（几何走了兜底）。
+    //   缩放列 = -1.00                          →  get_webview_window("main") 读不到。
+    // 注意 1.3.3 起两列来源不同：客户区/内高来自 AppState 缓存（几何真值），
+    // 缩放列才探测实时查找。内嵌 webview 创建后实时查找会失败（v1.3.2 日志实证），
+    // 但那不再影响写进 webview 的几何 —— 缩放列 -1.00 只是「Tauri 这个查找又坏了」的标记。
+    let state = app.state::<AppState>();
+    let (client_h, client_text) = match state.main_window_logical() {
+        Some((cw, ch)) => (ch, format!("{:.0}x{:.0}", cw, ch)),
+        None => (-1.0, "NO-CACHE".to_string()),
+    };
+    let scale = app
+        .get_webview_window("main")
+        .and_then(|win| win.scale_factor().ok())
+        .unwrap_or(-1.0);
     emit_log(
         app,
         "launcher",

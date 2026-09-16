@@ -963,7 +963,9 @@ pub fn sync_dsh_webview_size(app: &AppHandle) {
     // 刚露出的那条残留旧像素（进入安全模式 = 「工具栏发暗，点一下/动一下才变亮」）。
     // 只在偏移变化时强制重绘一次；窗口拖放 resize 期间偏移不变，不会反复触发。
     let top_changed = {
-        let mut last = app.state::<AppState>().embed_top.lock().unwrap();
+        // 先绑 state 再取锁：State  guard 是语句级临时值，直接链式取锁会 E0716
+        let state = app.state::<AppState>();
+        let mut last = state.embed_top.lock().unwrap();
         let changed = *last != Some(top);
         *last = Some(top);
         changed

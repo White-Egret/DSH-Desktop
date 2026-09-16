@@ -35,7 +35,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Runtime,
+    AppHandle, LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, Runtime,
     WebviewWindow,
 };
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};

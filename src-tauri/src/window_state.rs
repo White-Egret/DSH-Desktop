@@ -225,11 +225,13 @@ fn daily_layout() -> Option<Layout> {
 /// 不回读磁盘 —— 不主动写一次，磁盘上留下的就是安全模式那份。
 /// 调用的 `save_window_state` 会先按**当前真实窗口**刷新缓存再序列化，
 /// 所以「先 apply 再 save」拿到的就是日常布局。
-fn restore_daily_layout<R: Runtime>(app: &AppHandle<R>) {
+fn restore_daily_layout(app: &AppHandle) {
     let Some(layout) = daily_layout() else {
         return; // 没进过安全模式，或进入时窗口处于最小化（快照被跳过）
     };
-    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+    // 走缓存句柄：恢复日常布局时内嵌 webview 早已创建，按 label 查找会返回 None，
+    // 静默 return 会让「退出安全模式窗口没还原」看起来像是随机的。
+    let Some(window) = crate::process::main_window_handle(app) else {
         return;
     };
     apply(&window, &layout);
@@ -243,12 +245,15 @@ fn restore_daily_layout<R: Runtime>(app: &AppHandle<R>) {
 /// 由 safe.rs 的 `enter_safe_blocking` 在**成功 spawn 安全实例之后**调用
 /// （失败路径不该动用户的窗口）。内部切主线程：窗口操作必须在主线程执行，
 /// 与 lib.rs 的 show_main_window / apply_window_theme 同理。
-pub fn on_enter_safe_mode<R: Runtime>(app: &AppHandle<R>) {
+pub fn on_enter_safe_mode(app: &AppHandle) {
     SAFE_MODE_TOUCHED.store(true, Ordering::SeqCst);
     SAFE_MODE_ACTIVE.store(true, Ordering::SeqCst);
     let handle = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
-        let Some(window) = handle.get_webview_window(MAIN_WINDOW) else {
+        // 走缓存句柄：进入安全模式时内嵌 webview 早已创建，按 label 查找会返回 None，
+        // 那样快照与重置会被静默跳过，安全模式就完全没接管窗口（曾表现为「进出安全模式
+        // 窗口行为随机」）。
+        let Some(window) = crate::process::main_window_handle(&handle) else {
             return;
         };
         if let Some(layout) = snapshot(&window) {
@@ -271,7 +276,7 @@ pub fn on_enter_safe_mode<R: Runtime>(app: &AppHandle<R>) {
 
 /// 退出安全模式：把日常布局写回窗口并落盘。
 /// 由 safe.rs 的 `exit_safe_mode` 在停掉安全实例之后、重启日常实例之前调用。
-pub fn on_exit_safe_mode<R: Runtime>(app: &AppHandle<R>) {
+pub fn on_exit_safe_mode(app: &AppHandle) {
     SAFE_MODE_ACTIVE.store(false, Ordering::SeqCst);
     let handle = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
@@ -289,9 +294,9 @@ pub fn mark_safe_mode_inactive() {
 /// 本次会话进过安全模式时，磁盘上必须回到日常布局那一份。
 ///
 /// 放在 `ExitRequested` 而不是 `Exit`，是因为 `Exit` 阶段窗口可能已经被销毁，
-/// `get_webview_window` 会返回 None 而让兜底静默失效。
+/// 句柄取不到而让兜底静默失效。
 /// 这里已在主线程（RunEvent 回调），可直接操作窗口，不需要 run_on_main_thread。
-pub fn persist_before_exit<R: Runtime>(app: &AppHandle<R>) {
+pub fn persist_before_exit(app: &AppHandle) {
     if !SAFE_MODE_TOUCHED.load(Ordering::SeqCst) {
         return;
     }

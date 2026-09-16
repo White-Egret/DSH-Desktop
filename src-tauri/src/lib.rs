@@ -99,6 +99,9 @@ pub fn run(launched_by_autostart: bool) {
             // ---- 1. 主窗口只在手动启动（非开机自启）时立即显示并聚焦。
             //        关闭拦截统一放在下方 Builder::on_window_event 中处理（hide 而非销毁）。 ----
             if let Some(main) = app.get_webview_window("main") {
+                // 缓存主窗口句柄：内嵌 webview 创建后按 label 查找会失效（见 AppState 注释），
+                // 热区探测 / 托盘恢复 / 安全模式改标题全指望这份缓存。
+                app.state::<process::AppState>().set_main_window(main.clone());
                 if !launched_by_autostart {
                     let _ = main.show();
                     let _ = main.set_focus();
@@ -333,19 +336,21 @@ pub fn apply_window_theme(app: &tauri::AppHandle, appearance: &str) {
     let app = app.clone();
     // 窗口操作需主线程（与 show_main_window 同理）
     let _ = app.clone().run_on_main_thread(move || {
-        if let Some(main) = app.get_webview_window("main") {
+        // 走缓存句柄：保存外观设置往往发生在内嵌 webview 创建之后，按 label 查找会返回 None
+        if let Some(main) = process::main_window_handle(&app) {
             let _ = main.set_theme(theme);
         }
     });
 }
 
-fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+fn show_main_window(app: &tauri::AppHandle) {
     // 关键：托盘菜单/图标事件回调运行在后台线程，必须切回主线程才能操作窗口，
     // 否则 show()/set_focus() 会静默失败，表现为“点了托盘无法打开窗口”。
     let app = app.clone();
     // 克隆一份作为 run_on_main_thread 的接收者，闭包内移动的是另一份
     let _ = app.clone().run_on_main_thread(move || {
-        if let Some(w) = app.get_webview_window("main") {
+        // 走缓存句柄：托盘点击往往发生在内嵌 webview 创建之后，按 label 查找会返回 None
+        if let Some(w) = process::main_window_handle(&app) {
             let _ = w.show();
             let _ = w.unminimize();
             let _ = w.set_focus();

@@ -230,7 +230,8 @@ fn apply_safe_window_title(app: &AppHandle, active: bool) {
     };
     let app2 = app.clone();
     let _ = app2.clone().run_on_main_thread(move || {
-        if let Some(w) = app2.get_webview_window("main") {
+        // 走缓存句柄：进出安全模式时内嵌 webview 早已创建，按 label 查找会返回 None
+        if let Some(w) = crate::process::main_window_handle(&app2) {
             let _ = w.set_title(&title);
         }
     });

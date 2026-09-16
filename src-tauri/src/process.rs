@@ -102,6 +102,13 @@ pub struct AppState {
     /// resize 同步全部退回 1024x640 兜底 → 页面缩小跳左上）。到底是「查找返回 None」
     /// 还是「inner_size/scale_factor 报错」无从区分、也不重要：热路径不依赖这次调用即可。
     main_window_logical: Mutex<Option<(f64, f64)>>,
+    /// 主窗口**句柄**缓存。与尺寸缓存同理：内嵌 webview 创建后 `get_webview_window("main")`
+    /// 查找会失效，但句柄指向的 HWND / WebView 并没有被 `add_child` 销毁 —— 失效的是
+    /// 「按 label 查找」这一步，不是句柄本身。热区探测（probe_toolbar_hotzone）、
+    /// 托盘恢复窗口、安全模式改标题这些都需要**实时窗口状态**，无法像尺寸那样提前缓存，
+    /// 只能在这里存一份启动时（查找还正常时）拿到的句柄，之后一律用这份。
+    /// v1.3.3 的教训：probe 用实时查找 → 自动隐藏后工具栏永远召不回。
+    main_window: Mutex<Option<tauri::WebviewWindow>>,
     /// 首次运行引导安装互斥标志（同一时间只允许一个引导任务）
     pub setup_busy: AtomicBool,
     /// 当前进程是否由「开机自启」触发（main.rs 检测 --autostart 参数后置 true）。
@@ -129,6 +136,7 @@ impl AppState {
             last_loaded_url: Mutex::new(String::new()),
             toolbar_hidden: AtomicBool::new(false),
             main_window_logical: Mutex::new(None),
+            main_window: Mutex::new(None),
             setup_busy: AtomicBool::new(false),
             launched_by_autostart: AtomicBool::new(launched_by_autostart),
             #[cfg(windows)]
@@ -181,6 +189,16 @@ impl AppState {
     /// 最近一次已知的主窗口客户区逻辑尺寸；还没记录过则 None（几何走兜底）。
     pub fn main_window_logical(&self) -> Option<(f64, f64)> {
         *self.main_window_logical.lock().unwrap()
+    }
+
+    /// 记录主窗口句柄（仅启动 setup 时调用一次：此后按 label 查找会失效，见字段注释）。
+    pub fn set_main_window(&self, w: tauri::WebviewWindow) {
+        *self.main_window.lock().unwrap() = Some(w);
+    }
+
+    /// 启动时缓存的主窗口句柄（WebviewWindow 是可克隆的 Arc 句柄，clone 很便宜）。
+    pub fn main_window(&self) -> Option<tauri::WebviewWindow> {
+        self.main_window.lock().unwrap().clone()
     }
 
     /// 记下「刚把哪个地址交给了 webview」（含令牌的完整地址，只在内存里）
@@ -789,6 +807,21 @@ fn main_client_size(app: &AppHandle) -> Option<(f64, f64)> {
     Some((logical.width, logical.height))
 }
 
+/// 取主窗口句柄：**优先用启动时缓存在 AppState 的那份**。
+///
+/// 内嵌 webview 创建后 `get_webview_window("main")` 查找会失效（见 AppState 字段注释），
+/// 凡是内嵌创建之后才可能被调到的代码（热区探测、托盘恢复窗口、安全模式改标题/布局）
+/// 都必须走这里，不能自己按 label 查。缓存未播种时（理论上只有 setup 之前的窗口事件
+/// 才会走到）退回实时查找一次。
+pub fn main_window_handle(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Some(w) = state.main_window() {
+            return Some(w);
+        }
+    }
+    app.get_webview_window("main")
+}
+
 /// 主窗口内容区的逻辑几何 `(顶部偏移, 宽, 高)`。
 ///
 /// 高度 = 客户区高 - 顶部偏移（见 `content_height`）；宽度用整窗宽。
@@ -983,7 +1016,9 @@ pub fn set_toolbar_hidden(app: AppHandle, hidden: bool) -> bool {
 /// （客户区左上角的屏幕坐标）才是窗口内的位置，再除以 scale_factor 得到逻辑像素。
 #[tauri::command]
 pub fn probe_toolbar_hotzone(app: AppHandle) -> bool {
-    let Some(win) = app.get_webview_window("main") else { return false };
+    // 必须走缓存句柄：此时内嵌 webview 早已创建，按 label 实时查找会返回 None，
+    // 导致这里恒 false —— 正是「自动隐藏后工具栏永远召不回」的直接原因（v1.3.3 用户实测）。
+    let Some(win) = main_window_handle(&app) else { return false };
     // 窗口被隐藏到托盘 / 已最小化时一律不算命中：此时 inner_position 没有意义，
     // 而且用户根本看不到窗口（若照常判定会出现"点一下托盘就弹出一条工具栏"的怪现象）
     if !win.is_visible().unwrap_or(false) || win.is_minimized().unwrap_or(false) {

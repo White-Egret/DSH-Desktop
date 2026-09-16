@@ -255,9 +255,11 @@ pub fn run(launched_by_autostart: bool) {
             }
             // 跨显示器拖放导致的 DPI 缩放变化：Windows 不保证一定伴随 Resized，
             // 逻辑尺寸可能因此变化，同样用事件自带的句柄刷新缓存再同步。
+            // 注意：WindowEvent 是 non-exhaustive enum，结构体变体模式必须带 `..`（E0638）
             WindowEvent::ScaleFactorChanged {
                 scale_factor,
                 new_inner_size,
+                ..
             } if window.label() == "main" => {
                 let logical: tauri::LogicalSize<f64> = new_inner_size.to_logical(*scale_factor);
                 window

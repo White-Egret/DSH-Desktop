@@ -109,6 +109,13 @@ pub struct AppState {
     /// 只能在这里存一份启动时（查找还正常时）拿到的句柄，之后一律用这份。
     /// v1.3.3 的教训：probe 用实时查找 → 自动隐藏后工具栏永远召不回。
     main_window: Mutex<Option<tauri::WebviewWindow>>,
+    /// 最近一次实际写进内嵌 webview 的顶部偏移（None = 还没写过）。
+    /// 用途：区分「尺寸变了」与「收起 ↔ 展开 / 进出安全模式」这种**露边切换** ——
+    /// 后者会让内嵌 webview 挪走、把工具栏那一条区域还给主 webview，而 WebView2 对
+    /// 曾被相邻原生窗口完全遮住的区域会跳过合成，刚露出的那条会残留旧像素
+    /// （进入安全模式时表现为「工具栏发暗，点一下/动一下才变亮」，v1.3.4 用户实测）。
+    /// 检测到切换就强制主 webview 重绘一次（见 force_main_webview_repaint）。
+    embed_top: Mutex<Option<f64>>,
     /// 首次运行引导安装互斥标志（同一时间只允许一个引导任务）
     pub setup_busy: AtomicBool,
     /// 当前进程是否由「开机自启」触发（main.rs 检测 --autostart 参数后置 true）。
@@ -137,6 +144,7 @@ impl AppState {
             toolbar_hidden: AtomicBool::new(false),
             main_window_logical: Mutex::new(None),
             main_window: Mutex::new(None),
+            embed_top: Mutex::new(None),
             setup_busy: AtomicBool::new(false),
             launched_by_autostart: AtomicBool::new(launched_by_autostart),
             #[cfg(windows)]
@@ -922,7 +930,12 @@ fn open_dsh_webview(app: &AppHandle, url: &str) {
         tauri::LogicalSize::new(w, h),
     );
     match result {
-        Ok(_) => log_content_geometry(app, top, w, h),
+        Ok(_) => {
+            // 预登记首帧偏移：add_child 之前工具栏那条从未被内嵌页遮过（无旧像素可残留），
+            // 第一次 sync 不该因此触发强制重绘。
+            note_embed_top(app, top);
+            log_content_geometry(app, top, w, h);
+        }
         Err(e) => emit_log(app, "launcher", i18n::fmt("log_embed_fail", &[&e.to_string()])),
     }
 }
@@ -945,7 +958,40 @@ pub fn sync_dsh_webview_size(app: &AppHandle) {
     let _ = wv.set_position(tauri::LogicalPosition::new(0.0, top));
     // h 已经是「客户区高 - top」（见 main_content_rect / content_height）
     let _ = wv.set_size(tauri::LogicalSize::new(w, h));
+    // 顶部偏移发生切换（收起 ↔ 展开 / 进出安全模式）时，内嵌 webview 挪走、把工具栏那
+    // 一条还给主 webview；而 WebView2 对曾被相邻原生窗口完全遮住的区域会跳过合成，
+    // 刚露出的那条残留旧像素（进入安全模式 = 「工具栏发暗，点一下/动一下才变亮」）。
+    // 只在偏移变化时强制重绘一次；窗口拖放 resize 期间偏移不变，不会反复触发。
+    let top_changed = {
+        let mut last = app.state::<AppState>().embed_top.lock().unwrap();
+        let changed = *last != Some(top);
+        *last = Some(top);
+        changed
+    };
+    if top_changed {
+        force_main_webview_repaint(app);
+    }
     log_content_geometry(app, top, w, h);
+}
+
+/// 记录「首次写进内嵌 webview 的顶部偏移」，**不触发重绘**。
+/// add_child 之前工具栏那条从未被遮过，主 webview 里没有旧像素可残留；
+/// 在这里预登记，免得随后第一次 sync 把 None→Some 误判成一次「露边切换」。
+fn note_embed_top(app: &AppHandle, top: f64) {
+    *app.state::<AppState>().embed_top.lock().unwrap() = Some(top);
+}
+
+/// 强制主 webview 重绘：主窗口宽度 +1、隔 10ms 还原。
+/// 与 lib.rs show_main_window 的白屏兜底同款手法 —— WebView2 需要一个真实的窗口尺寸
+/// 变化才会重排重绘曾被遮住的区域；set_size 两次调用之间留一拍，避免被合成一帧吞掉。
+/// 只在收起/展开这种低频切换时调用，绝不要挂进每帧路径。
+fn force_main_webview_repaint(app: &AppHandle) {
+    let Some(win) = main_window_handle(app) else { return };
+    if let Ok(size) = win.inner_size() {
+        let _ = win.set_size(tauri::PhysicalSize::new(size.width + 1, size.height));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let _ = win.set_size(size);
+    }
 }
 
 /// 把「外壳让内嵌页面占多大地方」记一条日志，用来排查「页面被摆小 / 留白 / 位置不对」。

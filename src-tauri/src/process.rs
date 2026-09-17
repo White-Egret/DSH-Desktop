@@ -983,11 +983,28 @@ fn note_embed_top(app: &AppHandle, top: f64) {
     *app.state::<AppState>().embed_top.lock().unwrap() = Some(top);
 }
 
-/// 强制主 webview 重绘：主窗口宽度 +1、隔 10ms 还原。
-/// 与 lib.rs show_main_window 的白屏兜底同款手法 —— WebView2 需要一个真实的窗口尺寸
-/// 变化才会重排重绘曾被遮住的区域；set_size 两次调用之间留一拍，避免被合成一帧吞掉。
-/// 只在收起/展开这种低频切换时调用，绝不要挂进每帧路径。
+/// 强制主 webview 重绘：立即一次 + 150ms 后补一次。
+///
+/// 单次为什么不够（v1.3.5 实测无效）：内嵌 webview 的移动 / 显隐是异步落到 HWND 的，
+/// 立即重绘可能发生在「内嵌页还没挪走 / 还没显示」的瞬间 —— 被遮区域依然跳过合成，
+/// 旧帧（典型：引导横幅遮罩留下的发暗帧，只有工具栏那条没被内嵌页盖住、看得见）
+/// 继续留在缓冲里，直到用户点一下触发新帧。150ms 后内嵌页的移动早已生效，
+/// 这时补刷一次，露出区域一定会被新帧替换。
+///
+/// 手法与 lib.rs show_main_window 的白屏兜底同款：主窗口宽度 +1、隔 10ms 还原，
+/// WebView2 需要一个真实的窗口尺寸变化才会重排重绘曾被遮住的区域。
+/// 只在收起/展开切换、弹窗关闭这种低频时机调用，绝不要挂进每帧路径。
 fn force_main_webview_repaint(app: &AppHandle) {
+    repaint_main_window_once(app);
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let app3 = app2.clone();
+        let _ = app2.run_on_main_thread(move || repaint_main_window_once(&app3));
+    });
+}
+
+fn repaint_main_window_once(app: &AppHandle) {
     let Some(win) = main_window_handle(app) else { return };
     if let Ok(size) = win.inner_size() {
         let _ = win.set_size(tauri::PhysicalSize::new(size.width + 1, size.height));
@@ -1154,6 +1171,12 @@ pub(crate) fn destroy_dsh_webview(app: &AppHandle) {
 pub fn set_dsh_webview_visible(app: AppHandle, visible: bool) -> Result<(), String> {
     if let Some(wv) = app.get_webview("dsh") {
         let _ = if visible { wv.show() } else { wv.hide() };
+        // 重新显示（= 弹窗关闭、内嵌页盖回来）后，主 webview 里曾带弹窗遮罩的旧帧
+        // 可能留在工具栏那条的缓冲中（发暗，点一下才恢复）——延迟补一次强制重绘。
+        // hide 不刷：遮罩期间主 webview 全露、本来就会正常合成。
+        if visible {
+            force_main_webview_repaint(&app);
+        }
     }
     Ok(())
 }

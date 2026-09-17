@@ -934,6 +934,12 @@ fn open_dsh_webview(app: &AppHandle, url: &str) {
             // 预登记首帧偏移：add_child 之前工具栏那条从未被内嵌页遮过（无旧像素可残留），
             // 第一次 sync 不该因此触发强制重绘。
             note_embed_top(app, top);
+            // DSH 每次停止都会销毁内嵌 webview、启动时在这里重建 —— 重建前主 webview
+            // 整窗露出，但「曾被遮挡而跳过合成」的工具栏那条可能仍挂着旧帧（发暗），
+            // 没有任何东西会替它刷新。这里在重建后立即补一次强制重绘
+            // （立即 + 150ms 延迟，见 force_main_webview_repaint；2026-09-17 日志实证：
+            // 安全模式进入走 create-child 路径，偏移检测根本不会触发）。
+            force_main_webview_repaint(app);
             log_content_geometry(app, top, w, h);
         }
         Err(e) => emit_log(app, "launcher", i18n::fmt("log_embed_fail", &[&e.to_string()])),
@@ -1005,6 +1011,20 @@ fn force_main_webview_repaint(app: &AppHandle) {
 }
 
 fn repaint_main_window_once(app: &AppHandle) {
+    // 首选：让主 webview 页面内部派发 resize 事件。页面无 resize 监听（已确认），
+    // 合成器却照样执行「尺寸变化 → 全量重排重绘」路径 —— 这是唯一能确定覆盖
+    // 「曾被相邻原生窗口遮挡而跳过合成的区域」的手法，且完全没有窗口抖动。
+    // v1.3.5 的窗口级 ±1 resize 实测无效：它只唤醒「控制器挂起」类白屏，
+    // 不会强制重绘被跳过合成的残留帧（用户日志实证：重推后依旧发暗）。
+    let eval_ok = app
+        .get_webview("main")
+        .map(|wv| wv.eval("window.dispatchEvent(new Event('resize'))").is_ok())
+        .unwrap_or(false);
+    if eval_ok {
+        return;
+    }
+    // 兜底：拿不到主 webview 句柄（内嵌创建后按 label 查找的怪癖，见 AppState 注释）
+    // 时退回窗口级 ±1 resize（lib.rs show_main_window 白屏兜底同款）。
     let Some(win) = main_window_handle(app) else { return };
     if let Ok(size) = win.inner_size() {
         let _ = win.set_size(tauri::PhysicalSize::new(size.width + 1, size.height));

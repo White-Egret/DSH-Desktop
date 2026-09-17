@@ -92,6 +92,13 @@ pub struct AppState {
     /// 这是**运行时**状态而非配置（配置里存的是 toolbar_mode 偏好）：由前端
     /// set_toolbar_hidden 命令驱动，安全模式激活时恒为 false —— 见 content_offset_for。
     pub toolbar_hidden: AtomicBool,
+    /// 外壳对内嵌 DSH webview 的**期望显隐**（true = 应显示）。
+    /// 弹窗（含安全模式引导横幅）可能在内嵌 webview 创建之前打开：那时 hide 请求
+    /// 找不到目标会被当作 no-op 丢掉，随后 add_child 默认可见地创建页面，把带遮罩的
+    /// 弹窗盖住 —— 工具栏那一条露在弹窗外，被遮罩压暗（2026-09-17 现场取证：
+    /// 灰暗时 CDP 读到 safe-modal 仍 display:flex，工具栏命中 safe-modal）。
+    /// 所以请求必须**先记意图再行动**：无子页面时也保留，创建/复用页面时应用最新值。
+    dsh_webview_visible: AtomicBool,
     /// 主窗口客户区**逻辑尺寸**缓存 `(宽, 高)`，是内嵌 webview 几何的**唯一真值来源**：
     /// 启动时填一次，之后每次 `WindowEvent::Resized` / `ScaleFactorChanged` 用事件自带的
     /// 窗口句柄刷新（见 lib.rs）。
@@ -142,6 +149,7 @@ impl AppState {
             detected_url: Mutex::new(None),
             last_loaded_url: Mutex::new(String::new()),
             toolbar_hidden: AtomicBool::new(false),
+            dsh_webview_visible: AtomicBool::new(true),
             main_window_logical: Mutex::new(None),
             main_window: Mutex::new(None),
             embed_top: Mutex::new(None),
@@ -228,6 +236,11 @@ impl AppState {
     pub(crate) fn set_toolbar_hidden(&self, hidden: bool) -> bool {
         self.toolbar_hidden.store(hidden, Ordering::SeqCst);
         hidden
+    }
+
+    /// 内嵌 DSH webview 的期望显隐（见字段注释）
+    pub(crate) fn dsh_webview_visible(&self) -> bool {
+        self.dsh_webview_visible.load(Ordering::SeqCst)
     }
 }
 
@@ -904,7 +917,9 @@ fn open_dsh_webview(app: &AppHandle, url: &str) {
     // 该注入面从根上消失。请勿再改回 eval 形式。
     if let Some(wv) = app.get_webview("dsh") {
         sync_dsh_webview_size(app);
-        let _ = wv.show();
+        // 复用已存在的页面也必须重新应用显隐意图：这次 open 可能发生在弹窗打开期间
+        // （如安全模式引导横幅还开着），无条件 show 会把带遮罩的弹窗重新盖住。
+        sync_dsh_webview_visibility(app);
         // navigate() 按值收 Url，而下面新建 webview 的分支还要用 parsed，故 clone 一份
         if let Err(e) = wv.navigate(parsed.clone()) {
             emit_log(app, "launcher", i18n::fmt("log_load_fail", &[&e.to_string()]));
@@ -934,6 +949,9 @@ fn open_dsh_webview(app: &AppHandle, url: &str) {
             // 预登记首帧偏移：add_child 之前工具栏那条从未被内嵌页遮过（无旧像素可残留），
             // 第一次 sync 不该因此触发强制重绘。
             note_embed_top(app, top);
+            // 新建页面默认可见 —— 但外壳可能正开着弹窗（hide 请求当时无页面可作用）。
+            // 立即按记录的意图纠正，否则带遮罩的弹窗会被盖住（安全模式灰暗的根因）。
+            sync_dsh_webview_visibility(app);
             // DSH 每次停止都会销毁内嵌 webview、启动时在这里重建 —— 重建前主 webview
             // 整窗露出，但「曾被遮挡而跳过合成」的工具栏那条可能仍挂着旧帧（发暗），
             // 没有任何东西会替它刷新。这里在重建后立即补一次强制重绘
@@ -1186,9 +1204,16 @@ pub(crate) fn destroy_dsh_webview(app: &AppHandle) {
     }
 }
 
-/// 模态框（设置/日志等）打开时隐藏内嵌 webview，避免被遮挡
+/// 模态框（设置/日志等）打开时隐藏内嵌 webview，避免被遮挡。
+///
+/// 显隐意图**先落 AppState 再尝试作用**：请求到达时子页面可能尚未创建
+/// （安全模式引导横幅正是在就绪前后弹出），只记不丢；等 add_child / 复用分支
+/// 创建出页面时，再由 sync_dsh_webview_visibility 把最新意图补应用到它身上。
 #[tauri::command]
 pub fn set_dsh_webview_visible(app: AppHandle, visible: bool) -> Result<(), String> {
+    app.state::<AppState>()
+        .dsh_webview_visible
+        .store(visible, Ordering::SeqCst);
     if let Some(wv) = app.get_webview("dsh") {
         let _ = if visible { wv.show() } else { wv.hide() };
         // 重新显示（= 弹窗关闭、内嵌页盖回来）后，主 webview 里曾带弹窗遮罩的旧帧
@@ -1199,6 +1224,17 @@ pub fn set_dsh_webview_visible(app: AppHandle, visible: bool) -> Result<(), Stri
         }
     }
     Ok(())
+}
+
+/// 把 AppState 里记录的期望显隐应用到当前内嵌 webview（无子页面时为 no-op）。
+/// 在「创建 / 复用内嵌页面」的时机调用，补上页面创建之前被丢弃的 hide 请求。
+/// 这里**不**触发强制重绘：显示路径的重绘由调用方（create 分支本来就刷一次）
+/// 或 set_dsh_webview_visible 的 show 分支负责，避免新建路径连续刷两次。
+fn sync_dsh_webview_visibility(app: &AppHandle) {
+    let visible = app.state::<AppState>().dsh_webview_visible();
+    if let Some(wv) = app.get_webview("dsh") {
+        let _ = if visible { wv.show() } else { wv.hide() };
+    }
 }
 
 /// 只刷新内嵌的 DSH 页面，不停止/重启 DSH 服务。

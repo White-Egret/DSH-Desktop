@@ -3030,7 +3030,11 @@ fn install_node_verified(
     // 注意：MSI 对拼错/不认识的属性是**静默忽略**的（照样返回 0），
     // 因此下面装完必须核对实际落点，否则就是在对用户说谎。
     if let Some(d) = install_dir {
-        setup_progress(app, "install", &i18n::fmt("setup_dir_using", &[d]));
+        // 注意 `&d` 而不是 `d`：i18n::fmt 收的是 &[&dyn Display]，而 `&str` 指向的是
+        // **不定长** 的 str，没法直接 coerce 成 &dyn Display —— 必须再取一层引用
+        // （`&&str` 里的 &str 才是 Sized + Display）。这里 d 本身就是 &str，
+        // 所以与别处「传 &String」的写法不同，别再抄顺手了。
+        setup_progress(app, "install", &i18n::fmt("setup_dir_using", &[&d]));
     }
 
     // 运行官方 MSI：/passive 显示进度条但无需逐页点击；UAC 由 Windows 弹出（权限提升交给系统）
@@ -3088,17 +3092,15 @@ fn install_node_verified(
             // 最难发现的情况挡在成功提示之前。
             if let Some(d) = install_dir {
                 if !Path::new(d).join("node.exe").is_file() {
-                    return Err(i18n::fmt(
-                        "setup_node_dir_mismatch",
-                        &[
-                            d,
-                            if env.node_found {
-                                env.node_path.as_str()
-                            } else {
-                                i18n::t("setup_word_undetected")
-                            },
-                        ],
-                    ));
+                    // 先把两个分支统一成 `&str` 再取一次引用：两条分支的类型本来不同
+                    // （&str 与 &'static str 能统一，&String 与 &&str 不能），
+                    // 写成 &[&d, &(if .. { a } else { b })] 才不依赖上下文类型推导。
+                    let detected = if env.node_found {
+                        env.node_path.as_str()
+                    } else {
+                        i18n::t("setup_word_undetected")
+                    };
+                    return Err(i18n::fmt("setup_node_dir_mismatch", &[&d, &detected]));
                 }
             }
             if env.node_found {

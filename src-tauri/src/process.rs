@@ -2612,8 +2612,19 @@ fn setup_progress(app: &AppHandle, phase: &str, msg: &str) {
 
 /// 引导安装 Node.js：下载官方 LTS MSI → 启动安装程序 → 等待 → 验证。
 /// 失败时给出明确原因（无网络/下载失败/权限不足/用户取消），绝不静默失败。
+///
+/// `dir` = 用户在向导里指定的安装目录（留空 = 用官方默认目录）。
+/// 它会被原样交给一个**提权**的官方 MSI，所以先在这里校验（复用 config.rs 的
+/// 路径校验），不合法就直接返回 —— 既不必白白下载 30MB，也不占用 busy 状态。
+///
+/// 参数名刻意用**单词** `dir` 而不是 `install_dir`：Tauri 的 command 参数会在
+/// camelCase / snake_case 之间做风格转换，而 `Option<String>` 在键名对不上时
+/// 会**静默变成 None**（= 悄悄用回默认目录，正是最该避免的那种失败）。
+/// 单词名在哪种风格下都一致，前端 `invoke('setup_install_node', { dir })` 不会踩到。
+/// 要改成多词名，请先确认前端的键名与转换规则。
 #[tauri::command]
-pub async fn setup_install_node(app: AppHandle) -> Result<(), String> {
+pub async fn setup_install_node(app: AppHandle, dir: Option<String>) -> Result<(), String> {
+    let target = config::validate_node_install_dir(dir.as_deref().unwrap_or(""))?;
     {
         let state = app.state::<AppState>();
         if state.setup_busy.swap(true, Ordering::SeqCst) {
@@ -2622,7 +2633,7 @@ pub async fn setup_install_node(app: AppHandle) -> Result<(), String> {
     }
     let app2 = app.clone();
     std::thread::spawn(move || {
-        let outcome = install_node_blocking(&app2);
+        let outcome = install_node_blocking(&app2, target.as_deref());
         let (ok, msg) = match outcome {
             Ok(m) => (true, m),
             Err(e) => (false, e),
@@ -2912,14 +2923,18 @@ fn resolve_latest_lts_version(dir: &Path, last_err: &mut String) -> Option<Strin
 
 /// 引导安装 Node.js 的入口：下载物一律放进一次性随机私有目录，返回前整目录删除
 /// （校验失败、安装失败、超时、用户取消等任何提前 return 的路径都不会留下安装包）。
-fn install_node_blocking(app: &AppHandle) -> Result<String, String> {
+fn install_node_blocking(app: &AppHandle, install_dir: Option<&str>) -> Result<String, String> {
     let dir = create_private_temp_dir()?;
-    let result = install_node_verified(&dir, app);
+    let result = install_node_verified(&dir, app, install_dir);
     let _ = std::fs::remove_dir_all(&dir);
     result
 }
 
-fn install_node_verified(dir: &Path, app: &AppHandle) -> Result<String, String> {
+fn install_node_verified(
+    dir: &Path,
+    app: &AppHandle,
+    install_dir: Option<&str>,
+) -> Result<String, String> {
     // 先解析该 LTS 线的最新补丁版本；失败就用固定回退版本（绝不因为探测失败而卡住安装）
     let mut probe_err = String::new();
     let node_version = match resolve_latest_lts_version(dir, &mut probe_err) {
@@ -3008,9 +3023,24 @@ fn install_node_verified(dir: &Path, app: &AppHandle) -> Result<String, String> 
 
     setup_progress(app, "install", i18n::t("setup_install_launch"));
 
+    // 自定义安装目录：官方 MSI 的目录选择页绑定在**公开属性 `INSTALLDIR`** 上
+    // （本机缓存 MSI 的 Property 表实测 `WIXUI_INSTALLDIR = INSTALLDIR`，
+    // Directory 表里 `INSTALLDIR -> nodejs`），而 `/passive` 根本不会画出那个页面，
+    // 所以只能由我们把值直接传进去。留空则完全不传 = 官方默认目录（老行为不变）。
+    // 注意：MSI 对拼错/不认识的属性是**静默忽略**的（照样返回 0），
+    // 因此下面装完必须核对实际落点，否则就是在对用户说谎。
+    if let Some(d) = install_dir {
+        setup_progress(app, "install", &i18n::fmt("setup_dir_using", &[d]));
+    }
+
     // 运行官方 MSI：/passive 显示进度条但无需逐页点击；UAC 由 Windows 弹出（权限提升交给系统）
     let mut cmd = Command::new("msiexec");
     cmd.arg("/i").arg(&dest).args(["/passive", "/norestart"]);
+    if let Some(d) = install_dir {
+        // 属性值可能含空格（官方默认路径就含）：作为**单个** argv 元素传递，
+        // 由 Windows 负责引号，不要自己拼引号。
+        cmd.arg(format!("INSTALLDIR={}", d));
+    }
     apply_no_window(&mut cmd); // 只是不创建控制台窗口；MSI 本身是 GUI 程序不受影响
     let mut child = cmd.spawn().map_err(|e| {
         i18n::fmt(
@@ -3052,6 +3082,25 @@ fn install_node_verified(dir: &Path, app: &AppHandle) -> Result<String, String> 
                 setup_progress(app, "verify", &i18n::fmt("setup_path_refreshed", &[&added]));
             }
             let env = detect::full_detect();
+            // 自定义目录的核对：MSI 返回 0 **不等于**「装到了用户要的目录」——
+            // 属性名一旦写错、或官方改了 MSI 的作者方式，msiexec 会静默忽略它并
+            // 装回默认目录。这里如实报错，把「你以为装到 D 盘、其实在 C 盘」这种
+            // 最难发现的情况挡在成功提示之前。
+            if let Some(d) = install_dir {
+                if !Path::new(d).join("node.exe").is_file() {
+                    return Err(i18n::fmt(
+                        "setup_node_dir_mismatch",
+                        &[
+                            d,
+                            if env.node_found {
+                                env.node_path.as_str()
+                            } else {
+                                i18n::t("setup_word_undetected")
+                            },
+                        ],
+                    ));
+                }
+            }
             if env.node_found {
                 let ver = env.node_version.clone().unwrap_or_default();
                 setup_progress(

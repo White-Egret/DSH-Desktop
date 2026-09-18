@@ -1014,7 +1014,11 @@ function onPathPicked(p) {
   const target = document.querySelector(`[data-kind="${p.kind}"]`);
   if (target) {
     const input = $(target.dataset.target);
-    if (input) input.value = p.path;
+    if (input) {
+      input.value = p.path;
+      // 「浏览」选过目录 = 用户已经表达过意愿：别让后续检测把默认值覆盖回来
+      markNodeDirTouched(input);
+    }
   }
 }
 
@@ -1264,6 +1268,7 @@ async function wizDetect() {
   try {
     wiz.detection = await invoke('detect_environment');
     lastEnvDetection = wiz.detection;
+    prefillNodeDir(wiz.detection);
   } catch (e) {
     toast(t('wiz_env_fail', e), true);
     wiz.detection = null;
@@ -1271,6 +1276,25 @@ async function wizDetect() {
   setWizProgress(false);
   renderNodePrefRow();
   renderWiz();
+}
+
+// ---------- 「安装位置」的预填 ----------
+// 默认值由后端按本机 %ProgramFiles% 算出（Windows 装在 D 盘时默认目录也在 D 盘），
+// 前端不写死路径。预填而不是留空：绝大多数用户要的就是默认位置。
+// 唯一的规则是**用户一旦动过就再也不覆盖** —— 改成 D:\nodejs 之后再点一次「重新检测」，
+// 输入框不能被默认值悄悄改回去（那等于把用户的输入吃掉）。
+let nodeDirTouched = false;
+
+function prefillNodeDir(det) {
+  const el = $('wiz-node-dir');
+  if (!el || !det || nodeDirTouched) return;
+  const want = (det.node_default_dir || '').trim();
+  if (want) el.value = want;
+}
+
+/// 用户手动改过 / 用「浏览」选过目录 → 从此不再被默认值覆盖。
+function markNodeDirTouched(input) {
+  if (input && input.id === 'wiz-node-dir') nodeDirTouched = true;
 }
 
 function setWizFlag(flagId, pathId, found, detail) {
@@ -1537,7 +1561,9 @@ async function runNodeLtsInstall() {
     appendLog('launcher', t('wiz_download_node'));
   }
   try {
-    await invoke('setup_install_node');
+    // 显式传 null：这条路径（升级 / 首选项入口）一律沿用现有安装目录，不换盘。
+    // 键名是单词 dir —— 见 Rust 侧 setup_install_node 的注释（多词名会踩风格转换）。
+    await invoke('setup_install_node', { dir: null });
   } catch (e) {
     wiz.busy = false;
     setWizProgress(false);
@@ -1703,6 +1729,10 @@ function bindUI() {
     };
   });
 
+  // 「安装位置」：手输一次就标记为「用户动过」，之后检测结果不再覆盖它（见 prefillNodeDir）
+  const nodeDirEl = $('wiz-node-dir');
+  if (nodeDirEl) nodeDirEl.addEventListener('input', () => markNodeDirTouched(nodeDirEl));
+
   // ---- 首次运行引导向导按钮 ----
   // 第一步语言选择：固定双语按钮（不挂 data-i18n，永不被词典改写）
   $('wiz-btn-lang-en').onclick = () => onWizLanguage('en');
@@ -1744,12 +1774,17 @@ function bindUI() {
   };
   $('wiz-btn-install-node').onclick = async () => {
     if (wiz.busy) return;
+    // 安装位置：留空 → 传 null → 后端不传 INSTALLDIR（官方默认目录）。
+    // 只有这条「首次安装」路径开放换目录：「版本过低 → 升级」那条故意不开放，
+    // 因为同一个 ProductCode 改 INSTALLDIR 会留下旧目录与旧的 PATH 条目。
+    const dirEl = $('wiz-node-dir');
+    const installDir = dirEl && dirEl.value ? dirEl.value.trim() : '';
     wiz.busy = true;
     renderWiz();
     setWizProgress(true, t('wiz_download_node'));
     $('wiz-log').classList.remove('hidden');
     try {
-      await invoke('setup_install_node');
+      await invoke('setup_install_node', { dir: installDir || null });
       // 进度与结果由 setup-status / setup-result 事件驱动（Rust 端按语言输出）
     } catch (e) {
       wiz.busy = false;

@@ -395,6 +395,20 @@
           <button id="wiz-btn-recheck" class="btn" data-i18n="wiz_btn_recheck">重新检测</button>
           <button id="wiz-btn-skip-node" class="btn" data-i18n="wiz_btn_skip_node">稍后手动安装</button>
         </div>
+        <!-- 安装位置：官方 MSI 的目录页在 /passive 下不会被画出来，所以只能在这里问，
+             再由后端以 INSTALLDIR=<路径> 传给 msiexec（见 process.rs）。
+             这里预填的是静态兜底值；检测一回来就会被后端按本机 %ProgramFiles% 算出的
+             默认目录替换（见 main.js prefillNodeDir）。用户改过之后就不再覆盖。 -->
+        <label class="field">
+          <span data-i18n="wiz_node_dir_label">安装位置（已填官方默认路径，可修改）</span>
+          <div class="row">
+            <input id="wiz-node-dir" type="text" spellcheck="false" autocomplete="off"
+                   value="C:\Program Files\nodejs"
+                   placeholder="C:\Program Files\nodejs" data-i18n-placeholder="wiz_node_dir_ph" />
+            <button class="btn small" data-pick="folder" data-kind="node-install" data-target="wiz-node-dir" data-i18n="btn_browse">浏览</button>
+          </div>
+        </label>
+        <div class="wiz-warn-note" data-i18n="wiz_node_dir_note">已预填官方默认路径；改成 D:\nodejs 之类即可装到别的盘（清空则用官方默认目录）。这是整机安装，仍需在 UAC 提示里同意。</div>
       </div>
 
       <!-- Node.js 版本过低（低于 DSH 的运行下限）时的告警步骤。

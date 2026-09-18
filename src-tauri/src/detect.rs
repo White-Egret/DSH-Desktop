@@ -349,6 +349,26 @@ pub fn node_msi_url() -> String {
     node_msi_url_for(&current_node_version())
 }
 
+/// 官方 Node.js MSI 在本机的**默认安装目录**（`%ProgramFiles%\nodejs`）。
+///
+/// 为什么由后端算、而不是前端写死 `C:\Program Files\nodejs`：Windows 不一定装在
+/// C 盘（Windows 装在 D 盘时 ProgramFiles 就是 `D:\Program Files`），写死会让
+/// 预填值变成一句谎话，用户照着它装反而落到一个非默认的位置。
+/// 取自环境变量，取不到时才回退到最常见的 `C:\Program Files\nodejs`。
+///
+/// 注意这个值与 MSI 自己算出的默认目录是一致的（MSI 同样以 ProgramFiles 为基准），
+/// 所以「预填、用户不改」= 传过去的 INSTALLDIR 恰好等于 MSI 默认值，行为与不传无异。
+pub fn default_node_install_dir() -> String {
+    let base = std::env::var("ProgramFiles")
+        .ok()
+        .map(|v| v.trim().trim_end_matches(|c| c == '\\' || c == '/').to_string())
+        .filter(|v| !v.is_empty());
+    match base {
+        Some(b) => format!("{}\\nodejs", b),
+        None => r"C:\Program Files\nodejs".to_string(),
+    }
+}
+
 // ---------- PATH 环境：注册表刷新与子进程 PATH 组装 ----------
 //
 // 为什么需要这一段：引导安装 Node.js 发生在「本程序已经在运行」的时候。
@@ -574,6 +594,10 @@ pub struct EnvDetection {
     pub node_msi_url: String,
     /// 官方手动下载页
     pub node_download_page: String,
+    /// 引导安装 Node.js 的**默认安装目录**（`%ProgramFiles%\nodejs`）。
+    /// 向导用它预填「安装位置」输入框 —— 预填而不是留空，是因为大多数用户要的就是
+    /// 默认位置；由后端按本机 ProgramFiles 算，才不会在 Windows 装在 D 盘时写错。
+    pub node_default_dir: String,
 }
 
 impl EnvDetection {
@@ -614,6 +638,7 @@ pub fn full_detect() -> EnvDetection {
         dsh_path: opt_to_string(&paths.dsh),
         node_msi_url: node_msi_url(),
         node_download_page: NODE_DOWNLOAD_PAGE.to_string(),
+        node_default_dir: default_node_install_dir(),
     }
 }
 
@@ -668,5 +693,19 @@ mod tests {
             assert_eq!(node_version_at_least_min(ok), Some(true), "{ok}");
         }
         assert_eq!(node_version_at_least_min("not-a-version"), None);
+    }
+
+    /// 向导里预填的默认安装目录必须是「用户不改也能装成功」的值：
+    /// 形状得像 `…\nodejs`，而且**必须能通过安装目录校验** —— 否则用户会看到一个
+    /// 自己从没输入过的值被判非法（预填值被自己的校验器拒掉，是最难解释的那种报错）。
+    #[cfg(windows)]
+    #[test]
+    fn default_node_install_dir_passes_its_own_validation() {
+        let d = default_node_install_dir();
+        assert!(d.ends_with("\\nodejs"), "应当以 \\nodejs 结尾: {d}");
+        let norm = crate::config::validate_node_install_dir(&d)
+            .unwrap_or_else(|e| panic!("预填的默认目录必须合法，却被拒绝: {e}"))
+            .expect("预填值非空，应当返回 Some");
+        assert_eq!(norm, d.trim_end_matches('\\'));
     }
 }

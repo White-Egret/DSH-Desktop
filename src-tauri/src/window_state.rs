@@ -369,8 +369,8 @@ mod tests {
             .as_array()
             .and_then(|list| list.iter().find(|w| w["label"] == MAIN_WINDOW))
             .expect("tauri.conf.json 中缺少 label=\"main\" 的窗口配置");
-        assert_eq!(win["width"].as_f64(), Some(1392.0));
-        assert_eq!(win["height"].as_f64(), Some(783.0));
+        assert_eq!(win["width"].as_f64(), Some(1376.0));
+        assert_eq!(win["height"].as_f64(), Some(774.0));
         assert_eq!(win["center"].as_bool(), Some(true));
     }
 }

@@ -178,6 +178,9 @@
     wiz_node_flag_old: '⚠ 版本过低', wiz_node_flag_unknown: '? 版本未知',
     wiz_step_node_title: '缺少 Node.js',
     wiz_step_node_body_html: '将从官方地址下载并运行 Node.js LTS 安装包（不内置、不使用便携版）：<br /><code id="wiz-node-url" class="block-code"></code>一键安装会弹出官方安装窗口 / UAC 提示，按提示完成即可；也可以到 <a href="#" id="wiz-open-node-page">nodejs.org 官网</a> 手动下载安装。',
+    wiz_node_dir_label: '安装位置（已填官方默认路径，可修改）',
+    wiz_node_dir_ph: 'C:\\Program Files\\nodejs',
+    wiz_node_dir_note: '已预填官方默认路径；改成 D:\\nodejs 之类即可装到别的盘（清空则用官方默认目录）。这是整机安装，仍需在 UAC 提示里同意。',
     wiz_btn_install_node: '一键下载并安装（官方 LTS）',
     wiz_btn_recheck: '重新检测',
     wiz_btn_skip_node: '稍后手动安装',
@@ -422,6 +425,9 @@
     wiz_node_flag_old: '⚠ version too old', wiz_node_flag_unknown: '? version unknown',
     wiz_step_node_title: 'Node.js is missing',
     wiz_step_node_body_html: 'The official Node.js LTS installer will be downloaded and run from the official site (nothing bundled, no portable runtime):<br /><code id="wiz-node-url" class="block-code"></code>One-click install opens the official installer / UAC prompt — just follow it. You can also install manually from <a href="#" id="wiz-open-node-page">nodejs.org</a>.',
+    wiz_node_dir_label: 'Install location (pre-filled with the official default — editable)',
+    wiz_node_dir_ph: 'C:\\Program Files\\nodejs',
+    wiz_node_dir_note: 'Pre-filled with the official default; change it to e.g. D:\\nodejs to install onto another drive (clear it to fall back to the official default). This is a per-machine install, so the UAC prompt is still required.',
     // 注意：此文案经 data-i18n 走 textContent 注入，必须用字面 `&`；
     // 写成 `&amp;` 会原样显示成 “Download &amp; install”。
     wiz_btn_install_node: 'Download & install (official LTS)',

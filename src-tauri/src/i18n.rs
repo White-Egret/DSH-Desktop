@@ -204,6 +204,20 @@ pub fn t(key: &str) -> &'static str {
         "setup_word_fail" => if en { "failed" } else { "失败" },
         "setup_node_result_line" => if en { "[setup] Guided Node.js installation {0}: {1}" } else { "[setup] Node.js 引导安装{0}：{1}" },
 
+        // ---------- 引导安装 Node.js：自定义安装目录 ----------
+        // lbl_node_install_dir 会被当作 path_shape() 的 field 参数拼进 err_path_* 文案
+        // （「Node.js 安装位置：不能是驱动器根目录。」），所以它必须是个人能读懂的名字，
+        // 不能写成配置键名。
+        "lbl_node_install_dir" => if en { "Node.js install location" } else { "Node.js 安装位置" },
+        "err_node_dir_chars" => if en { "{0}: the path contains characters Windows does not allow in a folder name (< > \" | ? *, a control character, or a ':' after the drive letter)." } else { "{0}：路径含 Windows 不允许的字符（< > \" | ? *、控制字符，或盘符之后多余的「:」）。" },
+        "err_node_dir_too_long" => if en { "The install location is too long ({0} characters, limit {1}): Node.js and npm create several more levels underneath it, which would run into the Windows path limit and fail halfway through." } else { "安装位置过长（{0} 字符，上限 {1}）：Node.js 与 npm 会在其下再建好几层，会撞上 Windows 路径长度限制，导致安装到一半失败。" },
+        "err_node_dir_drive" => if en { "{0}: that drive does not exist or is not ready. Pick a folder on an available drive." } else { "{0}：该盘符不存在或未就绪。请选择本机可用磁盘上的目录。" },
+        "err_node_dir_system" => if en { "{0}: Node.js cannot be installed into a system location (Windows / ProgramData), nor directly into the Program Files root." } else { "{0}：不能把 Node.js 装进系统位置（Windows / ProgramData），也不能直接装到 Program Files 根目录。" },
+        "err_node_dir_is_file" => if en { "{0} already exists and is a file, not a folder." } else { "{0} 已存在，而且是一个文件而不是文件夹。" },
+        "setup_dir_using" => if en { "Installing into the chosen location: {0} (the official installer writes there)." } else { "将安装到指定位置：{0}（由官方安装程序写入该目录）。" },
+        "setup_word_undetected" => if en { "not detected" } else { "未检测到" },
+        "setup_node_dir_mismatch" => if en { "The Node.js installer reported success but did not put node.exe into the chosen location {0}. Actually detected: {1}. The official MSI ignored the custom directory. Point Preferences at node.exe manually, or uninstall Node.js and reinstall it into that folder." } else { "Node.js 安装程序报告成功，但没有把 node.exe 放进指定目录 {0}。实际检测到：{1}。官方 MSI 未采纳自定义目录。可在「首选项」里手动指向 node.exe，或卸载 Node.js 后重新装到该目录。" },
+
         // ---------- 首次运行引导：DSH ----------
         "err_task_busy" => if en { "An install task is already running" } else { "已有安装任务正在进行" },
         "setup_npm_missing" => if en { "npm.cmd not found ({0}). Install Node.js (which includes npm) first, or set the npm path in Preferences." } else { "未找到 npm.cmd（{0}）。请先安装 Node.js（含 npm），或在「首选项」中配置 npm 路径。" },

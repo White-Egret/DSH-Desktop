@@ -31,7 +31,7 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 - Version check against both npm dist-tags (`npm view <pkg> dist-tags`); the toolbar flags "update available" when your install trails the newest channel
 - Close-to-tray or quit-on-close behavior (configurable); tray menu with Show Main Window / Start with Windows / Exit; tray restore does show + unminimize + set_focus
 - Start with Windows (official autostart plugin, HKCU registry only, no admin rights); autostart runs silently in tray and delays DSH launch by 12 s to avoid the boot-time IO spike
-- First-run setup wizard: detects Node.js/npm/DSH and can guide installation (official nodejs.org LTS installer download or `npm install -g @deepseek-ai/dsh`) — fully skippable
+- First-run setup wizard: detects Node.js/npm/DSH and can guide installation (official nodejs.org LTS installer download or `npm install -g @deepseek-ai/dsh`), with a **choosable Node.js install location** (e.g. onto another drive) — fully skippable
 - **Node.js minimum-version guard (22.19.0)**: detects an installed-but-too-old Node.js, warns with the exact versions, offers a one-click upgrade to the official LTS (same verified installer flow), keeps a "download it myself" link and a "keep this version and continue" escape hatch, and refuses to start DSH with a plain-language reason instead of letting it die on an opaque error — see [Node.js version check](#nodejs-version-check)
 - **Bilingual UI (Chinese / English)**: choose a language in Preferences; the whole launcher (toolbar, status, dialogs, logs, tray menu) switches, and DSH's own web UI follows via its `settings.yaml`
 - **Light / Dark / Follow-system appearance**: pick it in Preferences; the launcher (toolbar, dialogs, wizard, native title bar) and the embedded DSH page switch together through `ui-theme.preference` in DSH's `settings.yaml` — open DSH pages follow **live, no DSH restart needed**
@@ -68,6 +68,19 @@ dsh --version
 ```
 
 If anything is missing when the app starts, it shows a clear error (which component was not found, where it looked, and how to fix it) instead of waiting forever. The first-run wizard can also do this for you: it detects the environment and offers to run the official Node.js LTS installer (downloaded from nodejs.org at runtime, never bundled) or to execute `npm install -g @deepseek-ai/dsh` for you. Every guided step is skippable ("稍后手动安装" / skip), and every failure mode (no network, download failed, permission denied, user cancelled) is reported explicitly.
+
+### Choosing where Node.js gets installed
+
+The "Node.js is missing" step has an **install location** field, **pre-filled with this machine's official default** (`%ProgramFiles%\nodejs`, normally `C:\Program Files\nodejs` — and it follows `Program Files` onto another drive if Windows was installed there, because the backend derives it from the environment rather than hard-coding a string). To install elsewhere, edit it to e.g. `D:\nodejs`, or use Browse; clearing it falls back to the official default. The path is handed to the official MSI as `INSTALLDIR=<path>` — the MSI's own directory page is bound to that public property (read straight out of this machine's cached MSI: `WIXUI_INSTALLDIR = INSTALLDIR`), but the app runs it with `/passive`, which never draws that page, so this is the only place the question can be asked.
+
+Worth knowing:
+
+- **What you typed is never overwritten.** The field starts at the default path, but once you edit it (or pick a folder with Browse), a later "Re-check" will not put the default back.
+
+- **It is still a per-machine install.** The official MSI is `ALLUSERS=1`, so installing onto `D:` still goes through UAC — moving the folder does not change the permission story.
+- **First-time installs only.** The "Node.js too old → upgrade" path deliberately does **not** offer a directory change: switching `INSTALLDIR` during an upgrade of the same ProductCode leaves the old directory and the old PATH entry behind. To relocate an existing Node.js, uninstall it first and install again.
+- **The result is verified.** MSI silently ignores properties it does not recognise (and still exits 0), so after installing the app confirms that `node.exe` really is in the directory you asked for; if it is not, it reports that honestly instead of showing a success message.
+- **The path is validated** — absolute, no `..`, drive must exist, no `< > " | ? *`, not inside `Windows` / `ProgramData`, not the `Program Files` root itself, 200-character limit. Anything else is refused up front, **before** the 30 MB download starts.
 
 > **Installer integrity**: before `msiexec` is ever invoked, the downloaded installer is matched against the SHA-256 digest listed in Node.js's official `SHASUMS256.txt` for that exact version, and it lands in a one-shot randomly-named private temp directory that is deleted afterwards (the old predictable `%TEMP%\node-vX.Y.Z-x64.msi` path could be pre-created as a symlink or swapped by another process). If the manifest can't be fetched, has no entry for the file, or the digest differs, the install aborts — there is deliberately **no "install anyway" fallback**; use the manual download link instead.
 >
@@ -151,7 +164,7 @@ Artifacts land in `src-tauri/target/release/bundle/nsis/`, `.../msi/`, and the r
 
 ## Usage
 
-1. Install/start **DSH Desktop**. Default window is 1392×783.
+1. Install/start **DSH Desktop**. Default window is 1376×774.
 2. On first run the setup wizard checks Node.js / npm / DSH:
    - Everything installed → click "完成，进入主界面" (done).
    - Something missing → use the guided buttons or skip and continue to the main UI anyway.
@@ -308,7 +321,7 @@ The main window's **size, position and maximized state** are remembered and rest
 
 - **Why the official plugin matters**: the failure mode of a home-grown implementation is not saving, it is **restoring** — after a monitor is unplugged, the coordinates on disk may point at a screen that no longer exists, so the window reopens outside the visible area and the only way out is deleting the state file. The plugin walks the *currently attached* monitors and only applies the saved coordinates when some monitor **intersects** the saved position + size. That is the official fix for exactly that bug. This app's own code only decides *when not to remember*.
 - **What is tracked**: `POSITION | SIZE | MAXIMIZED` — deliberately **not `VISIBLE`**. Closing to tray (the default) leaves the window hidden at exit, so restoring visibility would come back "hidden" and look like "clicking the tray icon does nothing" (the very failure `show_main_window`'s repaint fallback exists to fix). Decorations and fullscreen are likewise left to `tauri.conf.json` instead of being rewritten by history.
-- **State file**: `%APPDATA%\com.dsh.desktop\.window-state.json` (the plugin's default location). To *reset* the layout, **close the app first, then delete that file**; the next launch is back to the `tauri.conf.json` default of 1392×783, centered. A corrupt file (hand-edited, truncated) is treated as "nothing recorded" rather than a startup failure — which is also why legacy files need no cleanup: an unrecognized format simply means no state.
+- **State file**: `%APPDATA%\com.dsh.desktop\.window-state.json` (the plugin's default location). To *reset* the layout, **close the app first, then delete that file**; the next launch is back to the `tauri.conf.json` default of 1376×774, centered. A corrupt file (hand-edited, truncated) is treated as "nothing recorded" rather than a startup failure — which is also why legacy files need no cleanup: an unrecognized format simply means no state.
 - **Safe Mode is completely unaffected**: entering Safe Mode **tears down the entire daily DSH instance** and starts a brand-new safe instance from a separate home (`.dsh-safe`, port 3081) — at the *runtime* layer that is a clean restart. The **desktop shell and its window do not restart, though** (it is still the same window), so the two paths are isolated separately: launched through a safe-mode entry point (`--safe` / `--safe-mode` / `DSH_SAFE_MODE=1`) the plugin neither restores nor saves anything; pressing the button in-app first freezes the daily layout (snapshot + flush to disk) and then **resets the window to the `tauri.conf.json` default geometry**, so nothing you drag or resize while Safe Mode is active is ever written to disk, and the daily layout comes back on exit. See [Safe Mode](#safe-mode).
 - Sizes are stored in **physical pixels** and positions are validated against the current monitors, so the geometry does not drift as you change DPI or move between displays.
 
@@ -409,7 +422,7 @@ DSH stdout/stderr are never hidden: they stream live to the log dialog and to bo
 - **配置路径无效 (Invalid path)** — the error names the exact path; fix it in Preferences (auto-detect usually repairs it).
 - **Closed the window but it's still running** — X hides to tray by default; use tray → Exit to quit. Change this in Preferences ("点击窗口 X 时").
 - **Tray icon doesn't reopen the window** — fixed pattern already implemented (show/unminimize/set-focus on main thread + WebView repaint nudge); if you still hit it, report with the desktop.log attached.
-- **Reset the window size/position (or the window ended up off-screen)** — close the app, then delete `%APPDATA%\com.dsh.desktop\.window-state.json`; the next launch is back to 1392×783, centered. Switching monitors normally needs none of this: on restore the plugin only applies coordinates that **intersect an attached monitor**. See [Window layout](#window-layout).
+- **Reset the window size/position (or the window ended up off-screen)** — close the app, then delete `%APPDATA%\com.dsh.desktop\.window-state.json`; the next launch is back to 1376×774, centered. Switching monitors normally needs none of this: on restore the plugin only applies coordinates that **intersect an attached monitor**. See [Window layout](#window-layout).
 - **Update failed** — check the npm output in the log; typically network issues or global-directory permissions (this app never requests admin). If the install succeeded but DSH misbehaves, that usually means config written by a *different* version — restore the DSH home dir backup you took before switching channels, then retry.
 - **WebView2 missing** — the NSIS/MSI installers guide you through installing the WebView2 runtime (usually preinstalled with Edge).
 

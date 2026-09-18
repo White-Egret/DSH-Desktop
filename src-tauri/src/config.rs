@@ -302,6 +302,103 @@ pub fn validate_program_file(field: &str, raw: &str) -> Result<String, String> {
     Ok(norm)
 }
 
+/// 引导安装 Node.js 时，自定义安装目录的长度上限（字符数，不含结尾分隔符）。
+/// 为什么不是直接放到 MAX_PATH：node.exe、npm、npm 生成的 `node_modules\.bin\*.cmd`
+/// 都会在这个目录**之下**再建好几层；逼近 260 之后 MSI 会在装到一半时以
+/// 「某个文件写不进去」这种看不出根因的方式失败。留足余量比事后猜谜划算。
+const NODE_INSTALL_DIR_MAX_CHARS: usize = 200;
+
+/// 校验「引导安装 Node.js 的自定义安装目录」，返回规范化后的路径。
+///
+/// 这个字符串不是「只是个字符串」：它最终会以 `INSTALLDIR=<路径>` 的形式交给
+/// **提权的官方 MSI**（`msiexec /i node-*.msi INSTALLDIR=...`）。放任
+/// `C:\Windows\System32` 就等于把 node.exe 与 npm 往系统目录里塞，所以形状校验
+/// 直接复用 `path_shape`（绝对路径 / 非 UNC / 无 `..`）。
+///
+/// 但**不能照抄家目录那一套**，有两处刻意相反：
+///   - `Program Files` 在那边是禁区，在这里是**官方默认位置**
+///     （`C:\Program Files\nodejs`），必须放行；只禁止「恰好装到 `Program Files`
+///     根目录」——那会把 node.exe 撒进程序目录本身；
+///   - 家目录只关心「写自己的配置」，这里还要额外问两件只有安装器才在意的事：
+///     盘符是否真实存在（否则 MSI 吐一个和路径无关的 1606/1601），以及长度上限。
+///
+/// `raw` 为空 = 用户没填 = 用官方默认目录，返回 `Ok(None)`（这不是错误，
+/// 也正是「升级后行为不变」的那条路径）。
+pub fn validate_node_install_dir(raw: &str) -> Result<Option<String>, String> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    // 报错文案里要出现人能看懂的名字，而不是配置键名。
+    let field = i18n::t("lbl_node_install_dir");
+    let norm = path_shape(field, raw)?;
+    let lower = norm.to_ascii_lowercase();
+
+    // 驱动器根。**`path_shape` 不管这一条**：`C:\` 会被它规范化成 `C:` 后原样放行
+    // （家目录那边是靠 validate_home_dir 自己补的这一刀）。这里必须同样补上，
+    // 否则 `INSTALLDIR=C:` 会让 node.exe 直接落进 C 盘的当前目录/根目录。
+    if lower.len() <= 2 || !lower.contains('\\') {
+        return Err(i18n::fmt("err_path_root", &[&field]));
+    }
+
+    // Windows 路径本身不允许 `< > " | ? *`，其中 `"` 还会破坏 msiexec 自己的参数解析
+    // （属性值形如 `INSTALLDIR=D:\a"b` 时，引号会被当成值的边界）。
+    // `:` 只允许出现在盘符那一位；此后的任何 `:` 都是非法写法（备用数据流）。
+    for (i, c) in norm.char_indices() {
+        if c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*') || (c == ':' && i != 1) {
+            return Err(i18n::fmt("err_node_dir_chars", &[&norm]));
+        }
+    }
+
+    let len = norm.chars().count();
+    if len > NODE_INSTALL_DIR_MAX_CHARS {
+        return Err(i18n::fmt(
+            "err_node_dir_too_long",
+            &[&len.to_string(), &NODE_INSTALL_DIR_MAX_CHARS.to_string()],
+        ));
+    }
+
+    // 盘符存在性。`path_shape` 已保证是绝对路径，首个字符就是盘符、第二位是 `:`
+    // （UNC 与 `\\?\` 前缀都在上面被拒掉了）。不满足这个形状时不猜，直接跳过。
+    if norm.as_bytes().get(1) == Some(&b':') {
+        if let Some(letter) = norm.chars().next() {
+            let root = format!("{}:\\", letter);
+            if !std::path::Path::new(&root).exists() {
+                return Err(i18n::fmt("err_node_dir_drive", &[&norm]));
+            }
+        }
+    }
+
+    // 系统目录：`Windows` / `ProgramData` 连同其子目录一律不行。
+    for var in ["SystemRoot", "windir", "ProgramData"] {
+        if let Some(root) = env_lower(var) {
+            if is_under(&lower, &root) {
+                return Err(i18n::fmt("err_node_dir_system", &[&norm]));
+            }
+        }
+    }
+    // 环境变量被清空/异常时的兜底（与 system_roots() 同一思路）。
+    for root in ["c:\\windows", "c:\\programdata"] {
+        if is_under(&lower, root) {
+            return Err(i18n::fmt("err_node_dir_system", &[&norm]));
+        }
+    }
+    // `Program Files` 只禁「根目录本身」，子目录（含官方的 nodejs）放行。
+    for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(root) = env_lower(var) {
+            if lower == root {
+                return Err(i18n::fmt("err_node_dir_system", &[&norm]));
+            }
+        }
+    }
+
+    // 目标已存在但不是文件夹：MSI 会在写第一个文件时失败，提前说清楚。
+    let p = std::path::Path::new(&norm);
+    if p.exists() && !p.is_dir() {
+        return Err(i18n::fmt("err_node_dir_is_file", &[&norm]));
+    }
+    Ok(Some(norm))
+}
+
 /// 外观值归一化：只接受 light / dark / system，其余（含手改的非法值）回落 system。
 pub fn normalize_appearance(raw: &str) -> &'static str {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -937,5 +1034,124 @@ mod tests {
         let current: Config =
             serde_json::from_str(r#"{"toolbar_mode":"auto"}"#).expect("新配置应能解析");
         assert_eq!(current.toolbar_mode, "auto");
+    }
+
+    // ---------- 引导安装 Node.js 的自定义安装目录 ----------
+
+    /// 空 = 用官方默认目录。这是「老用户升级后行为完全不变」的那条路径：
+    /// 必须是 Ok(None)，不能报错 —— 一报错，所有没碰过这个输入框的人都会被向导拦住。
+    #[test]
+    fn node_install_dir_empty_means_default() {
+        assert_eq!(validate_node_install_dir("").unwrap(), None);
+        assert_eq!(validate_node_install_dir("   ").unwrap(), None);
+        assert_eq!(validate_node_install_dir("\t").unwrap(), None);
+    }
+
+    /// 形状类错误复用 err_path_* 那套既有判断（绝对路径 / 非 UNC / 无 `..` / 非驱动器根）。
+    /// 这些值都会被送进一个**提权**的安装程序，所以这里守的是「它们确实接上了」，
+    /// 而不是「随便什么串都能过」。每个用例在 Windows 与 Linux 上都是 Err，断言不挑平台。
+    #[test]
+    fn node_install_dir_rejects_bad_shapes() {
+        for bad in [
+            r"nodejs",               // 相对路径
+            r"\\server\share\node",  // UNC：node.exe 会变成网络对端提供的东西
+            r"C:\nodejs\..\windows", // `..` 不允许被折叠洗白
+            r"C:\",                  // 驱动器根
+            r"D:",                   // 同上（连分隔符都没有）
+        ] {
+            assert!(
+                validate_node_install_dir(bad).is_err(),
+                "应当拒绝这个路径: {bad}"
+            );
+        }
+    }
+
+    /// `"` 会破坏 msiexec 自己的属性解析（`INSTALLDIR=D:\a"b` 的引号会被当成值边界）；
+    /// `:` 只允许出现在盘符那一位，此后任何 `:` 都是非法写法。
+    #[test]
+    fn node_install_dir_rejects_illegal_chars() {
+        for bad in [r#"D:\a"b"#, r"D:\a|b", r"D:\a?b", r"D:\a*b", r"C:\a:b"] {
+            assert!(
+                validate_node_install_dir(bad).is_err(),
+                "应当拒绝这个路径: {bad}"
+            );
+        }
+    }
+
+    /// 长度上限：node.exe / npm / node_modules 会在这个目录之下再建几层，
+    /// 逼近 MAX_PATH 之后 MSI 会在装到一半时以看不出根因的方式失败。
+    #[test]
+    fn node_install_dir_rejects_overlong_path() {
+        let long = format!(r"C:\{}", "a".repeat(NODE_INSTALL_DIR_MAX_CHARS));
+        assert!(validate_node_install_dir(&long).is_err());
+    }
+
+    /// 目标已存在但不是文件夹：提前说清楚，别让 MSI 在写第一个文件时失败。
+    #[test]
+    fn node_install_dir_rejects_existing_file() {
+        let dir = scratch_dir("node-install-file");
+        let file = dir.join("nodejs");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(validate_node_install_dir(&file.to_string_lossy()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 反向回归：`Program Files` 在这里是**官方默认位置**（不同于家目录里它是禁区），
+    /// 子目录必须放行；但「恰好装到 Program Files 根目录」要把 node.exe 撒进程序目录，
+    /// 必须拒绝。哪天有人顺手把 system_roots() 整套抄过来，这条会立刻失败。
+    #[cfg(windows)]
+    #[test]
+    fn node_install_dir_allows_program_files_subdir_but_not_its_root() {
+        let pf = env_lower("ProgramFiles").expect("Windows 上应当有 ProgramFiles");
+        let sub = format!(r"{}\nodejs-probe-{}", pf, std::process::id());
+        assert!(
+            validate_node_install_dir(&sub).is_ok(),
+            "官方默认位置（Program Files\\nodejs）必须合法"
+        );
+        assert!(
+            validate_node_install_dir(&pf).is_err(),
+            "Program Files 根目录本身不能作为安装目录"
+        );
+    }
+
+    /// 系统目录连同其子目录一律不行 —— 这是这个校验存在的**主要安全理由**。
+    #[cfg(windows)]
+    #[test]
+    fn node_install_dir_rejects_system_dirs() {
+        let sysroot = env_lower("SystemRoot").expect("Windows 上应当有 SystemRoot");
+        assert!(validate_node_install_dir(&format!(r"{}\System32", sysroot)).is_err());
+        if let Some(pd) = env_lower("ProgramData") {
+            assert!(validate_node_install_dir(&format!(r"{}\nodejs", pd)).is_err());
+        }
+    }
+
+    /// 盘符不存在要提前拦住，否则 MSI 报的是一个和路径无关的错误码（1606/1601），
+    /// 用户根本看不出是自己填错了盘符。找一个本机确实不存在的盘符来测。
+    #[cfg(windows)]
+    #[test]
+    fn node_install_dir_requires_existing_drive() {
+        let missing = ('C'..='Z').find(|c| !Path::new(&format!("{}:\\", c)).exists());
+        match missing {
+            Some(c) => assert!(
+                validate_node_install_dir(&format!(r"{}:\nodejs", c)).is_err(),
+                "盘符 {c}: 不存在，应当拒绝"
+            ),
+            // 极端情况：C~Z 全都挂着。此时这条断言无从构造，跳过比误报好。
+            None => {}
+        }
+    }
+
+    /// 正常路径：放在本机真实存在的目录上必须通过，并返回**规范化**结果
+    /// （统一分隔符、去掉结尾的 `\`），调用方要用返回值而不是原始输入串。
+    #[test]
+    fn node_install_dir_accepts_real_dir_and_normalizes() {
+        let dir = scratch_dir("node-install-ok");
+        let raw = format!(r"{}\", dir.display());
+        let norm = validate_node_install_dir(&raw)
+            .expect("真实存在的目录应当通过")
+            .expect("非空输入应当返回 Some");
+        assert!(!norm.ends_with('\\'), "结尾分隔符应当被去掉: {norm}");
+        assert_eq!(norm, dir.to_string_lossy().trim_end_matches('\\'));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -12,8 +12,8 @@
       {
         "label": "main",
         "title": "DSH Desktop",
-        "width": 1392,
-        "height": 783,
+        "width": 1376,
+        "height": 774,
         "minWidth": 900,
         "minHeight": 560,
         "resizable": true,

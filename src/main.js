@@ -275,19 +275,6 @@ function stopPoem() {
 
 // ---------- 状态 UI ----------
 
-/// 错误是不是「Node 版本/缺失」这一类？用于决定要不要显示「打开首选项」的直达按钮。
-/// 判据放在特征词上（不绑死整句措辞）：消息里同时出现 Node 与「要求/requires」，
-/// 就认定是版本过低 —— 这类错误只有这一句带 Node，且都指向首选项里的升级入口。
-function isNodeVersionError(p) {
-  if (!p || p.status !== 'error') return false;
-  const msg = String(p.message || '');
-  if (!msg) return false;
-  const mentionsNode = msg.indexOf('Node') >= 0;
-  const mentionsRequirement = msg.indexOf('要求') >= 0 || msg.indexOf('requires') >= 0
-    || msg.indexOf('需要') >= 0;
-  return mentionsNode && mentionsRequirement;
-}
-
 function onStatus(p) {
   const prev = status;
   status = p.status;
@@ -333,8 +320,6 @@ function onStatus(p) {
   hint.classList.add('hidden');
   busyPanel.classList.add('hidden');
   $('btn-copy-error').classList.add('hidden');
-  // 「Node 版本过低」这类错误给一个直达修复入口：只在错误文案确实是这条时显示
-  $('btn-fix-node').classList.toggle('hidden', !isNodeVersionError(p));
   // 更新进度面板：进入 updating 状态（或更新流程尚未结束，覆盖「停止→更新」的中间态）时显示
   $('update-progress').classList.toggle('hidden', !(p.status === 'updating' || updating));
 
@@ -885,8 +870,7 @@ function applyLanguage(lang) {
   renderVersion(v.local, v.latest, v.next);
   if (!$('update-modal').classList.contains('hidden')) renderUpdateModal(false);
   invoke('get_status').then(onStatus).catch(() => {});
-  // Node 版本相关文案里带版本号（下限 + 本机版本），语言切换后要按新词典重绘
-  renderNodePrefRow();
+  // 向导里的 Node 版本文案带版本号（下限 + 本机版本），语言切换后要按新词典重绘
   if (wiz.active) renderWiz();
   // 安全模式按钮文字与引导横幅里的动态行（不受 data-i18n 管理）需要手动重绘
   // （凭据借用说明是进入时由 Rust 生成的，语言切换后要到下次进入才更新）
@@ -917,15 +901,6 @@ function openSettings() {
   const sv = Number(config.safe_verify_secs);
   $('set-safe-verify').value = Number.isFinite(sv) ? sv : 80;
   $('set-config-path').textContent = config.config_path;
-  // Node.js 版本状态行（含一键升级按钮与「保留该版本并继续」开关）：
-  // 有缓存检测结果就直接渲染，没有就异步补一次检测
-  if (lastEnvDetection || wiz.detection) {
-    renderNodePrefRow();
-  } else {
-    invoke('detect_environment')
-      .then((d) => { lastEnvDetection = d; renderNodePrefRow(); })
-      .catch(() => {});
-  }
   markFlag('npm-exists-flag', config.npm_exists);
   markFlag('dsh-exists-flag', config.dsh_exists);
   markFlag('home-exists-flag', config.home_exists);
@@ -1315,7 +1290,6 @@ async function wizDetect() {
     wiz.detection = null;
   }
   setWizProgress(false);
-  renderNodePrefRow();
   renderWiz();
 }
 
@@ -1522,27 +1496,16 @@ function onSetupStatus(p) {
 }
 
 function onSetupResult(p) {
-  // 这条事件有两个来源：首次运行向导里的引导安装，以及首选项里的
-  // 「下载并安装官方 LTS」。向导没开时不能在这里 return —— 否则首选项那条路
-  // 会留下一个永远转不完的「处理中…」面板，版本行也不会刷新。
+  // 引导安装的入口只剩首次运行向导的「Node 版本过低」告警面板（首选项里的那处已移除），
+  // 所以这里必然处于向导里；仍然不 return，避免事件早到时留下转不完的「处理中…」面板。
   wiz.busy = false;
   renderWiz();
   if (p.success) {
-    if (wiz.active) {
-      setWizProgress(true, p.message);
-      $('wiz-log').classList.remove('hidden');
-    }
+    setWizProgress(true, p.message);
+    $('wiz-log').classList.remove('hidden');
     toast(p.message || t('wiz_installed'));
-    // 成功后自动重新检测：向导里用于进入下一步，首选项里用于刷新版本状态行
-    setTimeout(() => {
-      if (wiz.active) {
-        wizDetect();
-      } else {
-        invoke('detect_environment')
-          .then((d) => { lastEnvDetection = d; renderNodePrefRow(); })
-          .catch(() => {});
-      }
-    }, 600);
+    // 成功后自动重新检测：版本达标即进入下一步
+    setTimeout(() => wizDetect(), 600);
   } else {
     setWizProgress(false);
     $('wiz-log').classList.remove('hidden');
@@ -1550,75 +1513,14 @@ function onSetupResult(p) {
   }
 }
 
-// ---------- 首选项里的「Node.js 版本」一行 ----------
-// 数据源与向导同一份（lastEnvDetection）；没有检测结果时只显示中性提示。
-
-function renderNodePrefRow() {
-  const row = $('set-node-version');
-  const box = $('set-node-min-ignore');
-  const title = $('lbl-node-version');
-  const det = lastEnvDetection || (wiz.detection || null);
-  if (!row || !box) return;
-  const [cur, min] = nodeVersionPair(det);
-  // 标题里的下限版本号由后端提供，语言切换 / 后端调整时一并重绘
-  if (title) title.innerHTML = t('lbl_node_version_html').replace('v22.19.0', escapeHtml(min));
-  if (!det) {
-    row.textContent = t('flag_node_unknown', '—');
-    row.className = 'flag';
-    box.checked = false;
-    box.disabled = true;
-    return;
-  }
-  box.disabled = !det.node_found;
-  // 勾选状态 = 「保留该版本，仍要继续」是否已记录（且记录的就是当前这条下限）
-  box.checked = !!(det.node_found && nodeIsTooOld(det) && nodeAckConfirmed(det));
-  if (!det.node_found) {
-    row.textContent = t('flag_node_unknown', t('wiz_notfound'));
-    row.className = 'flag bad';
-  } else if (nodeIsTooOld(det)) {
-    row.textContent = t('flag_node_old', cur, min);
-    row.className = 'flag bad';
-  } else if (nodeVersionUnknown(det)) {
-    row.textContent = t('flag_node_unknown', cur);
-    row.className = 'flag warn';
-  } else {
-    row.textContent = t('flag_node_ok', cur);
-    row.className = 'flag ok';
-  }
-}
-
-/// 「保留该版本并继续」开关：勾上 = 记录确认（后端只写 node_min_ack 一个键），
-/// 取消 = 清掉确认，恢复「版本过低就拦截启动」。
-/// 状态行始终照实显示版本是否满足要求（勾选只影响要不要拦启动，不掩盖红字）。
-async function onNodeMinIgnoreToggle(on) {
-  const det = lastEnvDetection || (wiz.detection || null);
-  const version = det && det.node_version ? String(det.node_version) : '';
-  try {
-    config = await invoke('remember_node_min_version_notice', { version, ignore: !!on });
-  } catch (e) {
-    toast(t('toast_node_ack_fail', e), true);
-    renderNodePrefRow();
-    return;
-  }
-  refreshNodeIndicators();
-  if (on) {
-    appendLog('launcher', t('wiz_node_ignore_log'));
-    toast(t('toast_node_ack_saved'));
-  } else {
-    appendLog('launcher', t('log_node_check_restored'));
-    toast(t('toast_node_ack_clear'));
-  }
-}
-
-/// 记忆/配置变化后，把向导与首选项两处 Node 状态一起重绘。
+/// 记忆/配置变化后重绘向导里的 Node 状态（版本行 + 告警面板）。
 function refreshNodeIndicators() {
-  renderNodePrefRow();
   if (wiz.active) renderWiz();
 }
 
-/// 「下载并安装官方 LTS」的公共逻辑（向导告警面板与首选项共用同一后端命令）。
+/// 「一键下载并安装最新 LTS」：只从首次运行向导的「Node 版本过低」告警面板发起
+/// （首选项里的入口已移除，所以这里必然在向导中）。
 /// 进度与结果由 setup-status / setup-result 事件驱动（Rust 端按当前语言输出）。
-/// 向导开着 → 显示在向导内的进度区；向导关着（首选项入口）→ 复用状态区的进度面板。
 async function runNodeLtsInstall() {
   if (wiz.busy) {
     appendLog('launcher', t('log_node_install_busy'));
@@ -1628,17 +1530,11 @@ async function runNodeLtsInstall() {
   wiz.busy = true;
   appendLog('launcher', t('log_node_install_manual'));
   renderWiz();
-  if (wiz.active) {
-    setWizProgress(true, t('wiz_download_node'));
-    $('wiz-log').classList.remove('hidden');
-  } else {
-    // 首选项入口：保留对话框（安装会弹官方 UAC 窗口，用户需要看着它走），
-    // 只给一句提示告诉用户接下来会发生什么
-    toast(t('toast_node_upgrade_hint'));
-    appendLog('launcher', t('wiz_download_node'));
-  }
+  setWizProgress(true, t('wiz_download_node'));
+  $('wiz-log').classList.remove('hidden');
   try {
-    // 显式传 null：这条路径（升级 / 首选项入口）一律沿用现有安装目录，不换盘。
+    // 显式传 null：升级这条路一律沿用现有安装目录，不换盘（同一个 ProductCode
+    // 改 INSTALLDIR 会留下旧目录与旧的 PATH 条目；只有「首次安装」才让用户选目录）。
     // 键名是单词 dir —— 见 Rust 侧 setup_install_node 的注释（多词名会踩风格转换）。
     await invoke('setup_install_node', { dir: null });
   } catch (e) {
@@ -1700,8 +1596,6 @@ function bindUI() {
   });
   $('btn-connect').onclick = () => invoke('connect_existing').catch((e) => toast(String(e), true));
   $('btn-change-port').onclick = openSettings;
-  // 错误状态里的「打开首选项」直达按钮（Node 版本过低 → 一键升级 / 保留并继续都在里面）
-  $('btn-fix-node').onclick = () => openSettings();
 
   // ---- 工具栏自动隐藏：进入触发条 / 工具栏即展开，离开工具栏 500ms 后收起 ----
   // 触发条只在自动隐藏模式下可见（固定显示时它是 display:none）。
@@ -1752,12 +1646,11 @@ function bindUI() {
     appendLog('launcher', t('log_detect_start'));
     try {
       const d = await invoke('detect_environment');
-      lastEnvDetection = d; // 首选项的 Node 版本行也吃这份结果
+      lastEnvDetection = d; // 向导的「将执行以下命令」预览用它兜底
       if (d.npm_path) $('set-npm-path').value = d.npm_path;
       if (d.dsh_path) $('set-dsh-path').value = d.dsh_path;
       markFlag('npm-exists-flag', d.npm_found);
       markFlag('dsh-exists-flag', d.dsh_found);
-      renderNodePrefRow();
       appendLog('launcher', t('log_detect_done',
         d.node_path || t('wiz_notfound'),
         d.node_version ? '(' + d.node_version + ')' : '',
@@ -1849,9 +1742,6 @@ function bindUI() {
     refreshNodeIndicators();
   };
 
-  // 首选项：Node 版本状态行 + 一键安装 LTS + 「保留该版本并继续」开关
-  $('btn-install-node-lts').onclick = () => runNodeLtsInstall();
-  $('set-node-min-ignore').onchange = (ev) => onNodeMinIgnoreToggle(ev.target.checked);
   $('wiz-btn-copy-dsh-cmd').onclick = async () => {
     const ok = await copyText($('wiz-dsh-cmd').textContent);
     toast(ok ? t('wiz_cmd_copied') : t('toast_copy_fail'), !ok);

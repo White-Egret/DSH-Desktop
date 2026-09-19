@@ -85,7 +85,7 @@ pub fn run(launched_by_autostart: bool) {
             process::setup_install_dsh,
             process::finish_setup,
             process::set_language,
-            // 「Node 版本过低」告警的第三条路：保留旧版本并继续（只写 node_min_ack 一个键）
+            // 首次运行向导的「Node 版本过低」告警：保留旧版本并继续（只写 node_min_ack 一个键）
             process::remember_node_min_version_notice,
             // 安全模式：独立纯净家目录（%USERPROFILE%\.dsh-safe，端口 3081）
             safe::enter_safe_mode,

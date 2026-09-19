@@ -3916,8 +3916,10 @@ pub fn set_language(app: AppHandle, lang: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 「Node 版本过低」告警里的第三条路：用户明确选择保留这个版本、仍要尝试启动
-/// （ignore = true），或在首选项里取消这个选择、恢复启动拦截（ignore = false）。
+/// 首次运行向导「Node 版本过低」告警里的第三条路：用户明确选择保留这个版本、仍要尝试启动
+/// （ignore = true）。ignore = false（清掉确认、恢复启动拦截）**目前没有界面入口** ——
+/// 首选项里那一行连同勾选框已移除（Node 的版本/安装决定统一收在首次运行向导），
+/// 这里保留该分支只是因为命令本身就是双向语义，将来要恢复入口不必再动后端。
 ///
 /// 只写 config.json 的 `node_min_ack` 一个键（读取-修改-写回，同 last_url_enc 的做法），
 /// 不动其它字段；前端也不走 save_config，避免整体写盘时把别的设置覆盖掉。

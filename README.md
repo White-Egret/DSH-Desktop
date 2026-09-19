@@ -107,15 +107,14 @@ Worth knowing:
 
 DSH's runtime floor is **Node.js 22.19.0**: `node:sqlite` (used by the SQLite session store) lost its experimental flag at 22.13, native TypeScript type-stripping became the default at 22.18, and one DSH dependency (`@earendil-works/pi-ai`) declares `engines.node >=22.19.0`. Because the published `@deepseek-ai/dsh` package does **not** declare `engines`, npm will happily install it on an older Node — the failure only shows up at runtime (on Node 21.7.3, for example, DSH does not start at all).
 
-The launcher therefore checks the detected `node --version` against that floor and turns the cryptic failure into a decision:
+The launcher therefore checks the detected `node --version` against that floor and turns the cryptic failure into a decision. **Every Node version / installation decision lives in the first-run wizard** — Preferences has no Node row, and later upgrades are plain official installers:
 
 | Where | What happens |
 |---|---|
-| First-run wizard | The Node.js row shows **⚠ version too old** with `21.7.3 → v22.19.0+`, plus a warning panel offering **Download & install the latest LTS** (the same SHA-256-verified official MSI flow as the missing-Node step), **Download it myself from nodejs.org**, **Re-check**, and **Keep this version and continue**. |
-| Pressing Start | The launch is refused with an explicit reason ("detected 21.7.3, DSH requires v22.19.0 or newer") instead of letting DSH exit with an opaque error. The message says how to fix it. |
-| Preferences | A **Node.js version** row shows the state (`✔ OK` / `✘ too old` / `? cannot tell`), the **Download & install official LTS** button runs the guided install any time (not only on first run), and the **Keep this version and start anyway** checkbox records your decision. |
+| First-run wizard | The Node.js row shows **⚠ version too old** with `21.7.3 → v22.19.0+`, plus a warning panel offering **Download & install the latest LTS** (the same SHA-256-verified official MSI flow as the missing-Node step), **Download it myself from nodejs.org**, **Re-check**, and **Keep this version and continue**. The wizard appears on first run only (it stops appearing once `config.json` exists), which is where these decisions belong. |
+| Pressing Start | The launch is refused with an explicit reason ("detected 21.7.3, DSH requires v22.19.0 or newer") pointing at the official LTS installer, instead of letting DSH exit with an opaque error. |
 
-- **"Keep this version and continue"** is written to `node_min_ack` in `config.json` (one key, read-modify-write — it never rewrites your other settings) and disables the Start check. It records *the floor you accepted*: if a future version of this app raises the requirement, the check comes back rather than silently staying off. Unchecking the box in Preferences restores the check immediately.
+- **"Keep this version and continue"** is written to `node_min_ack` in `config.json` (one key, read-modify-write — it never rewrites your other settings) and disables the Start check. It records *the floor you accepted*: if a future version of this app raises the requirement, the check comes back rather than silently staying off. It is a one-off decision made in the wizard; there is no longer a switch that turns it back on or off.
 - **The version string is never guessed.** A missing Node, an unreadable `node --version`, or a version that cannot be parsed is reported as `? cannot tell` — a warning, but never a blocked launch, because a version string we cannot read is not evidence that the runtime is broken.
 - **Upgrading an existing Node.js is safe for DSH.** The official MSI installs over the current Node.js in the same directory (PATH unchanged), and DSH's global command lives in the user's npm prefix — so the guided upgrade does not require reinstalling DSH. If the version still looks stale right after the installer exits, restart the app (PATH may only refresh after a restart) and use **Re-check**.
 
@@ -441,7 +440,7 @@ DSH stdout/stderr are never hidden: they stream live to the log dialog and to bo
 
 ## Troubleshooting
 
-- **未找到 Node.js (Node.js not found)** — install Node.js LTS from <https://nodejs.org>, reopen Preferences → 自动检测, or browse to `node.exe`'s directory manually.
+- **未找到 Node.js (Node.js not found)** — install Node.js LTS from <https://nodejs.org> and restart this app (the "Auto-detect" button in Preferences only refreshes the npm / dsh paths).
 - **未找到 npm** — usually fixed by installing Node.js; npm.cmd sits in the same directory as node.exe (e.g. `C:\Program Files\nodejs\npm.cmd`).
 - **未找到 DSH** — run `npm install -g @deepseek-ai/dsh` (see wizard), or point Preferences to the existing `dsh.cmd` (typically `%APPDATA%\npm\dsh.cmd` — or the folder you chose in the wizard if you moved it).
 - **端口被占用 (Port busy)** — choose Connect to existing service (if it's another DSH instance), change the port in Preferences, or handle the occupying process yourself in Task Manager. This app never kills unknown processes.
@@ -478,7 +477,7 @@ By default no — it hides to the tray. You can switch the close button to "quit
 Right after login, disk IO spikes and Node/network may not be ready; the delay avoids most timeout failures. Cancel it anytime by clicking Stop during the wait.
 
 **DSH worked before, then stopped starting — could Node.js be the cause?**
-Yes, if your Node.js is older than 22.19.0 (for example 21.x). The launcher now refuses such a launch and tells you the detected version and the required one instead of showing DSH's opaque exit; upgrade the Node.js runtime with the wizard / Preferences button, or tick "Keep this version and start anyway" if you want to try regardless. See [Node.js version check](#nodejs-version-check).
+Yes, if your Node.js is older than 22.19.0 (for example 21.x). The launcher now refuses such a launch and tells you the detected version and the required one instead of showing DSH's opaque exit; install the current LTS from <https://nodejs.org> (the official installer overwrites the same directory; PATH is unchanged) and restart this app. See [Node.js version check](#nodejs-version-check).
 
 **The toolbar disappeared — it only shows up when I move the mouse to the very top edge?**
 That is the "auto-hide toolbar" mode (turn it off in ⚙ Preferences). The toolbar starts parked above the window, slides down when the mouse enters the 8px strip at the top, and hides again half a second after the mouse leaves it; `Ctrl+Shift+H` switches back to pinned. Two things to note: auto-hide only kicks in once the DSH page is **ready** (while DSH is not running the toolbar stays visible), and the shortcut only works while this launcher page holds focus — if focus is inside the embedded DSH page, move the mouse to the very top edge instead. See [Toolbar display mode](#toolbar-display-mode).

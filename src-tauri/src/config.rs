@@ -1125,8 +1125,9 @@ fn write_config_key(app: &AppHandle, key: &str, value: &str) -> Result<(), Strin
         .map_err(|e| i18n::fmt("err_cfg_write", &[&path.display().to_string(), &e.to_string()]))
 }
 
-/// 记下「用户已知 Node 低于 <min_version>，仍选择继续」；传空串 = 取消这个选择
-/// （首选项里取消勾选时走这里），恢复「版本过低就拦截启动」。
+/// 记下「用户已知 Node 低于 <min_version>，仍选择继续」；传空串 = 取消这个选择，
+/// 恢复「版本过低就拦截启动」。取消这条路目前没有界面入口（首选项里那一行连同
+/// 勾选框已移除，Node 的决定统一收在首次运行向导），保留它只是为了命令语义完整。
 /// 写入的是**当时的下限**：以后程序把下限提高了，比对不相等就会重新告警。
 pub fn remember_node_min_ack(app: &AppHandle, min_version: &str) -> Result<(), String> {
     write_config_key(app, "node_min_ack", min_version)

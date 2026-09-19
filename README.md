@@ -31,7 +31,7 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 - Version check against both npm dist-tags (`npm view <pkg> dist-tags`); the toolbar flags "update available" when your install trails the newest channel
 - Close-to-tray or quit-on-close behavior (configurable); tray menu with Show Main Window / Start with Windows / Exit; tray restore does show + unminimize + set_focus
 - Start with Windows (official autostart plugin, HKCU registry only, no admin rights); autostart runs silently in tray and delays DSH launch by 12 s to avoid the boot-time IO spike
-- First-run setup wizard: detects Node.js/npm/DSH and can guide installation (official nodejs.org LTS installer download or `npm install -g @deepseek-ai/dsh`), with a **choosable Node.js install location** (e.g. onto another drive) — fully skippable
+- First-run setup wizard: detects Node.js/npm/DSH and can guide installation (official nodejs.org LTS installer download or `npm install -g @deepseek-ai/dsh`), with a **choosable Node.js / DSH install location** (e.g. onto another drive) — fully skippable
 - **Node.js minimum-version guard (22.19.0)**: detects an installed-but-too-old Node.js, warns with the exact versions, offers a one-click upgrade to the official LTS (same verified installer flow), keeps a "download it myself" link and a "keep this version and continue" escape hatch, and refuses to start DSH with a plain-language reason instead of letting it die on an opaque error — see [Node.js version check](#nodejs-version-check)
 - **Bilingual UI (Chinese / English)**: choose a language in Preferences; the whole launcher (toolbar, status, dialogs, logs, tray menu) switches, and DSH's own web UI follows via its `settings.yaml`
 - **Light / Dark / Follow-system appearance**: pick it in Preferences; the launcher (toolbar, dialogs, wizard, native title bar) and the embedded DSH page switch together through `ui-theme.preference` in DSH's `settings.yaml` — open DSH pages follow **live, no DSH restart needed**
@@ -81,6 +81,21 @@ Worth knowing:
 - **First-time installs only.** The "Node.js too old → upgrade" path deliberately does **not** offer a directory change: switching `INSTALLDIR` during an upgrade of the same ProductCode leaves the old directory and the old PATH entry behind. To relocate an existing Node.js, uninstall it first and install again.
 - **The result is verified.** MSI silently ignores properties it does not recognise (and still exits 0), so after installing the app confirms that `node.exe` really is in the directory you asked for; if it is not, it reports that honestly instead of showing a success message.
 - **The path is validated** — absolute, no `..`, drive must exist, no `< > " | ? *`, not inside `Windows` / `ProgramData`, not the `Program Files` root itself, 200-character limit. Anything else is refused up front, **before** the 30 MB download starts.
+
+### Choosing where DSH gets installed
+
+The "DSH is missing" step has the same kind of **install location** field, **pre-filled with npm's global directory** (the app asks `npm config get prefix` once and only falls back to `%APPDATA%\npm` if that fails; normally `C:\Users\<you>\AppData\Roaming\npm` — i.e. where DSH already lives on this machine). To install onto another drive, edit it to e.g. `D:\dsh`, or use Browse; clearing it falls back to npm's own default.
+
+The value is handed to npm as `--prefix <dir>`. Note this is **not** a per-machine install like Node.js: it needs no administrator rights (the folder just has to be writable by you). The trade-off is that npm's global directory is shared by *all* global packages — later `npm install -g <something-else>` in a terminal still goes to npm's default directory; the two coexist and do not interfere.
+
+Worth knowing:
+
+- **The folder is added to your user PATH.** After a successful install the app appends it to `HKCU\Environment`'s `Path` (kept as `REG_EXPAND_SZ`, system PATH untouched, no admin rights) so `dsh` also works in a terminal and the app keeps detecting it. When the chosen folder *is* npm's default one, nothing is touched at all. If the write fails (rare — e.g. the registry is locked down by policy) that is reported honestly rather than glossed over; the app itself starts DSH by its full path and is unaffected.
+- **The result is verified.** npm's exit code 0 only means npm *thinks* it succeeded, so after installing the app confirms `dsh.cmd` really is in the directory you asked for; if it is not, it reports the error together with the location it actually detected.
+- **Updates go back to the same place.** "Update DSH" no longer always targets the default directory: it derives the directory from where `dsh.cmd` actually lives and passes that as `--prefix` — otherwise a second copy of DSH would be left behind and "which one is detected" would become a matter of luck.
+- **What you typed is never overwritten.** Same rule as the Node.js field: once you edit it (or pick a folder with Browse), "Re-check" will not put the default back.
+- **The path is validated** — absolute, no `..`, drive must exist, no `< > " | ? *`, not inside `Windows` / `ProgramData`, not the `Program Files` root itself, 200-character limit — and it must not contain `%` or `!`, because the value travels through `cmd.exe` to `npm.cmd`, which expands `%VAR%` even inside double quotes and treats `!` specially once delayed expansion is on. Those cannot be escaped reliably, so they are refused.
+- **The folder is created for you.** npm fails a non-existent `--prefix` outright (`ENOENT … lstat`) — unlike the MSI it will not create the prefix itself — so the app creates the directory first and reports a clear error if it cannot.
 
 > **Installer integrity**: before `msiexec` is ever invoked, the downloaded installer is matched against the SHA-256 digest listed in Node.js's official `SHASUMS256.txt` for that exact version, and it lands in a one-shot randomly-named private temp directory that is deleted afterwards (the old predictable `%TEMP%\node-vX.Y.Z-x64.msi` path could be pre-created as a symlink or swapped by another process). If the manifest can't be fetched, has no entry for the file, or the digest differs, the install aborts — there is deliberately **no "install anyway" fallback**; use the manual download link instead.
 >
@@ -189,6 +204,7 @@ Open **⚙ 首选项 (Preferences)** from the toolbar. All fields support auto-d
 | Setting | Default | Notes |
 |---|---|---|
 | npm program path | empty → auto-detected | `npm.cmd` / `npm.exe`; used for update / version queries |
+| npm cache location | empty (npm config untouched) | written into npm's own `~/.npmrc` (the `cache` line), so terminal npm follows it too — see *npm cache location* |
 | dsh path | empty → auto-detected | `dsh.cmd` / `dsh.exe` / `dsh.bat`; used to launch DSH |
 | DSH home dir | `%USERPROFILE%\.dsh` | passed to DSH as `DSH_HOME`; process cwd is its parent; not your workspace |
 | Port | `3080` | must be 1–65535; validated on save; takes effect on next DSH start |
@@ -200,7 +216,19 @@ Open **⚙ 首选项 (Preferences)** from the toolbar. All fields support auto-d
 | Interface language | `zh` (中文) | `zh` / `en`; switches the whole launcher and syncs DSH's `settings.yaml` — see [Language](#language) |
 | Appearance | `system` (follow system) | `light` / `dark` / `system`; switches the launcher and syncs DSH's `ui-theme.preference` — see [Appearance](#appearance) |
 
-> There is deliberately **no "update args" setting any more**: the update command is always `npm install -g <package name>@<channel>`, and the channel (`latest` / `next`) is chosen in the **⤓ 更新 DSH** dialog itself — see [Update DSH](#update-dsh). Extra npm knobs (registry, proxy) belong in an `.npmrc` next to the DSH home dir.
+> There is deliberately **no "update args" setting any more**: the update command is always `npm install -g <package name>@<channel>` (plus a `--prefix` derived from where `dsh.cmd` actually lives, when DSH is installed outside npm's default directory — see *Choosing where DSH gets installed*), and the channel (`latest` / `next`) is chosen in the **⤓ 更新 DSH** dialog itself — see [Update DSH](#update-dsh). Extra npm knobs (registry, proxy) belong in an `.npmrc` next to the DSH home dir.
+
+### npm cache location
+
+On Windows npm keeps its cache in **`%LOCALAPPDATA%\npm-cache`** (`C:\Users\<you>\AppData\Local\npm-cache`; `~/.npm` on Linux/macOS). That is a *different* place from the global directory (`%APPDATA%\npm`) that the DSH install-location option moves, so the cache gets its own field here: fill it in to move the cache to another drive, clear it to move back. Next to the field the app shows two things — **the value in npm's config** and **the value actually in effect** (they differ when an environment variable or a project-level `.npmrc` overrides it, and that case is flagged with ⚠).
+
+This one setting is different in kind from the rest: **it edits npm's own file.**
+
+- **It writes the `cache` line in `~/.npmrc`** (the path comes from `npm config get userconfig`, not a guess), so terminal npm uses the same location. On top of that, every npm the app runs itself (install/update DSH, package list, version query) passes `--cache <dir>` explicitly, so the command in the log behaves identically when copy-pasted.
+- **Only that one line is touched; everything else is preserved verbatim** — comments, `registry=`, `_authToken=`, … (minimal line edit plus an atomic replace, the same rule the app follows for DSH's `settings.yaml`). It deliberately does **not** call `npm config set`: npm's ini writer was measured to drop comments from the file.
+- **Empty = delete the line**, falling back to npm's default location (rather than pinning the default explicitly).
+- **Value rules**: absolute, no `..`, drive must exist, no `< > " | ? *`, not inside `Windows` / `ProgramData`, no `%` or `!` (the value travels through `cmd.exe`), **no `#` or `;`** (npm's ini parser treats them as comment starts — measured: `cache=D:\a#b` reads back as `D:\a`, i.e. silently a different folder), and a **100-character limit**: npm writes content-addressed paths 158 characters deep below the cache root (measured), and beyond the classic 260-character limit Explorer/PowerShell can no longer delete that tree — npm itself still works, but "cannot be cleaned up" is the worse outcome.
+- **The app does not create the folder** — npm does that itself (measured: pointing at a non-existent directory still installs fine).
 
 ### Argument & path policy (enforced on save *and* at every use)
 
@@ -415,7 +443,7 @@ DSH stdout/stderr are never hidden: they stream live to the log dialog and to bo
 
 - **未找到 Node.js (Node.js not found)** — install Node.js LTS from <https://nodejs.org>, reopen Preferences → 自动检测, or browse to `node.exe`'s directory manually.
 - **未找到 npm** — usually fixed by installing Node.js; npm.cmd sits in the same directory as node.exe (e.g. `C:\Program Files\nodejs\npm.cmd`).
-- **未找到 DSH** — run `npm install -g @deepseek-ai/dsh` (see wizard), or point Preferences to the existing `dsh.cmd` (typically `%APPDATA%\npm\dsh.cmd`).
+- **未找到 DSH** — run `npm install -g @deepseek-ai/dsh` (see wizard), or point Preferences to the existing `dsh.cmd` (typically `%APPDATA%\npm\dsh.cmd` — or the folder you chose in the wizard if you moved it).
 - **端口被占用 (Port busy)** — choose Connect to existing service (if it's another DSH instance), change the port in Preferences, or handle the occupying process yourself in Task Manager. This app never kills unknown processes.
 - **DSH 启动超时 (Start timeout)** — cold starts can be slow; raise the timeout in Preferences or set it to `0` (wait indefinitely while the process is alive).
 - **DSH 启动后立即退出 (Exits immediately)** — see the red error line (last stderr) and full log output; common causes: wrong home dir, broken global npm install, port conflicts inside DSH config.

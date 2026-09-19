@@ -70,6 +70,35 @@ pub(crate) mod win {
     pub fn close_job(h: &JobHandle) {
         unsafe { CloseHandle(h.0) };
     }
+
+    /// 环境变量（这里是用户 PATH）改完之后广播 WM_SETTINGCHANGE。
+    ///
+    /// 为什么需要它：注册表里的用户 PATH 是所有新进程的**来源**，但 Explorer 自己也
+    /// 缓存着一份环境块；不广播的话，用户从开始菜单新开的终端仍然是旧 PATH，
+    /// 症状就是「程序说已经加进 PATH 了，终端里还是找不到 dsh」，要等重新登录。
+    /// 广播是 Windows 成文的刷新机制（Explorer 收到后重建自己的环境块）。
+    ///
+    /// 用 `SMTO_ABORTIFHUNG` + 2 秒超时：这是同步消息，若某个顶层窗口卡死，
+    /// 我们不该陪着它一起卡；返回 0 只代表没送到，重新登录后一样生效，故忽略结果。
+    pub fn broadcast_environment_change() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
+        };
+        // LPARAM 指向 "Environment" 字符串（要求可变宽字符串，故用 Vec<u16>）
+        let param: Vec<u16> = "Environment\0".encode_utf16().collect();
+        let mut result: usize = 0;
+        unsafe {
+            SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                0,
+                param.as_ptr() as isize,
+                SMTO_ABORTIFHUNG,
+                2000,
+                &mut result,
+            );
+        }
+    }
 }
 
 /// 全局运行状态（由 Tauri manage 注入）
@@ -326,6 +355,17 @@ pub struct ConfigReport {
     pub config_path: String,
     /// 首次运行（%APPDATA%\com.dsh.desktop\config.json 尚不存在）：前端据此显示安装引导
     pub first_run: bool,
+}
+
+/// 首选项「npm 缓存位置」那一行提示所需的事实（全部来自**问 npm 自己**，不是猜的）。
+#[derive(Serialize)]
+pub struct NpmCacheInfo {
+    /// npm 的用户级配置文件路径（`~/.npmrc`）；空 = 取不到，此时改不了
+    pub userconfig: String,
+    /// 该文件里 `cache=` 的值（空 = 没设置，即 npm 用默认位置）
+    pub user_value: String,
+    /// 本机**实际生效**的缓存目录（含环境变量 / 项目级 .npmrc 的覆盖）
+    pub effective: String,
 }
 
 // ---------- 工具函数 ----------
@@ -1816,6 +1856,50 @@ pub fn get_config(app: AppHandle) -> ConfigReport {
     }
 }
 
+/// 把首选项里的「npm 缓存位置」同步进 npm 自己的用户配置（`~/.npmrc` 的 `cache=` 一行），
+/// 返回一条**说清到底动没动**的消息（未变更 / 已写入 / 已删除），由前端直接提示。
+///
+/// 为什么单独一条命令、而不是并进 save_config：这一步会 spawn npm（问 userconfig 路径）、
+/// 还会改用户家目录里的文件，失败原因（读不成 UTF-8、文件被占用、npm 缺失）值得单独报给
+/// 用户；而 save_config 是同步命令，不该在里面做这些慢操作。
+///
+/// 前端在 save_config **之前**调它，这样「本程序的设置」与「npm 的配置」两件事分开说清，
+/// 且任何一边失败都不会把另一边悄悄带过去。
+#[tauri::command]
+pub async fn apply_npm_cache(dir: Option<String>) -> Result<String, String> {
+    // 与其它路径字段一样：进命令行 / 进文件之前先过校验（空串 = 删除该行）
+    let desired = config::validate_npm_cache_dir(dir.as_deref().unwrap_or(""))?;
+    let outcome = config::apply_npm_cache(desired.as_deref())?;
+    Ok(match outcome {
+        config::NpmCacheOutcome::Unchanged(None) => i18n::t("cache_npmrc_unchanged_none").to_string(),
+        config::NpmCacheOutcome::Unchanged(Some(v)) => {
+            i18n::fmt("cache_npmrc_unchanged", &[&v])
+        }
+        config::NpmCacheOutcome::Written(v) => i18n::fmt("cache_npmrc_written", &[&v]),
+        config::NpmCacheOutcome::Removed(v) => i18n::fmt("cache_npmrc_removed", &[&v]),
+    })
+}
+
+/// 首选项用：读「npm 配置文件里的 cache / 实际生效的 cache」。
+/// `async` 是因为它要 spawn npm 问两个值（与 detect_environment 同一处理方式：
+/// 别把子进程等待放在主线程上）。
+#[tauri::command]
+pub async fn npm_cache_info(_app: AppHandle) -> NpmCacheInfo {
+    let userconfig = detect::npm_userconfig_path();
+    let user_value = userconfig
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| config::npmrc_cache_value(&s))
+        .unwrap_or_default();
+    NpmCacheInfo {
+        userconfig: userconfig
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        user_value,
+        effective: detect::npm_effective_cache_dir(),
+    }
+}
+
 #[tauri::command]
 pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, String> {
     // 端口必须是 1~65535 的数字（要求一.5）
@@ -1844,6 +1928,10 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     config.dsh_home_dir = config::validate_home_dir(&config.dsh_home_dir)?;
     config.dsh_path = config::validate_program_shape("dsh_path", &config.dsh_path)?;
     config.npm_path = config::validate_program_shape("npm_path", &config.npm_path)?;
+    // npm 缓存位置（首选项）：空 = 不设置；非空则规范化后落盘。与其它路径字段同一套
+    // 「保存时校验 + 每次使用点再校验」—— 这里拒掉，就不会出现「设置页存了个非法值，
+    // 保存后才在写 npm 配置文件那一步炸」。
+    config.npm_cache_dir = config::validate_npm_cache_dir(&config.npm_cache_dir)?.unwrap_or_default();
     // 外观只认 light / dark / system（非法值归一为 system，与前端下拉框互为防线）
     config.appearance = config::normalize_appearance(&config.appearance).to_string();
     // 安全模式修复验证等待：0 = 关闭验证提示；其余收敛到 5~3600 秒（与就绪超时同一刻度）
@@ -2118,16 +2206,18 @@ pub async fn check_versions(app: AppHandle) -> Result<VersionInfo, String> {
 
     let npm_prog = config::validate_program_file("npm_path", &cfg.npm_path).ok();
     if let Some(npm_prog) = npm_prog {
-        match run_cmd_capture(
-            &npm_prog,
-            &[
-                "view".to_string(),
-                cfg.package_name.clone(),
-                "dist-tags".to_string(),
-            ],
-            &cwd,
-            Duration::from_secs(60),
-        ) {
+        // 版本查询也走用户设置的缓存位置：这样「缓存别落在 C 盘」对**所有**由本程序
+        // 派生的 npm 都成立（同一条命令，不多不少）
+        let mut view_args: Vec<String> = vec![
+            "view".to_string(),
+            cfg.package_name.clone(),
+            "dist-tags".to_string(),
+        ];
+        if let Some(c) = npm_cache_for_use(&cfg) {
+            view_args.push("--cache".to_string());
+            view_args.push(c);
+        }
+        match run_cmd_capture(&npm_prog, &view_args, &cwd, Duration::from_secs(60)) {
             Ok((true, out)) => {
                 let (latest, next) = parse_dist_tags(&out);
                 if latest.is_some() || next.is_some() {
@@ -2186,12 +2276,22 @@ pub async fn detect_npm_package(app: AppHandle) -> Result<String, String> {
         }
     };
     let cwd = config::workspace_cwd(&cfg)?;
-    let (ok, out) = run_cmd_capture(
-        &npm_prog,
-        &["list".to_string(), "-g".to_string(), "--depth=0".to_string()],
-        &cwd,
-        Duration::from_secs(60),
-    )?;
+    // 全局包列表要落在**DSH 实际所在的那个全局目录**上：自定义安装位置时，
+    // 默认目录里根本没有这个包，列表会给出「没发现 dsh 相关包」这种误导性结论。
+    let mut list_args: Vec<String> = vec![
+        "list".to_string(),
+        "-g".to_string(),
+        "--depth=0".to_string(),
+    ];
+    if let Some(d) = npm_prefix_from_dsh_path(&cfg) {
+        list_args.push("--prefix".to_string());
+        list_args.push(d);
+    }
+    if let Some(c) = npm_cache_for_use(&cfg) {
+        list_args.push("--cache".to_string());
+        list_args.push(c);
+    }
+    let (ok, out) = run_cmd_capture(&npm_prog, &list_args, &cwd, Duration::from_secs(60))?;
     let text = out.trim().to_string();
     let mut found: Vec<String> = Vec::new();
     for line in text.lines() {
@@ -2289,11 +2389,15 @@ pub async fn update_dsh(app: AppHandle, tag: String) -> Result<(), String> {
             return Err(e);
         }
     };
-    let args: Vec<String> = vec![
-        "install".to_string(),
-        "-g".to_string(),
-        format!("{}@{}", cfg.package_name, tag),
-    ];
+    // 更新要装回**DSH 现在所在的那个全局目录**（自定义安装位置时不能装到默认目录去，
+// 那会在机器上留下第二份 DSH，检测到哪一份就变得看运气）。
+    let update_prefix = npm_prefix_from_dsh_path(&cfg);
+    let update_cache = npm_cache_for_use(&cfg);
+    let args: Vec<String> = dsh_install_args(
+        &format!("{}@{}", cfg.package_name, tag),
+        update_prefix.as_deref(),
+        update_cache.as_deref(),
+    );
     let args_display = args.join(" ");
 
     let app2 = app.clone();
@@ -3420,10 +3524,79 @@ fn try_download_powershell(url: &str, dest: &Path) -> Result<(), String> {
     }
 }
 
-/// 引导安装 DSH：执行 `cmd /C <npm> install -g @deepseek-ai/dsh`，
+/// 拼 `npm install -g [--prefix <目录>] [--cache <目录>] <包名>` 的参数表（纯函数，便于单测）。
+///
+/// 选项固定排在 `-g` 之后、包名之前：npm 允许选项出现在任意位置，固定位置只是为了让
+/// **日志里那行命令**与用户从界面上复制的命令逐字一致（排查时少一层翻译）。
+///
+/// `None` 就是「不加这个选项」，而不是「加一个空值」：
+///   - `prefix = None` → 不传 `--prefix`，npm 按自己的配置解析全局目录（默认行为）；
+///   - `cache = None`  → 不传 `--cache`，npm 用自己的缓存配置（本程序没设置时就是它）。
+fn dsh_install_args(pkg: &str, prefix: Option<&str>, cache: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = vec!["install".to_string(), "-g".to_string()];
+    if let Some(d) = prefix {
+        args.push("--prefix".to_string());
+        args.push(d.to_string());
+    }
+    if let Some(c) = cache {
+        args.push("--cache".to_string());
+        args.push(c.to_string());
+    }
+    args.push(pkg.to_string());
+    args
+}
+
+/// 取「本机配置里可用的 npm 缓存目录」，供**所有由本程序派生的 npm** 使用。
+///
+/// 设置页存的值在这里**再过一次校验**：`config.json` 是明文文件，手改/损坏的值不能
+/// 直接进命令行（与其它路径字段同一条原则：校验发生在每一次使用点，不只是保存时）。
+/// 校验不过就当没设置（`None` = 不传 `--cache`，npm 用自己的配置），绝不把可疑字符串
+/// 拼进命令行。
+fn npm_cache_for_use(cfg: &Config) -> Option<String> {
+    config::validate_npm_cache_dir(&cfg.npm_cache_dir).ok().flatten()
+}
+
+/// 从「当前 DSH 实际所在的位置」反推 npm 的全局目录（`dsh.cmd` 就躺在它的全局目录里），
+/// 供**更新**与**全局包列表**使用 —— 保证更新装回原地，而不是在默认目录里再装一份。
+///
+/// 为什么不存一个配置字段：DSH 现在装在哪本来就是看得见的事实，存字段等于多一份需要
+/// 同步的状态（用户手工改过 dsh_path、向导中途退出、装了第二份……都会让它与事实不符），
+/// 而「以事实为准」的推导在任何一条路径上都成立。
+///
+/// 两个保守条件，任一不成立就返回 None（= 与今天完全一样，不传 `--prefix`）：
+///   - 该目录下确实有 `node_modules`（像 npm 的全局目录）。用户手工把 dsh_path 指到
+///     某个无关目录时，不该往那里撒 node_modules；
+///   - 它不是 npm 的默认全局目录（那就是默认 prefix，不传等价，少一处能写错的地方）。
+fn npm_prefix_from_dsh_path(cfg: &Config) -> Option<String> {
+    let dsh = config::validate_program_file("dsh_path", &cfg.dsh_path).ok()?;
+    let dir = Path::new(&dsh).parent()?;
+    if !dir.join("node_modules").is_dir() {
+        return None;
+    }
+    let dir_s = dir.to_string_lossy().to_string();
+    if config::same_dir(&dir_s, &detect::default_npm_prefix()) {
+        return None;
+    }
+    Some(dir_s)
+}
+
+/// 引导安装 DSH：执行 `cmd /C <npm> install -g [--prefix <目录>] @deepseek-ai/dsh`，
 /// 输出实时转发到日志面板，结束后自动重新检测。
+///
+/// `dir` = 用户在向导里指定的**安装位置**（= npm 的全局目录，最终作为 `--prefix` 交给
+/// npm）；留空 = 不传 `--prefix`，由 npm 自己解析（默认 `%APPDATA%\npm`）。
+///
+/// 参数名刻意用**单词** `dir` 而不是 install_dir：Tauri 的 command 参数会在
+/// camelCase / snake_case 之间做风格转换，而 `Option<String>` 在键名对不上时会
+/// **静默变成 None**（= 悄悄装回默认目录）。单词名在哪种风格下都一致。
 #[tauri::command]
-pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
+pub async fn setup_install_dsh(app: AppHandle, dir: Option<String>) -> Result<(), String> {
+    // 先把用户填的位置过一遍校验再占用 busy：不合法就直接返回（与 setup_install_node 同款），
+    // 既不白白占用「正在安装」状态，也不留下半成品目录。
+    let prefix = match config::validate_npm_prefix(dir.as_deref().unwrap_or("")) {
+        Ok(p) => p,
+        Err(e) => return Err(e),
+    };
     {
         let state = app.state::<AppState>();
         if state.updating.swap(true, Ordering::SeqCst) {
@@ -3462,11 +3635,30 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
             return Err(e);
         }
     };
+    // 目标目录必须先存在：npm 遇到不存在的 `--prefix` 会直接以
+    // `ENOENT … lstat '<目录>'` 失败（真机实测），一句与「装不上」看不出关系的话。
+    // 目录是我们自己指定的，就自己建（npm 不像 MSI 那样会替我们创建 prefix 本身）。
+    if let Some(d) = prefix.as_deref() {
+        if let Err(e) = std::fs::create_dir_all(d) {
+            app.state::<AppState>().updating.store(false, Ordering::SeqCst);
+            return Err(i18n::fmt("err_prefix_mkdir", &[&d, &e.to_string()]));
+        }
+    }
+    // 缓存位置：设置页里填了就显式带上 `--cache`（与写进 `~/.npmrc` 的那个值一致，
+// 所以日志里的命令复制出来行为相同）
+    let cache = npm_cache_for_use(&cfg);
+    let args = dsh_install_args(&pkg, prefix.as_deref(), cache.as_deref());
+    // 命令行回显用**真正的参数表**拼，而不是手写模板：加一个选项（--prefix / --cache）
+    // 时日志自动跟着变，也就不会出现「日志说一套、实际执行另一套」。
+    let args_display = args.join(" ");
     std::thread::spawn(move || {
+        if let Some(d) = prefix.as_deref() {
+            setup_progress(&app2, "install", &i18n::fmt("setup_dsh_prefix_using", &[&d]));
+        }
         emit_log(
             &app2,
             "launcher",
-            i18n::fmt("setup_dsh_executing", &[&npm, &pkg]),
+            i18n::fmt("setup_dsh_executing", &[&npm, &args_display]),
         );
 
         // 下载进度：计数 npm http fetch 行，每秒向向导进度区回报一次。
@@ -3492,9 +3684,7 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
         }
 
         let outcome: Result<i32, String> = (|| {
-            let install_args: Vec<String> =
-                vec!["install".to_string(), "-g".to_string(), pkg.clone()];
-            let mut cmd = command_for(&npm, &install_args)?;
+            let mut cmd = command_for(&npm, &args)?;
             cmd.current_dir(&cwd);
             // 同上：koffi 等原生依赖的 prebuild 脚本用裸 `node`，PATH 必须包含 node 目录
             cmd.env("PATH", detect::child_path_for(&[npm.as_str()]));
@@ -3570,24 +3760,101 @@ pub async fn setup_install_dsh(app: AppHandle) -> Result<(), String> {
 
         match outcome {
             Ok(0) => {
+                // 指定了安装位置时，「成功」以**那个目录里确实有 dsh.cmd** 为准，
+                // 而不是 npm 的退出码 0 —— 与 Node 那次的教训同源：安装器报告成功、
+                // 却把东西放到别处（`--prefix` 拼错时 npm 既可能报错，也可能按自己的
+                // 配置解析），退出码看不出来。
+                let landed = match prefix.as_deref() {
+                    Some(d) => detect::dsh_cmd_in_dir(Path::new(d)),
+                    None => None,
+                };
+                // 登记自定义位置：full_detect 立刻能看见它（不必等 PATH 生效/重启）
+                if let Some(d) = prefix.as_deref() {
+                    detect::set_extra_bin_dirs(vec![PathBuf::from(d)]);
+                }
                 detect::invalidate_cache();
-                let env = detect::full_detect();
-                if env.dsh_found {
-                    let msg = i18n::fmt("setup_dsh_success_msg", &[&env.dsh_path]);
-                    logger::append_line(&logger::desktop_log_path(&app2), i18n::t("setup_dsh_ok_log"));
+
+                if prefix.is_some() && landed.is_none() {
+                    let env = detect::full_detect();
+                    let msg = i18n::fmt(
+                        "setup_dsh_mismatch",
+                        &[&prefix.clone().unwrap_or_default(), &env.dsh_path],
+                    );
+                    logger::append_line(&logger::desktop_log_path(&app2), &msg);
                     let _ = app2.emit(
                         "setup-result",
-                        SetupResult { target: "dsh".to_string(), success: true, message: msg },
+                        SetupResult { target: "dsh".to_string(), success: false, message: msg },
                     );
                 } else {
-                    let _ = app2.emit(
-                        "setup-result",
-                        SetupResult {
-                            target: "dsh".to_string(),
-                            success: false,
-                            message: i18n::t("setup_dsh_notfound").to_string(),
-                        },
-                    );
+                    // 自定义位置 → 写进**用户** PATH（终端里也能直接用 dsh；
+                    // 也保证重启本程序后仍检测得到）。默认位置本来就在 PATH 里，不动。
+                    let mut path_note = String::new();
+                    if let Some(d) = prefix.as_deref() {
+                        if !config::same_dir(d, &detect::default_npm_prefix()) {
+                            match detect::append_to_user_path(Path::new(d)) {
+                                Ok(true) => emit_log(
+                                    &app2,
+                                    "launcher",
+                                    i18n::fmt("setup_path_added", &[&d]),
+                                ),
+                                Ok(false) => emit_log(
+                                    &app2,
+                                    "launcher",
+                                    i18n::fmt("setup_path_already", &[&d]),
+                                ),
+                                // PATH 写不进去不是安装失败：程序自己用完整路径启动 DSH，
+                                // 但要说清楚「为什么终端里可能仍然找不到 dsh」
+                                Err(e) => {
+                                    path_note = i18n::fmt("setup_path_add_fail", &[&d, &e]);
+                                    logger::append_line(&logger::desktop_log_path(&app2), &path_note);
+                                }
+                            }
+                        }
+                    }
+
+                    // 报告实际落点：优先用「指定目录里核对到的那份」，其次才是检测结果
+                    let found = landed
+                        .map(|p| p.to_string_lossy().to_string())
+                        .or_else(|| {
+                            let env = detect::full_detect();
+                            if env.dsh_found {
+                                Some(env.dsh_path)
+                            } else {
+                                None
+                            }
+                        });
+                    match found {
+                        Some(path) => {
+                            let mut msg = i18n::fmt("setup_dsh_success_msg", &[&path]);
+                            if !path_note.is_empty() {
+                                msg.push('\n');
+                                msg.push_str(&path_note);
+                            }
+                            logger::append_line(
+                                &logger::desktop_log_path(&app2),
+                                i18n::t("setup_dsh_ok_log"),
+                            );
+                            let _ = app2.emit(
+                                "setup-result",
+                                SetupResult { target: "dsh".to_string(), success: true, message: msg },
+                            );
+                        }
+                        None => {
+                            let mut msg = i18n::t("setup_dsh_notfound").to_string();
+                            if !path_note.is_empty() {
+                                msg.push('\n');
+                                msg.push_str(&path_note);
+                            }
+                            let _ = app2.emit(
+                                "setup-result",
+                                SetupResult {
+                                    target: "dsh".to_string(),
+                                    success: false,
+                                    message: msg,
+                                },
+                            );
+                        }
+                    }
                 }
             }
             Ok(c) => {
@@ -4080,6 +4347,37 @@ mod tests {
         assert!(
             heights.len() >= 2,
             "高度应当随 top 变化（收起时铺满整窗、展开时让出工具栏），实际只有 {heights:?}"
+        );
+    }
+
+    /// 引导安装 DSH 的参数表：`--prefix` / `--cache` 只能出现在「-g 之后、包名之前」，
+    /// 且没设置时必须**一个字都不多**（那就是「用 npm 自己的配置」，不能悄悄变成空值选项）。
+    #[test]
+    fn dsh_install_args_put_options_between_g_and_package() {
+        assert_eq!(
+            dsh_install_args("@deepseek-ai/dsh", None, None),
+            vec!["install", "-g", "@deepseek-ai/dsh"]
+        );
+        assert_eq!(
+            dsh_install_args(
+                "@deepseek-ai/dsh@next",
+                Some(r"D:\dsh-global"),
+                Some(r"D:\npm-cache")
+            ),
+            vec![
+                "install",
+                "-g",
+                "--prefix",
+                r"D:\dsh-global",
+                "--cache",
+                r"D:\npm-cache",
+                "@deepseek-ai/dsh@next"
+            ]
+        );
+        // 只设置了缓存位置时，参数表里不能冒出 --prefix
+        assert_eq!(
+            dsh_install_args("@deepseek-ai/dsh", None, Some(r"D:\npm-cache")),
+            vec!["install", "-g", "--cache", r"D:\npm-cache", "@deepseek-ai/dsh"]
         );
     }
 }

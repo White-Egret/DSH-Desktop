@@ -10,6 +10,14 @@ use crate::{detect, i18n, secret};
 pub struct Config {
     /// npm.cmd 完整路径（用于更新 DSH / 查询最新版本）；留空或失效时自动检测
     pub npm_path: String,
+    /// npm 的**缓存目录**（首选项「npm 缓存位置」）。留空 = 不动 npm 自己的配置
+    /// （用 npm 默认位置，Windows 上即 `%LOCALAPPDATA%\npm-cache`）。
+    /// 非空时这个值会落到两个地方，且两处指向同一个目录：
+    ///   ① npm 的用户级配置文件 `~/.npmrc` 的 `cache=` 一行（这样**终端里的 npm** 也跟着用，
+    ///      见 `apply_npm_cache` 的「最小行编辑」）；
+    ///   ② 本程序代跑的 npm 命令行的 `--cache <目录>`（装/更新 DSH、包列表、版本查询），
+    ///      这样日志里那行命令复制出来就能复现同样的行为。
+    pub npm_cache_dir: String,
     /// dsh.cmd 完整路径（用于启动 DSH）；留空或失效时自动检测
     pub dsh_path: String,
     /// DSH 家目录：DSH 摆放配置文件的地方（通过 DSH_HOME 环境变量传给 DSH）
@@ -72,6 +80,8 @@ impl Default for Config {
         Self {
             // 不硬编码任何个人路径；加载时按本机环境自动检测填充
             npm_path: String::new(),
+            // 空 = 不改动 npm 的缓存配置（回到 npm 自己的默认位置）
+            npm_cache_dir: String::new(),
             dsh_path: String::new(),
             dsh_home_dir: default_dsh_home_dir(),
             port: 3080,
@@ -302,34 +312,64 @@ pub fn validate_program_file(field: &str, raw: &str) -> Result<String, String> {
     Ok(norm)
 }
 
-/// 引导安装 Node.js 时，自定义安装目录的长度上限（字符数，不含结尾分隔符）。
+/// 引导安装时自定义目录的长度上限（字符数，不含结尾分隔符）。
 /// 为什么不是直接放到 MAX_PATH：node.exe、npm、npm 生成的 `node_modules\.bin\*.cmd`
 /// 都会在这个目录**之下**再建好几层；逼近 260 之后 MSI 会在装到一半时以
 /// 「某个文件写不进去」这种看不出根因的方式失败。留足余量比事后猜谜划算。
 const NODE_INSTALL_DIR_MAX_CHARS: usize = 200;
 
-/// 校验「引导安装 Node.js 的自定义安装目录」，返回规范化后的路径。
+/// 同一把尺子也用在 DSH 的安装位置上：`<目录>\node_modules\@deepseek-ai\dsh\…`
+/// 同样会往下再建好几层。
+const NPM_PREFIX_MAX_CHARS: usize = 200;
+
+/// 目录类校验的文案键。两套目录（Node 的安装目录 / DSH 的 npm 全局目录）**规则相同、
+/// 文案不同**：报错里必须出现人能看懂的名字，而不是配置键名，而且要能分清是哪一次安装。
+struct DirErrKeys {
+    chars: &'static str,
+    too_long: &'static str,
+    drive: &'static str,
+    system: &'static str,
+    is_file: &'static str,
+}
+
+const NODE_DIR_ERR: DirErrKeys = DirErrKeys {
+    chars: "err_node_dir_chars",
+    too_long: "err_node_dir_too_long",
+    drive: "err_node_dir_drive",
+    system: "err_node_dir_system",
+    is_file: "err_node_dir_is_file",
+};
+
+const NPM_DIR_ERR: DirErrKeys = DirErrKeys {
+    chars: "err_prefix_chars",
+    too_long: "err_prefix_too_long",
+    drive: "err_prefix_drive",
+    system: "err_prefix_system",
+    is_file: "err_prefix_is_file",
+};
+
+/// 「某个目录马上要被安装器写入」的共用校验，返回规范化后的路径（调用方已挡掉空串）。
 ///
-/// 这个字符串不是「只是个字符串」：它最终会以 `INSTALLDIR=<路径>` 的形式交给
-/// **提权的官方 MSI**（`msiexec /i node-*.msi INSTALLDIR=...`）。放任
-/// `C:\Windows\System32` 就等于把 node.exe 与 npm 往系统目录里塞，所以形状校验
-/// 直接复用 `path_shape`（绝对路径 / 非 UNC / 无 `..`）。
+/// 为什么抽出来共用：Node 的安装目录（`INSTALLDIR` 交给提权的 MSI）与 DSH 的安装位置
+/// （`--prefix` 交给 npm）面对的是**同一类风险** —— 都是「把别人的文件写进用户随手填的
+/// 一个位置」，要挡的东西完全一样：驱动器根、Windows 非法字符、超长、不存在的盘符、
+/// 系统目录、同名文件占位。两者只在「这个值会被谁执行」上有差别，那条差别留在各自的
+/// 入口函数里（见 validate_npm_prefix）。
 ///
 /// 但**不能照抄家目录那一套**，有两处刻意相反：
 ///   - `Program Files` 在那边是禁区，在这里是**官方默认位置**
 ///     （`C:\Program Files\nodejs`），必须放行；只禁止「恰好装到 `Program Files`
-///     根目录」——那会把 node.exe 撒进程序目录本身；
+///     根目录」——那会把文件撒进程序目录本身；
 ///   - 家目录只关心「写自己的配置」，这里还要额外问两件只有安装器才在意的事：
-///     盘符是否真实存在（否则 MSI 吐一个和路径无关的 1606/1601），以及长度上限。
-///
-/// `raw` 为空 = 用户没填 = 用官方默认目录，返回 `Ok(None)`（这不是错误，
-/// 也正是「升级后行为不变」的那条路径）。
-pub fn validate_node_install_dir(raw: &str) -> Result<Option<String>, String> {
-    if raw.trim().is_empty() {
-        return Ok(None);
-    }
-    // 报错文案里要出现人能看懂的名字，而不是配置键名。
-    let field = i18n::t("lbl_node_install_dir");
+///     盘符是否真实存在（否则 MSI 吐一个和路径无关的 1606/1601，npm 则是 ENOENT），
+///     以及长度上限。
+fn validate_install_dir_common(
+    field: &str,
+    raw: &str,
+    max_chars: usize,
+    keys: &DirErrKeys,
+) -> Result<String, String> {
+    // 形状校验复用 path_shape（绝对路径 / 非 UNC / 无 `..`）
     let norm = path_shape(field, raw)?;
     let lower = norm.to_ascii_lowercase();
 
@@ -345,15 +385,15 @@ pub fn validate_node_install_dir(raw: &str) -> Result<Option<String>, String> {
     // `:` 只允许出现在盘符那一位；此后的任何 `:` 都是非法写法（备用数据流）。
     for (i, c) in norm.char_indices() {
         if c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*') || (c == ':' && i != 1) {
-            return Err(i18n::fmt("err_node_dir_chars", &[&norm]));
+            return Err(i18n::fmt(keys.chars, &[&norm]));
         }
     }
 
     let len = norm.chars().count();
-    if len > NODE_INSTALL_DIR_MAX_CHARS {
+    if len > max_chars {
         return Err(i18n::fmt(
-            "err_node_dir_too_long",
-            &[&len.to_string(), &NODE_INSTALL_DIR_MAX_CHARS.to_string()],
+            keys.too_long,
+            &[&len.to_string(), &max_chars.to_string()],
         ));
     }
 
@@ -363,7 +403,7 @@ pub fn validate_node_install_dir(raw: &str) -> Result<Option<String>, String> {
         if let Some(letter) = norm.chars().next() {
             let root = format!("{}:\\", letter);
             if !std::path::Path::new(&root).exists() {
-                return Err(i18n::fmt("err_node_dir_drive", &[&norm]));
+                return Err(i18n::fmt(keys.drive, &[&norm]));
             }
         }
     }
@@ -372,31 +412,255 @@ pub fn validate_node_install_dir(raw: &str) -> Result<Option<String>, String> {
     for var in ["SystemRoot", "windir", "ProgramData"] {
         if let Some(root) = env_lower(var) {
             if is_under(&lower, &root) {
-                return Err(i18n::fmt("err_node_dir_system", &[&norm]));
+                return Err(i18n::fmt(keys.system, &[&norm]));
             }
         }
     }
     // 环境变量被清空/异常时的兜底（与 system_roots() 同一思路）。
     for root in ["c:\\windows", "c:\\programdata"] {
         if is_under(&lower, root) {
-            return Err(i18n::fmt("err_node_dir_system", &[&norm]));
+            return Err(i18n::fmt(keys.system, &[&norm]));
         }
     }
     // `Program Files` 只禁「根目录本身」，子目录（含官方的 nodejs）放行。
     for var in ["ProgramFiles", "ProgramFiles(x86)"] {
         if let Some(root) = env_lower(var) {
             if lower == root {
-                return Err(i18n::fmt("err_node_dir_system", &[&norm]));
+                return Err(i18n::fmt(keys.system, &[&norm]));
             }
         }
     }
 
-    // 目标已存在但不是文件夹：MSI 会在写第一个文件时失败，提前说清楚。
+    // 目标已存在但不是文件夹：安装器会在写第一个文件时失败，提前说清楚。
     let p = std::path::Path::new(&norm);
     if p.exists() && !p.is_dir() {
-        return Err(i18n::fmt("err_node_dir_is_file", &[&norm]));
+        return Err(i18n::fmt(keys.is_file, &[&norm]));
+    }
+    Ok(norm)
+}
+
+/// 校验「引导安装 Node.js 的自定义安装目录」，返回规范化后的路径。
+///
+/// 这个字符串不是「只是个字符串」：它最终会以 `INSTALLDIR=<路径>` 的形式交给
+/// **提权的官方 MSI**（`msiexec /i node-*.msi INSTALLDIR=...`）。放任
+/// `C:\Windows\System32` 就等于把 node.exe 与 npm 往系统目录里塞。规则见
+/// `validate_install_dir_common`。
+///
+/// `raw` 为空 = 用户没填 = 用官方默认目录，返回 `Ok(None)`（这不是错误，
+/// 也正是「升级后行为不变」的那条路径）。
+pub fn validate_node_install_dir(raw: &str) -> Result<Option<String>, String> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    // 报错文案里要出现人能看懂的名字，而不是配置键名。
+    let field = i18n::t("lbl_node_install_dir");
+    Ok(Some(validate_install_dir_common(
+        field,
+        raw,
+        NODE_INSTALL_DIR_MAX_CHARS,
+        &NODE_DIR_ERR,
+    )?))
+}
+
+/// 校验「DSH 的安装位置」= npm 的**全局目录**（最终以 `--prefix <目录>` 交给 npm），
+/// 返回规范化后的路径。
+///
+/// 规则与 Node 的安装目录相同（见 `validate_install_dir_common`），只多一条只有它需要
+/// 的限制：这个值会被我们自己成对加引号后**经 cmd.exe** 交给 `npm.cmd`，而 cmd 在双引号
+/// 内仍会展开 `%VAR%`、开启延迟展开时 `!` 另有含义、`"` 会破坏引号配对 —— 与
+/// `validate_program_path` 同一套理由：**无法可靠转义，只能拒绝**。
+/// （Node 那条走 msiexec 的 raw_arg，不经过 cmd.exe，所以不受这一条约束。）
+///
+/// `raw` 为空 = 不传 `--prefix`（由 npm 自己解析 prefix，行为与今天完全一致）。
+pub fn validate_npm_prefix(raw: &str) -> Result<Option<String>, String> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let field = i18n::t("lbl_npm_prefix");
+    let norm = validate_install_dir_common(field, raw, NPM_PREFIX_MAX_CHARS, &NPM_DIR_ERR)?;
+    for c in norm.chars() {
+        if c == '"' || c == '%' || c == '!' {
+            return Err(i18n::fmt("err_prefix_cmd_chars", &[&norm, &c]));
+        }
     }
     Ok(Some(norm))
+}
+
+/// 两个目录串是否指同一个目录（Windows 语义：忽略大小写与结尾分隔符）。
+/// 用来回答「用户填的位置是不是就是配置文件里已有的那个」—— 是的话一个字节都不写。
+/// 空串一律不算相等：别拿空路径去比较，那会把「没设置」误判成「已经是同一个」。
+pub(crate) fn same_dir(a: &str, b: &str) -> bool {
+    let na = a.trim().trim_end_matches(|c| c == '\\' || c == '/');
+    let nb = b.trim().trim_end_matches(|c| c == '\\' || c == '/');
+    !na.is_empty() && !nb.is_empty() && na.eq_ignore_ascii_case(nb)
+}
+
+// ---------- npm 缓存位置（首选项）与 `~/.npmrc` 的最小行编辑 ----------
+
+/// npm 缓存目录的长度上限。**比另外两处（Node / npm 全局目录的 200）严格得多**，
+/// 因为它下面还有一层内容寻址路径：真机实测
+/// `_cacache/content-v2/sha512/xx/yy/<126 位十六进制>` 在缓存根之下有 **158 个字符**。
+///
+/// npm/Node 自己能处理超长路径（实测缓存根 151 字符、最深 309 仍照样写入成功），
+/// 但 **Windows 的常规工具不能**：同一个目录用 PowerShell 的 `Remove-Item` 删就报
+/// 「Could not find a part of the path …」，必须 `rmdir /s /q "\\?\…"` 才删得掉。
+/// 缓存迟早要清（把缓存挪到别的盘，本来就是为了清理/腾空间），所以这里按 MAX_PATH
+/// 倒推：100 + 158 = 258 < 260，保证资源管理器也走得进去、删得掉。
+const NPM_CACHE_DIR_MAX_CHARS: usize = 100;
+
+const NPM_CACHE_ERR: DirErrKeys = DirErrKeys {
+    chars: "err_cache_chars",
+    too_long: "err_cache_too_long",
+    drive: "err_cache_drive",
+    system: "err_cache_system",
+    is_file: "err_cache_is_file",
+};
+
+/// 校验「npm 缓存位置」，返回规范化后的路径。
+///
+/// 规则与 `validate_install_dir_common` 相同（绝对路径 / 非 UNC / 无 `..` / 拒绝驱动器根 /
+/// 盘符必须存在 / 非系统目录 / 非 `Program Files` 根 / 已存在时必须是目录），另加三条它独有的：
+///   - 经 cmd.exe 交给 npm（`--cache`），所以 `% ! "` 必须拒绝（同 `validate_npm_prefix`）；
+///   - 这个值还会**写进 npm 的 `~/.npmrc`**，而 npm 的 ini 解析器把 `#` / `;` 当作注释起点：
+///     真机实测 `cache=D:\a#b` 读回来是 `D:\a` —— **静默指向另一个目录**，这种「写进去的值
+///     与读出来的不一致」最难排查，所以直接拒绝，而不是自己发明转义；
+///   - 长度上限只有 100（见 `NPM_CACHE_DIR_MAX_CHARS` 的实测依据）。
+///
+/// `raw` 为空 = 不动 npm 的缓存配置（连 `~/.npmrc` 里那一行都会被删掉）。
+pub fn validate_npm_cache_dir(raw: &str) -> Result<Option<String>, String> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let field = i18n::t("lbl_npm_cache_dir");
+    let norm = validate_install_dir_common(field, raw, NPM_CACHE_DIR_MAX_CHARS, &NPM_CACHE_ERR)?;
+    for c in norm.chars() {
+        if c == '"' || c == '%' || c == '!' {
+            return Err(i18n::fmt("err_cache_cmd_chars", &[&norm, &c]));
+        }
+        if c == '#' || c == ';' {
+            return Err(i18n::fmt("err_cache_ini_chars", &[&norm, &c]));
+        }
+    }
+    Ok(Some(norm))
+}
+
+/// 这一行是不是 npm 配置里的 `cache` 键（行首 `#` / `;` 是注释，与 npm 的 ini 解析器一致）。
+fn is_npmrc_cache_line(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') || t.starts_with(';') {
+        return false;
+    }
+    match t.split_once('=') {
+        Some((k, _)) => k.trim().eq_ignore_ascii_case("cache"),
+        None => false,
+    }
+}
+
+/// 从 npm 用户配置（`~/.npmrc`）的内容里取出 `cache` 键的值；没有（或值为空）返回 None。
+///
+/// **不做引号处理**：我们的校验拒绝引号，而 npm 自己写值时也不加引号
+/// （真机实测：带空格的路径就是裸写的，且能被原样读回；反倒是手写 `cache="D:\a b"`
+/// 会被 npm 当成**相对路径**拼到当前目录上）。
+pub fn npmrc_cache_value(content: &str) -> Option<String> {
+    for line in content.lines() {
+        if !is_npmrc_cache_line(line) {
+            continue;
+        }
+        let t = line.trim();
+        let v = match t.split_once('=') {
+            Some((_, v)) => v.trim(),
+            None => continue,
+        };
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+/// `~/.npmrc` 的**最小行编辑**：只增删/替换 `cache` 这一行，其余内容（注释、token、
+/// registry…）逐字保留，并保持原文件的行尾风格（CRLF / LF）与「结尾有没有换行」。
+///
+/// 为什么不调 `npm config set cache`：真机实测 npm 的 ini writer **不保留注释** ——
+/// 用它写一次，文件里的 `# …` 注释行直接消失（其余键会保留）。那是用户的文件，
+/// 我们只该动自己那一行、并且用现有的原子替换落盘（`write_atomic`）。
+pub fn edit_npmrc_cache(content: &str, desired: Option<&str>) -> String {
+    let eol = if content.contains("\r\n") { "\r\n" } else { "\n" };
+    let had_final_newline = content.ends_with('\n');
+    let mut lines: Vec<String> = Vec::new();
+    for line in content.lines() {
+        if is_npmrc_cache_line(line) {
+            continue;
+        }
+        lines.push(line.to_string());
+    }
+    if let Some(d) = desired {
+        lines.push(format!("cache={}", d));
+    }
+    let mut out = lines.join(eol);
+    if !out.is_empty() && had_final_newline {
+        out.push_str(eol);
+    }
+    out
+}
+
+/// 「npm 缓存位置」落盘的几种结局（上层据此拼一条能说清「到底动没动」的提示）。
+pub enum NpmCacheOutcome {
+    /// 配置里本来就是它（或本来就没设置、用户也没要求设置）——一个字节都没动
+    Unchanged(Option<String>),
+    /// 已写入 `cache=<目录>`
+    Written(String),
+    /// 已删掉 `cache` 行（回到 npm 的默认位置），带上被删掉的原值
+    Removed(String),
+}
+
+/// 把「npm 缓存位置」应用到 npm 自己的用户配置文件（`~/.npmrc`）。
+///
+/// `desired = None`（设置页留空）= 删掉 `cache` 行，回到 npm 的默认位置。
+/// 缓存目录本身**不由我们创建**：npm 会自己建（真机实测：指向一个还不存在的目录也能装上），
+/// 我们越俎代庖反而会留下一个空目录。
+pub fn apply_npm_cache(desired: Option<&str>) -> Result<NpmCacheOutcome, String> {
+    let path = match detect::npm_userconfig_path() {
+        Some(p) => p,
+        None => return Err(i18n::t("err_npmrc_nopath").to_string()),
+    };
+    let exists = path.is_file();
+    // 文件不存在 + 用户也没要求设置：什么都不做，连文件都不建
+    if !exists && desired.is_none() {
+        return Ok(NpmCacheOutcome::Unchanged(None));
+    }
+    let content = if exists {
+        // 读不成 UTF-8 就如实报错并**什么都不改**：宁可不生效，也不要把用户的
+        // token / registry 配置按错误的编码重写一遍
+        std::fs::read_to_string(&path).map_err(|e| {
+            i18n::fmt(
+                "err_npmrc_read",
+                &[&path.display().to_string(), &e.to_string()],
+            )
+        })?
+    } else {
+        String::new()
+    };
+    let current = npmrc_cache_value(&content);
+    let unchanged = match (current.as_deref(), desired) {
+        (Some(c), Some(d)) => same_dir(c, d),
+        (None, None) => true,
+        _ => false,
+    };
+    if unchanged {
+        return Ok(NpmCacheOutcome::Unchanged(current));
+    }
+    let next = edit_npmrc_cache(&content, desired);
+    write_atomic(&path, next.as_bytes()).map_err(|e| {
+        i18n::fmt(
+            "err_npmrc_write",
+            &[&path.display().to_string(), &e.to_string()],
+        )
+    })?;
+    Ok(match desired {
+        Some(d) => NpmCacheOutcome::Written(d.to_string()),
+        None => NpmCacheOutcome::Removed(current.unwrap_or_default()),
+    })
 }
 
 /// 外观值归一化：只接受 light / dark / system，其余（含手改的非法值）回落 system。
@@ -1153,5 +1417,209 @@ mod tests {
         assert!(!norm.ends_with('\\'), "结尾分隔符应当被去掉: {norm}");
         assert_eq!(norm, dir.to_string_lossy().trim_end_matches('\\'));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------- DSH 的安装位置（npm 全局目录 / --prefix） ----------
+    //
+    // 规则与 Node 的安装目录共用同一个内核，所以这里只钉两件**它独有**的事：
+    // ① 空串 = 不传 --prefix（沿用今天的行为）；② 经 cmd.exe 送出去的字符串
+    // 不能带 % ! "（这条是 Node 那条没有的）。
+
+    #[test]
+    fn npm_prefix_empty_means_no_prefix_flag() {
+        assert_eq!(validate_npm_prefix("").unwrap(), None);
+        assert_eq!(validate_npm_prefix("   ").unwrap(), None);
+        assert_eq!(validate_npm_prefix("\t").unwrap(), None);
+    }
+
+    /// 共用内核确实接上了：形状类错误一个都不能漏。
+    #[test]
+    fn npm_prefix_rejects_bad_shapes() {
+        for bad in [
+            r"npm-global",
+            r"\\server\share\dsh",
+            r"C:\dsh\..\windows",
+            r"C:\",
+            r"D:",
+        ] {
+            assert!(
+                validate_npm_prefix(bad).is_err(),
+                "应当拒绝这个路径: {bad}"
+            );
+        }
+    }
+
+    /// 这条是 validate_npm_prefix 独有的一刀：值会被 quote_token() 成对加引号后
+    /// **经 cmd.exe** 交给 npm.cmd，而 cmd 在双引号内仍会展开 `%VAR%`、延迟展开下
+    /// `!` 另有含义、`"` 会破坏引号配对 —— 只能拒绝，不能转义。
+    /// 反向半边同样重要：`&` 在双引号内是字面量（见 validate_program_path 的注释），
+    /// 所以带 `&` 的目录名必须放行，别把规则收得比真正需要更紧。
+    #[test]
+    fn npm_prefix_rejects_cmd_metacharacters_but_allows_ampersand() {
+        for bad in [r"D:\a%b", r"D:\a!b", r#"D:\a"b"#] {
+            assert!(
+                validate_npm_prefix(bad).is_err(),
+                "应当拒绝这个路径: {bad}"
+            );
+        }
+        let dir = scratch_dir("npm-prefix-amp");
+        let with_amp = dir.join("a & b");
+        std::fs::create_dir_all(&with_amp).unwrap();
+        assert!(
+            validate_npm_prefix(&with_amp.to_string_lossy()).is_ok(),
+            "双引号内的 & 是字面量，带 & 的目录名应当放行"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 正常路径：真实存在的目录必须通过，并返回规范化结果。
+    #[test]
+    fn npm_prefix_accepts_real_dir_and_normalizes() {
+        let dir = scratch_dir("npm-prefix-ok");
+        let raw = format!(r"{}\", dir.display());
+        let norm = validate_npm_prefix(&raw)
+            .expect("真实存在的目录应当通过")
+            .expect("非空输入应当返回 Some");
+        assert!(!norm.ends_with('\\'), "结尾分隔符应当被去掉: {norm}");
+        assert_eq!(norm, dir.to_string_lossy().trim_end_matches('\\'));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 与 Node 那条同一期望：`Program Files` 子目录合法、根目录本身不合法。
+    /// 这条同时证明共用内核的错误键换成了 npm 那一套（而不是 Node 的）。
+    #[cfg(windows)]
+    #[test]
+    fn npm_prefix_allows_program_files_subdir_but_not_its_root() {
+        let pf = env_lower("ProgramFiles").expect("Windows 上应当有 ProgramFiles");
+        let sub = format!(r"{}\dsh-global-probe-{}", pf, std::process::id());
+        assert!(validate_npm_prefix(&sub).is_ok());
+        assert!(validate_npm_prefix(&pf).is_err());
+    }
+
+    // ---------- npm 缓存位置（首选项）与 ~/.npmrc 的最小行编辑 ----------
+
+    #[test]
+    fn npm_cache_dir_empty_means_dont_touch_npm_config() {
+        assert_eq!(validate_npm_cache_dir("").unwrap(), None);
+        assert_eq!(validate_npm_cache_dir("   ").unwrap(), None);
+    }
+
+    #[test]
+    fn npm_cache_dir_rejects_bad_shapes_and_metacharacters() {
+        for bad in [
+            r"npm-cache",          // 相对路径
+            r"\\server\share\c",   // UNC
+            r"C:\cache\..\windows",
+            r"C:\",                // 驱动器根
+            r"D:\a%b",             // cmd 会展开
+            r"D:\a!b",             // 延迟展开下有特殊含义
+            r#"D:\a"b"#,           // 破坏引号配对
+            r"D:\a#b",             // npm 的 ini 把它当注释起点（实测会被截断成 D:\a）
+            r"D:\a;b",             // 同上
+        ] {
+            assert!(
+                validate_npm_cache_dir(bad).is_err(),
+                "应当拒绝这个路径: {bad}"
+            );
+        }
+    }
+
+    /// 长度上限比另外两处严得多（100），依据是实测的 cacache 相对深度 158：
+    /// 100 + 158 = 258 < 260，超了 Windows 常规工具就删不动这棵树。
+    /// 这条同时钉住「上限确实是 100 而不是照抄另一个 200」。
+    #[test]
+    fn npm_cache_dir_has_its_own_tighter_length_limit() {
+        let ok = format!(r"D:\{}", "a".repeat(NPM_CACHE_DIR_MAX_CHARS - 3));
+        assert!(
+            ok.chars().count() <= NPM_CACHE_DIR_MAX_CHARS,
+            "构造的路径应当在上限之内"
+        );
+        // 上限内：形状合法（不存在的盘符才拦不住它 —— 这里用本机必然存在的 D 或 C）
+        let letter = ('C'..='Z')
+            .find(|c| Path::new(&format!("{}:\\", c)).exists())
+            .expect("至少有一个盘符存在");
+        let ok = format!(r"{}:\{}", letter, "a".repeat(NPM_CACHE_DIR_MAX_CHARS - 3));
+        assert_eq!(ok.chars().count(), NPM_CACHE_DIR_MAX_CHARS);
+        assert!(validate_npm_cache_dir(&ok).is_ok(), "刚好到上限应当放行");
+        let too_long = format!(r"{}:\{}", letter, "a".repeat(NPM_CACHE_DIR_MAX_CHARS - 2));
+        assert!(
+            validate_npm_cache_dir(&too_long).is_err(),
+            "超一个字符就该拒绝，说明上限没有被放宽成 200"
+        );
+    }
+
+    #[test]
+    fn npm_cache_dir_accepts_real_dir_and_normalizes() {
+        let dir = scratch_dir("npm-cache-ok");
+        let raw = format!(r"{}\", dir.display());
+        let norm = validate_npm_cache_dir(&raw)
+            .expect("真实存在的目录应当通过")
+            .expect("非空输入应当返回 Some");
+        assert!(!norm.ends_with('\\'), "结尾分隔符应当被去掉: {norm}");
+        assert_eq!(norm, dir.to_string_lossy().trim_end_matches('\\'));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 读 `cache` 键：认得注释、键值两侧空白、大小写；没设置/空值返回 None。
+    #[test]
+    fn npmrc_cache_value_reads_only_real_settings() {
+        assert_eq!(npmrc_cache_value(""), None);
+        assert_eq!(npmrc_cache_value("registry=https://x/\n"), None);
+        // 行首 # / ; 是注释
+        assert_eq!(npmrc_cache_value("# cache=D:\\not-real\n"), None);
+        assert_eq!(npmrc_cache_value("; cache=D:\\not-real\n"), None);
+        assert_eq!(
+            npmrc_cache_value("registry=https://x/\ncache=D:\\npm-cache\n"),
+            Some(r"D:\npm-cache".to_string())
+        );
+        // 键值两侧空白、键名大小写都认
+        assert_eq!(
+            npmrc_cache_value("  CACHE =  D:\\npm-cache  \n"),
+            Some(r"D:\npm-cache".to_string())
+        );
+        // 空值 = 没设置（不返回空串，免得被当成「已经是这个位置」）
+        assert_eq!(npmrc_cache_value("cache=\n"), None);
+    }
+
+    /// 最小行编辑：只动 `cache` 那一行，其余**逐字**保留（这是不走 `npm config set` 的
+    /// 全部理由 —— 真机实测它会把注释吃掉），并保持行尾风格。
+    #[test]
+    fn edit_npmrc_cache_touches_only_that_line() {
+        let src = "# 我的注释\r\nregistry=https://x/\n//registry.npmjs.org/:_authToken=t\n";
+        let out = edit_npmrc_cache(src, Some(r"D:\npm-cache"));
+        assert!(out.contains("# 我的注释"), "注释必须原样保留");
+        assert!(out.contains("registry=https://x/"));
+        assert!(out.contains("_authToken=t"));
+        assert!(out.ends_with("cache=D:\\npm-cache\r\n"), "新行要跟着原文件的 CRLF: {out:?}");
+        assert_eq!(out.matches("cache=").count(), 1);
+
+        // 已有 cache 行：替换（不是重复追加），且值变成新的
+        let src2 = "cache=D:\\old\nregistry=https://x/\n";
+        let out2 = edit_npmrc_cache(src2, Some(r"E:\new"));
+        assert_eq!(out2, "registry=https://x/\ncache=E:\\new\n");
+
+        // 重复的 cache 行会被收敛成一行（ini 里后者覆盖前者，留着只会让人困惑）
+        let out3 = edit_npmrc_cache("cache=A\ncache=B\n", Some("C"));
+        assert_eq!(out3.matches("cache=").count(), 1);
+        assert!(out3.contains("cache=C"));
+
+        // desired = None：删掉该行，其它内容一字不改
+        let out4 = edit_npmrc_cache(src2, None);
+        assert_eq!(out4, "registry=https://x/\n");
+        // 原本没有 cache 行、又不要求设置 → 内容不变（连结尾换行都保持）
+        let src5 = "registry=https://x/";
+        assert_eq!(edit_npmrc_cache(src5, None), src5);
+        assert_eq!(edit_npmrc_cache("", None), "");
+    }
+
+    /// 「是不是同一个目录」的判定（Windows 语义）：大小写与结尾分隔符差异都算同一个；
+    /// 空串一律不算（别把「没设置」误判成「已经是这个」）。
+    #[test]
+    fn same_dir_ignores_case_and_trailing_separator() {
+        assert!(same_dir(r"C:\Users\me\AppData\Roaming\npm", r"c:\users\me\appdata\roaming\npm\"));
+        assert!(same_dir(r"D:\DSH\", r"D:\DSH"));
+        assert!(!same_dir(r"D:\DSH", r"D:\DSH2"));
+        assert!(!same_dir("", r"D:\DSH"));
+        assert!(!same_dir(r"D:\DSH", ""));
     }
 }

@@ -899,6 +899,7 @@ function applyLanguage(lang) {
 function openSettings() {
   if (!config) return;
   $('set-npm-path').value = config.npm_path;
+  $('set-npm-cache').value = config.npm_cache_dir || '';
   $('set-dsh-path').value = config.dsh_path;
   $('set-home-dir').value = config.dsh_home_dir;
   $('set-port').value = config.port;
@@ -928,7 +929,31 @@ function openSettings() {
   markFlag('npm-exists-flag', config.npm_exists);
   markFlag('dsh-exists-flag', config.dsh_exists);
   markFlag('home-exists-flag', config.home_exists);
+  refreshNpmCacheInfo();
   showModal('settings-modal');
+}
+
+/// 首选项里「npm 缓存位置」那行小字：同时显示「npm 配置里的值」与「实际生效的值」。
+/// 两者不同（被环境变量或项目级 .npmrc 覆盖）时必须都显示 —— 只显示一个，用户会以为
+/// 自己填的位置没生效，然后去改一个本来就对的值。
+async function refreshNpmCacheInfo() {
+  const el = $('npm-cache-effective');
+  if (!el) return;
+  try {
+    const info = await invoke('npm_cache_info');
+    const user = (info.user_value || '').trim();
+    const eff = (info.effective || '').trim();
+    if (!user) {
+      el.textContent = t('cache_eff_unset', eff || '?');
+    } else if (eff && eff.toLowerCase() !== user.toLowerCase()) {
+      el.textContent = t('cache_eff_diff', user, eff);
+    } else {
+      el.textContent = t('cache_eff_set', user);
+    }
+  } catch (e) {
+    // 问不到（npm 缺失等）就不显示这行：它是提示，不该挡住设置页
+    el.textContent = '';
+  }
 }
 
 function markFlag(id, ok) {
@@ -949,6 +974,8 @@ async function saveSettings() {
     ? $('set-appearance').value : 'system';
   const cfg = {
     npm_path: $('set-npm-path').value.trim(),
+    // npm 缓存位置（空 = 删除 npm 配置里的 cache 行，回到 npm 默认位置）
+    npm_cache_dir: $('set-npm-cache').value.trim(),
     dsh_path: $('set-dsh-path').value.trim(),
     dsh_home_dir: $('set-home-dir').value.trim(),
     port,
@@ -994,6 +1021,18 @@ async function saveSettings() {
     $('set-config-path').textContent = config.config_path;
     $('port-val').textContent = config.port;
     toast(t('toast_saved'));
+    // 「npm 缓存位置」还要落到 npm **自己**的配置里（这样终端里的 npm 也跟着用），
+    // 这一步单独做、单独报结果：放在保存**之后**，是因为保存若被校验拦下就一个字节
+    // 都不该动；而这一步失败也只是「本程序记住了、npm 那边没改」，如实说明即可。
+    try {
+      const cacheMsg = await invoke('apply_npm_cache', { dir: cfg.npm_cache_dir || null });
+      appendLog('launcher', '[launcher] ' + cacheMsg);
+      toast(cacheMsg);
+      refreshNpmCacheInfo();
+    } catch (e) {
+      toast(t('toast_npm_cache_fail', e), true);
+      appendLog('launcher', t('toast_npm_cache_fail', e));
+    }
     // 工具栏模式即时生效（保存后的 config 里已带归一化后的值）
     applyToolbarMode();
     refreshButtons();
@@ -1017,7 +1056,8 @@ function onPathPicked(p) {
     if (input) {
       input.value = p.path;
       // 「浏览」选过目录 = 用户已经表达过意愿：别让后续检测把默认值覆盖回来
-      markNodeDirTouched(input);
+      markDirTouched(input);
+      if (input.id === 'wiz-dsh-dir') refreshDshCmd();
     }
   }
 }
@@ -1269,6 +1309,7 @@ async function wizDetect() {
     wiz.detection = await invoke('detect_environment');
     lastEnvDetection = wiz.detection;
     prefillNodeDir(wiz.detection);
+    prefillDshDir(wiz.detection);
   } catch (e) {
     toast(t('wiz_env_fail', e), true);
     wiz.detection = null;
@@ -1285,6 +1326,11 @@ async function wizDetect() {
 // 输入框不能被默认值悄悄改回去（那等于把用户的输入吃掉）。
 let nodeDirTouched = false;
 
+// DSH 那一格同理，只是默认值来自 npm 自己（`npm config get prefix`，问不到才回落
+// %APPDATA%\npm，见 detect.rs::default_npm_prefix）—— 用户在 .npmrc 里配过 prefix 时，
+// 预填的也是他真正会装到的位置。
+let dshDirTouched = false;
+
 function prefillNodeDir(det) {
   const el = $('wiz-node-dir');
   if (!el || !det || nodeDirTouched) return;
@@ -1292,9 +1338,40 @@ function prefillNodeDir(det) {
   if (want) el.value = want;
 }
 
-/// 用户手动改过 / 用「浏览」选过目录 → 从此不再被默认值覆盖。
-function markNodeDirTouched(input) {
-  if (input && input.id === 'wiz-node-dir') nodeDirTouched = true;
+function prefillDshDir(det) {
+  const el = $('wiz-dsh-dir');
+  if (!el || !det || dshDirTouched) return;
+  const want = (det.npm_default_prefix || '').trim();
+  if (want) el.value = want;
+}
+
+/// 用户手动改过 / 用「浏览」选过目录 → 从此不再被默认值覆盖（两个输入框各自记一笔）。
+function markDirTouched(input) {
+  if (!input) return;
+  if (input.id === 'wiz-node-dir') nodeDirTouched = true;
+  if (input.id === 'wiz-dsh-dir') dshDirTouched = true;
+}
+
+/// 向导里展示（并可复制）的那条安装命令 —— 必须与 Rust 端真正执行的命令**逐字一致**：
+/// 参数顺序见 process.rs::dsh_install_args（`install -g [--prefix "<目录>"] <包名>`）。
+/// 位置留空时**不带** `--prefix`，那正是「用 npm 默认全局目录」的表达方式。
+function dshInstallCommand(npmPath) {
+  const npm = '"' + (npmPath || 'npm') + '"';
+  const pkg = (config && config.package_name) || '@deepseek-ai/dsh';
+  const el = $('wiz-dsh-dir');
+  const dir = el && el.value ? el.value.trim() : '';
+  return dir
+    ? `${npm} install -g --prefix "${dir}" ${pkg}`
+    : `${npm} install -g ${pkg}`;
+}
+
+/// 位置改了要立刻反映到上面那条「将执行以下命令」上：用户是照着它核对/复制的，
+/// 让它停在旧内容上等于展示一条与真正执行不符的命令。
+function refreshDshCmd() {
+  const el = $('wiz-dsh-cmd');
+  if (!el) return;
+  const det = wiz.detection || lastEnvDetection;
+  el.textContent = dshInstallCommand(det && det.npm_path);
 }
 
 function setWizFlag(flagId, pathId, found, detail) {
@@ -1415,7 +1492,7 @@ function renderWiz() {
   const urlEl = $('wiz-node-url');
   if (urlEl) urlEl.textContent = d.node_msi_url || 'https://nodejs.org/en/download';
   const cmdEl = $('wiz-dsh-cmd');
-  if (cmdEl) cmdEl.textContent = '"' + (d.npm_path || 'npm') + '" install -g @deepseek-ai/dsh';
+  if (cmdEl) cmdEl.textContent = dshInstallCommand(d.npm_path);
 
   // 完成按钮：全部就绪 → 直接进入；有缺失 → 等同「跳过」
   const finishBtn = $('wiz-btn-finish');
@@ -1731,7 +1808,14 @@ function bindUI() {
 
   // 「安装位置」：手输一次就标记为「用户动过」，之后检测结果不再覆盖它（见 prefillNodeDir）
   const nodeDirEl = $('wiz-node-dir');
-  if (nodeDirEl) nodeDirEl.addEventListener('input', () => markNodeDirTouched(nodeDirEl));
+  if (nodeDirEl) nodeDirEl.addEventListener('input', () => markDirTouched(nodeDirEl));
+  const dshDirEl = $('wiz-dsh-dir');
+  if (dshDirEl) {
+    dshDirEl.addEventListener('input', () => {
+      markDirTouched(dshDirEl);
+      refreshDshCmd();
+    });
+  }
 
   // ---- 首次运行引导向导按钮 ----
   // 第一步语言选择：固定双语按钮（不挂 data-i18n，永不被词典改写）
@@ -1796,12 +1880,17 @@ function bindUI() {
   };
   $('wiz-btn-install-dsh').onclick = async () => {
     if (wiz.busy) return;
+    // 安装位置：留空 → 传 null → 后端不传 --prefix（= npm 用自己的默认全局目录）。
+    // 参数名同 Node 那条的约定：用**单词** dir，避免 Tauri 的 camelCase/snake_case
+    // 转换把键名对不上时静默变成 None（= 悄悄装回默认目录）。
+    const dirEl = $('wiz-dsh-dir');
+    const installDir = dirEl && dirEl.value ? dirEl.value.trim() : '';
     wiz.busy = true;
     renderWiz();
     setWizProgress(true, t('wiz_install_dsh_progress'));
     $('wiz-log').classList.remove('hidden');
     try {
-      await invoke('setup_install_dsh');
+      await invoke('setup_install_dsh', { dir: installDir || null });
     } catch (e) {
       wiz.busy = false;
       setWizProgress(false);

@@ -12,7 +12,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::process::{apply_no_window, decode_console_output};
+use crate::process::{apply_no_window, command_for, decode_console_output};
 
 /// 检测结果快照
 #[derive(Debug, Clone, Default)]
@@ -150,12 +150,51 @@ pub fn find_npm_cmd() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
-/// npm 全局 bin 目录（%APPDATA%\npm 是 npm 在 Windows 的默认 prefix）
+/// 用户在向导里给 DSH 指定的**自定义安装位置**（npm 的全局目录），进程内登记在这里。
+///
+/// 为什么需要这份登记：npm 的 `--prefix <目录>` 只负责把 dsh.cmd 写进那个目录，
+/// **不会**把它加进 PATH，而本进程的路径探测（`where dsh`）与 `%APPDATA%\npm`
+/// 这两条现有线索都指不到它。装完立刻登记，配合 `invalidate_cache()` 就能当场检测到。
+/// （长期生效靠的是把目录写进用户 PATH，见 `append_to_user_path`；这份登记负责的是
+/// 「装完到重启之间」这段窗口。）
+static EXTRA_BIN_DIRS: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
+
+fn extra_bin_dirs_slot() -> &'static Mutex<Vec<PathBuf>> {
+    EXTRA_BIN_DIRS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// 登记一组额外的 bin 目录（DSH 自定义安装位置）。内容真的变了才丢缓存。
+pub fn set_extra_bin_dirs(dirs: Vec<PathBuf>) {
+    let wanted = dedupe_dirs(dirs);
+    {
+        let mut guard = extra_bin_dirs_slot().lock().unwrap();
+        if dir_keys(guard.as_slice()) == dir_keys(&wanted) {
+            return;
+        }
+        *guard = wanted;
+    }
+    invalidate_cache();
+}
+
+fn extra_bin_dirs() -> Vec<PathBuf> {
+    extra_bin_dirs_slot().lock().unwrap().clone()
+}
+
+/// 目录列表的「判等键」：按 dir_key（去尾分隔符 + 小写）比较，避免只是大小写/末尾
+/// 分隔符不同就当作「变了」而白白丢一次检测缓存。
+fn dir_keys(dirs: &[PathBuf]) -> Vec<String> {
+    dirs.iter().map(|d| dir_key(d)).collect()
+}
+
+/// npm 全局 bin 目录（%APPDATA%\npm 是 npm 在 Windows 的默认 prefix）。
 fn npm_global_bin_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(appdata) = env_path("APPDATA") {
         dirs.push(appdata.join("npm"));
     }
+    // 自定义安装位置（`--prefix`）排在这里：它比 %APPDATA% 的默认目录更"新"，
+    // 而且用户刚刚明确指定过它。
+    dirs.extend(extra_bin_dirs());
     if let Some(node) = find_node_exe() {
         if let Some(dir) = node.parent() {
             dirs.push(dir.to_path_buf());
@@ -164,10 +203,27 @@ fn npm_global_bin_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// 在**指定目录**里找 dsh 启动脚本（dsh.cmd / dsh.exe / dsh.bat）。
+/// 装后核对专用：不靠 PATH 认自己刚装的东西（见 process.rs 的成功分支）。
+pub fn dsh_cmd_in_dir(dir: &Path) -> Option<PathBuf> {
+    ["dsh.cmd", "dsh.exe", "dsh.bat"]
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|p| p.is_file())
+}
+
 /// 定位 dsh 启动脚本：dsh.cmd / dsh.exe / dsh.bat
 pub fn find_dsh_cmd() -> Option<PathBuf> {
     for name in ["dsh.cmd", "dsh.exe", "dsh.bat"] {
         if let Some(p) = where_lookup(name) {
+            return Some(p);
+        }
+    }
+    // 注册表 PATH 里的目录：与 find_node_exe 同一条理由 —— 进程环境可能是**旧快照**，
+    // 而「自定义 DSH 安装位置」正是靠写用户 PATH 生效的；刚写完 PATH 的同一次运行里，
+    // 注册表已经更新、本进程的环境块却还是旧的，只有走注册表才认得出。
+    for name in ["dsh.cmd", "dsh.exe", "dsh.bat"] {
+        if let Some(p) = find_in_dirs(&registry_path_dirs(), name) {
             return Some(p);
         }
     }
@@ -394,6 +450,161 @@ pub fn default_node_install_dir() -> String {
     match base {
         Some(b) => format!("{}\\nodejs", b),
         None => r"C:\Program Files\nodejs".to_string(),
+    }
+}
+
+/// Windows 上 npm 未做任何配置时的默认**全局目录**：`%APPDATA%\npm`
+/// （APPDATA 缺失时退到 `%USERPROFILE%\AppData\Roaming\npm`；两者都没有返回 None）。
+fn appdata_npm_dir() -> Option<PathBuf> {
+    if let Some(base) = env_path("APPDATA") {
+        return Some(base.join("npm"));
+    }
+    env_path("USERPROFILE").map(|h| h.join("AppData").join("Roaming").join("npm"))
+}
+
+/// npm 在本机的全局目录 —— 也就是「不传 `--prefix` 时 DSH 会被装到哪里」。
+///
+/// 为什么要问 npm、而不是直接拼 `%APPDATA%\npm`：用户在 `.npmrc`（或环境变量）里配过
+/// `prefix=` 时，npm 装到的是那里；那个值只存在于 npm 自己的配置解析里，从外面猜不出来。
+/// 而向导里的「安装位置」是**预填**给用户看的 —— 预填一个错的位置，比留空更糟。
+/// 所以先问一次 `npm config get prefix`，拿不到（npm 缺失 / 超时 / 输出认不出）才回落到
+/// Windows 上的官方默认值。
+pub fn default_npm_prefix() -> String {
+    default_npm_prefix_for(find_npm_cmd().as_deref())
+}
+
+/// 同上，但复用调用方**已经**探测到的 npm 路径（`full_detect` 手上就有），
+/// 免得为了一行配置再跑一遍 `where` / 注册表查找。
+fn default_npm_prefix_for(npm: Option<&Path>) -> String {
+    if let Some(npm) = npm {
+        if let Some(p) = npm_reported_prefix(npm) {
+            return p;
+        }
+    }
+    appdata_npm_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// `npm config get prefix` → 绝对路径（不成立就 None，不猜）。
+fn npm_reported_prefix(npm: &Path) -> Option<String> {
+    let npm_s = npm.to_string_lossy().to_string();
+    let out = run_capture_timeout(
+        &npm_s,
+        &[
+            "config".to_string(),
+            "get".to_string(),
+            "prefix".to_string(),
+        ],
+        // 只值这么点时间：这是个「预填更好」的锦上添花，不该让环境检测卡住。
+        // 超时就回落 %APPDATA%\npm（对本机绝大多数用户就是正确答案）。
+        5,
+    )?;
+    // 从**后往前**找第一行「看起来是绝对路径、且不是 npm 自己的告警」的内容。
+    // 取最后一行是因为 `npm config get` 的值总是打在最后。
+    pick_path_line(&out)
+}
+
+/// `npm config get <键>` 输出的取值规则（纯函数，便于离线单测）：
+/// 最后一行形如绝对路径、且不是 npm 自己的告警/日志行才作数；认不出返回 None（不猜）。
+fn pick_path_line(out: &str) -> Option<String> {
+    out.lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| {
+            !l.is_empty() && !l.starts_with("npm ") && l.contains(':') && Path::new(l).is_absolute()
+        })
+        .map(str::to_string)
+}
+
+/// npm 的**用户级**配置文件路径（`~/.npmrc`）。
+///
+/// 问 `npm config get userconfig` 而不是直接拼 `%USERPROFILE%\.npmrc`：环境变量
+/// `npm_config_userconfig` 之类会改变它的位置，而我们要动的是**npm 真正在读的那个文件**。
+/// 问不到（npm 缺失 / 超时）才回落 `%USERPROFILE%\.npmrc`；连家目录都没有则返回 None，
+/// 调用方必须当作「不能改」处理（绝不乱猜一个路径去写）。
+pub fn npm_userconfig_path() -> Option<PathBuf> {
+    if let Some(npm) = find_npm_cmd() {
+        let npm_s = npm.to_string_lossy().to_string();
+        let args = [
+            "config".to_string(),
+            "get".to_string(),
+            "userconfig".to_string(),
+        ];
+        if let Some(out) = run_capture_timeout(&npm_s, &args, 5) {
+            if let Some(p) = pick_path_line(&out) {
+                return Some(PathBuf::from(p));
+            }
+        }
+    }
+    env_path("USERPROFILE").map(|h| h.join(".npmrc"))
+}
+
+/// 本机**实际生效**的 npm 缓存目录（含环境变量 / 项目级 `.npmrc` 的覆盖），
+/// 只用于首选项里那行「当前生效」提示 —— 它和用户填的值不一致时，光看我们的设置页
+/// 是看不出来的。问不到才回落 Windows 的默认位置 `%LOCALAPPDATA%\npm-cache`。
+pub fn npm_effective_cache_dir() -> String {
+    if let Some(npm) = find_npm_cmd() {
+        let npm_s = npm.to_string_lossy().to_string();
+        let args = [
+            "config".to_string(),
+            "get".to_string(),
+            "cache".to_string(),
+        ];
+        if let Some(out) = run_capture_timeout(&npm_s, &args, 5) {
+            if let Some(p) = pick_path_line(&out) {
+                return p;
+            }
+        }
+    }
+    env_path("LOCALAPPDATA")
+        .map(|p| p.join("npm-cache").to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// 带超时地跑一个小命令并合并捕获 stdout + stderr（非零退出或拿不到输出返回 None）。
+///
+/// 与 process.rs 的 `run_cmd_capture` 同款，但那边要求 cwd、且不对外；这里只有
+/// 「读一行 npm 配置」这种最小需求，所以留一个更小的本地版本，避免为它放宽那边的可见性。
+fn run_capture_timeout(program: &str, args: &[String], timeout_secs: u64) -> Option<String> {
+    let mut cmd = command_for(program, args).ok()?;
+    apply_no_window(&mut cmd);
+    // 子进程 PATH 显式补全（可能刚装完 Node，本进程环境还是旧快照）
+    cmd.env("PATH", child_path_for(&[program]));
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().ok()?;
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut text = String::new();
+                if let Some(mut so) = stdout.take() {
+                    use std::io::Read;
+                    let _ = so.read_to_string(&mut text);
+                }
+                if let Some(mut se) = stderr.take() {
+                    use std::io::Read;
+                    let _ = se.read_to_string(&mut text);
+                }
+                if !status.success() {
+                    return None;
+                }
+                return Some(decode_console_output(text.as_bytes()));
+            }
+            Ok(None) => {
+                if started.elapsed() >= std::time::Duration::from_secs(timeout_secs) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return None,
+        }
     }
 }
 
@@ -640,6 +851,111 @@ pub fn child_path_for(exes: &[&str]) -> std::ffi::OsString {
         .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
 }
 
+// ---------- 把「自定义 DSH 安装位置」写进**用户** PATH ----------
+//
+// 为什么必须做：npm 的 `--prefix <目录>` 只把文件写到那个目录，**不会**把它加进 PATH。
+// 而用户装完最自然的期待是「终端里也能直接敲 dsh」，本程序的路径探测也依赖 PATH。
+//
+// 只写 HKCU\Environment（当前用户），不碰系统 PATH：不需要管理员，影响面最小，
+// 且与「这是用户为自己装的工具」这件事相称。写完之后：
+//   ① `refresh_process_path()` —— 本进程与它派生的子进程立刻能看到；
+//   ② 广播 WM_SETTINGCHANGE —— Explorer 刷新自己的环境块，用户**新开**的终端才有它，
+//      否则要等重新登录（这正是「加了 PATH 却不生效」的常见来源）。
+
+/// 读取用户 PATH 的**原始值**（未展开 `%VAR%`；REG_SZ 与 REG_EXPAND_SZ 都能读到）。
+pub fn user_path_raw() -> Option<String> {
+    registry_path_raw(USER_PATH_KEY)
+}
+
+/// 把 `dir` 追加到用户 PATH 末尾。返回 true = 真的改了注册表；
+/// false = 已经在里面（展开 `%VAR%` 后比较，忽略大小写与结尾分隔符），什么都没动。
+///
+/// 追加到**末尾**而不是最前：不覆盖用户已有的解析顺序。真出现同名 `dsh.cmd` 时，
+/// 优先命中的仍是他原来那个（各自都还能用绝对路径启动）。
+pub fn append_to_user_path(dir: &Path) -> Result<bool, String> {
+    if dir_key(dir).is_empty() {
+        return Err("empty dir".to_string());
+    }
+    let current = user_path_raw().unwrap_or_default();
+    let Some(value) = user_path_with_dir(&current, dir) else {
+        return Ok(false);
+    };
+    write_user_path(&value)?;
+    // 顺序有讲究：先让本进程/子进程生效，再广播给 Explorer。
+    refresh_process_path();
+    invalidate_cache();
+    broadcast_env_change();
+    Ok(true)
+}
+
+/// `append_to_user_path` 的纯函数内核：返回追加后的用户 PATH 值；
+/// `dir` 已经在里面（展开 `%VAR%` 后比较，忽略大小写与结尾分隔符）时返回 None。
+/// 单独抽出来单测，是因为这里最容易出「多一个分号」「把已有项写坏」这类
+/// 只有在真机上才看得见的错 —— 而用户 PATH 写坏一次的代价很大。
+fn user_path_with_dir(cur: &str, dir: &Path) -> Option<String> {
+    let key = dir_key(dir);
+    if key.is_empty() {
+        return None;
+    }
+    if split_path_list(&expand_percent(cur))
+        .iter()
+        .any(|d| dir_key(d) == key)
+    {
+        return None;
+    }
+    let trimmed = cur.trim().trim_end_matches(';');
+    Some(if trimmed.is_empty() {
+        dir.to_string_lossy().to_string()
+    } else {
+        format!("{};{}", trimmed, dir.to_string_lossy())
+    })
+}
+
+/// 写 `HKCU\Environment` 的 `Path`。写成 **REG_EXPAND_SZ**：用户 PATH 里常常有
+/// `%USERPROFILE%` 这类引用，写成 REG_SZ 会让它们变成字面量（等于把那些目录弄坏）。
+/// `reg.exe` 直接读参数、不经 cmd.exe，所以值里的 `%` 不会在写入时被展开
+/// （真机验证：含空格、`&`、`;`、`%USERPROFILE%` 的值能原样写回且类型仍是 REG_EXPAND_SZ）。
+///
+/// 顺带一个容易被忽略的前提：**拼进来的目录不以 `\` 结尾**（path_shape 会去掉），
+/// 否则值会以 `…\"` 结束，CreateProcess 的转义规则会把结尾的反斜杠翻倍，
+/// reg.exe 收到的是一个带尾反斜杠的怪值。
+fn write_user_path(value: &str) -> Result<(), String> {
+    let mut cmd = Command::new("reg");
+    cmd.arg("add")
+        .arg(USER_PATH_KEY)
+        .arg("/v")
+        .arg("Path")
+        .arg("/t")
+        .arg("REG_EXPAND_SZ")
+        .arg("/d")
+        .arg(value)
+        .arg("/f");
+    apply_no_window(&mut cmd);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let out = cmd
+        .output()
+        .map_err(|e| format!("reg add: {}", e))?;
+    if !out.status.success() {
+        let msg = decode_console_output(&out.stderr);
+        let msg = msg.trim();
+        return Err(if msg.is_empty() {
+            format!("reg add 退出码 {:?}", out.status.code())
+        } else {
+            msg.to_string()
+        });
+    }
+    Ok(())
+}
+
+/// 广播 `WM_SETTINGCHANGE`（Windows 专有）。失败无所谓：用户重新登录后一样生效，
+/// 所以这里不返回错误、也不阻断安装结果。
+fn broadcast_env_change() {
+    #[cfg(windows)]
+    crate::process::win::broadcast_environment_change();
+}
+
 // ---------- Tauri 命令层使用的数据结构 ----------
 
 #[derive(Serialize, Clone)]
@@ -664,6 +980,10 @@ pub struct EnvDetection {
     /// 向导用它预填「安装位置」输入框 —— 预填而不是留空，是因为大多数用户要的就是
     /// 默认位置；由后端按本机 ProgramFiles 算，才不会在 Windows 装在 D 盘时写错。
     pub node_default_dir: String,
+    /// 引导安装 DSH 的**默认位置** = npm 的全局目录（问 `npm config get prefix`，
+    /// 问不到才回落 `%APPDATA%\npm`）。同样用于预填向导里的输入框：预填一个**正确的**
+    /// 默认值，用户不动它时，行为与「不传 --prefix」完全一致。
+    pub npm_default_prefix: String,
 }
 
 impl EnvDetection {
@@ -705,6 +1025,7 @@ pub fn full_detect() -> EnvDetection {
         node_msi_url: node_msi_url(),
         node_download_page: NODE_DOWNLOAD_PAGE.to_string(),
         node_default_dir: default_node_install_dir(),
+        npm_default_prefix: default_npm_prefix_for(paths.npm.as_deref()),
     }
 }
 
@@ -808,5 +1129,79 @@ mod tests {
         assert_eq!(find_in_dirs(&dirs, "npm.cmd"), None);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------- DSH 自定义安装位置（npm 全局目录） ----------
+
+    /// `npm config get prefix` 的输出取值：认得出才用，认不出返回 None（回落到
+    /// `%APPDATA%\npm`），绝不把 npm 的告警行当成路径预填给用户。
+    /// （`npm config get userconfig` / `cache` 走的是同一个取值函数。）
+    #[cfg(windows)]
+    #[test]
+    fn picks_path_line_from_noisy_npm_output() {
+        // 正常输出（CRLF）
+        assert_eq!(
+            pick_path_line("C:\\Users\\me\\AppData\\Roaming\\npm\r\n").as_deref(),
+            Some("C:\\Users\\me\\AppData\\Roaming\\npm")
+        );
+        // 告警混在输出里（stdout/stderr 被合并）：值总是在最后一行
+        assert_eq!(
+            pick_path_line("npm warn config production Use `--omit=dev` instead.\nD:\\npm-global\n")
+                .as_deref(),
+            Some("D:\\npm-global")
+        );
+        // 认不出的输出（undefined / 空）→ None，让调用方回落，不猜
+        assert_eq!(pick_path_line("undefined\n"), None);
+        assert_eq!(pick_path_line(""), None);
+        // npm 失败时那行日志里也有路径，但它以 "npm " 开头，不能被当成值
+        assert_eq!(
+            pick_path_line("npm error Log files were not written to C:\\tmp\n"),
+            None
+        );
+    }
+
+    /// 问不到 npm（缺失/超时/输出认不出）时必须回落到 Windows 的官方默认全局目录，
+    /// 而不是返回空串 —— 空串会让向导里的「安装位置」变成空白框，用户照它装就会
+    /// 落到一个我们自己都不知道的地方。
+    #[cfg(windows)]
+    #[test]
+    fn default_npm_prefix_falls_back_to_appdata_npm() {
+        if appdata_npm_dir().is_none() {
+            return; // 连 APPDATA / USERPROFILE 都没有的极端环境：这条无从断言，跳过
+        }
+        let p = default_npm_prefix_for(None);
+        assert!(
+            p.to_ascii_lowercase().ends_with(r"\npm"),
+            "应当回落到 %APPDATA%\\npm，实际得到 {p:?}"
+        );
+    }
+
+    /// 用户 PATH 的追加规则（纯函数内核）：空 PATH、已有项去重、不产生空分隔符。
+    /// 这条路径直接改用户的注册表 PATH，写坏一次的代价很大，所以规则单独钉住。
+    #[test]
+    fn user_path_with_dir_appends_once_without_breaking_entries() {
+        let dir = Path::new(r"D:\dsh-global");
+        // 空 PATH：直接就是它
+        assert_eq!(
+            user_path_with_dir("", dir).as_deref(),
+            Some(r"D:\dsh-global")
+        );
+        // 已有内容：追加到末尾，原有项一字不改
+        assert_eq!(
+            user_path_with_dir(r"C:\Windows;C:\Tools", dir).as_deref(),
+            Some(r"C:\Windows;C:\Tools;D:\dsh-global")
+        );
+        // 结尾已有分号：不能多写一个（`…;;D:\…` 里的空项等于把当前目录塞进 PATH）
+        assert_eq!(
+            user_path_with_dir(r"C:\Windows;", dir).as_deref(),
+            Some(r"C:\Windows;D:\dsh-global")
+        );
+        // 已在里面：大小写与结尾分隔符差异都算「已有」→ None（不重复追加）
+        assert!(user_path_with_dir(r"C:\Windows;d:\DSH-Global\", dir).is_none());
+        // 展开 %VAR% 之后再比较：注册表里存的是引用形式，不能用字面量骗过判断
+        if let Ok(prof) = std::env::var("USERPROFILE") {
+            let with_ref = format!(r"{}\AppData\Roaming\npm;%USERPROFILE%\npm", prof);
+            assert!(user_path_with_dir(&with_ref, Path::new(&format!(r"{}\npm", prof))).is_none());
+        }
     }
 }

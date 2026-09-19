@@ -43,6 +43,10 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_SystemInformation",
     "Win32_Foundation",
     "Win32_Security",
+    # 把「自定义 DSH 安装目录」写进用户 PATH 之后，用 SendMessageTimeoutW 广播
+    # WM_SETTINGCHANGE（见 process::win::broadcast_environment_change）；没有这一广播，
+    # 用户新开的终端要等重新登录才认这个目录。
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [profile.release]

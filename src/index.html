@@ -108,6 +108,18 @@
             <button class="btn small" data-pick="exec" data-kind="npm" data-target="set-npm-path" data-i18n="btn_browse">浏览</button>
           </div>
         </label>
+        <!-- npm 缓存位置：写进 npm **自己**的配置文件（~/.npmrc 的 cache 一行，最小行编辑），
+             所以终端里的 npm 也用它；留空 = 删除该行、回到 npm 默认位置。右侧那行小字显示
+             「npm 配置里的值 / 实际生效的值」——被环境变量或项目级 .npmrc 覆盖时两者不同。 -->
+        <label class="field">
+          <span><span data-i18n="lbl_npm_cache_dir">npm 缓存位置</span><em id="npm-cache-effective" class="flag"></em></span>
+          <div class="row">
+            <input id="set-npm-cache" type="text" spellcheck="false"
+                   placeholder="留空 = 不动 npm 配置（用 npm 默认位置）" data-i18n-placeholder="ph_npm_cache" />
+            <button class="btn small" data-pick="folder" data-kind="npm-cache" data-target="set-npm-cache" data-i18n="btn_browse">浏览</button>
+          </div>
+          <div class="hint" data-i18n="note_npm_cache">通过 npm 自己的配置文件（~/.npmrc 的 cache 一行）生效，所以终端里的 npm 也会用它；本程序只增删/替换那一行，文件的其余内容（注释、registry、token）原样保留。留空 = 删除该行、回到 npm 的默认位置（Windows 上是 %LOCALAPPDATA%\npm-cache）。</div>
+        </label>
         <!-- Node.js 版本状态 + 一键升级到官方 LTS（与首次运行向导的告警同一套后端流程）。
              标题行由 main.js 用真实下限版本号重绘，故不挂 data-i18n-html。 -->
         <div class="field field-node">
@@ -452,6 +464,21 @@
           <button id="wiz-btn-recheck2" class="btn" data-i18n="wiz_btn_recheck">重新检测</button>
           <button id="wiz-btn-skip-dsh" class="btn" data-i18n="wiz_btn_skip_node">稍后手动安装</button>
         </div>
+        <!-- 安装位置：npm 的**全局目录**（以 `--prefix <目录>` 交给 npm；不填则用 npm
+             自己的默认值）。与 Node 那段同样的规矩 —— 默认值由后端算：问一次
+             `npm config get prefix`（问不到才回落 %APPDATA%\npm），所以用户在 .npmrc 里
+             配过 prefix 时预填的也是对的；检测一回来就写入，用户改过就不再覆盖。
+             装到自定义目录后后端会把该目录写进用户 PATH（终端里也能直接用 dsh）。 -->
+        <label class="field">
+          <span data-i18n="wiz_dsh_dir_label">安装位置（已填 npm 默认全局目录，可修改）</span>
+          <div class="row">
+            <input id="wiz-dsh-dir" type="text" spellcheck="false" autocomplete="off"
+                   value="C:\Users\<用户名>\AppData\Roaming\npm"
+                   placeholder="C:\Users\<用户名>\AppData\Roaming\npm" data-i18n-placeholder="wiz_dsh_dir_ph" />
+            <button class="btn small" data-pick="folder" data-kind="dsh-install" data-target="wiz-dsh-dir" data-i18n="btn_browse">浏览</button>
+          </div>
+        </label>
+        <div class="wiz-warn-note" data-i18n="wiz_dsh_dir_note">这是 npm 的全局目录：改成 D:\dsh 之类即可装到别的盘（清空则用 npm 默认目录）。装到自定义目录后会自动把该目录加入你的用户 PATH（终端里也能直接用 dsh，不改系统 PATH）。</div>
       </div>
 
       <div id="wiz-progress" class="wiz-progress hidden">

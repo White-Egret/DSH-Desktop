@@ -52,6 +52,9 @@ pub fn run(launched_by_autostart: bool) {
         .invoke_handler(tauri::generate_handler![
             process::get_config,
             process::save_config,
+            // 首选项「npm 缓存位置」：同步进 npm 自己的 ~/.npmrc（最小行编辑）+ 读回实际生效值
+            process::apply_npm_cache,
+            process::npm_cache_info,
             process::get_status,
             process::start_dsh,
             process::stop_dsh,

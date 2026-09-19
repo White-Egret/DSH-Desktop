@@ -220,10 +220,41 @@ pub fn t(key: &str) -> &'static str {
         "setup_word_undetected" => if en { "not detected" } else { "未检测到" },
         "setup_node_dir_mismatch" => if en { "The Node.js installer reported success but did not put node.exe into the chosen location {0}. Actually detected: {1}. The official MSI ignored the custom directory. Point Preferences at node.exe manually, or uninstall Node.js and reinstall it into that folder." } else { "Node.js 安装程序报告成功，但没有把 node.exe 放进指定目录 {0}。实际检测到：{1}。官方 MSI 未采纳自定义目录。可在「首选项」里手动指向 node.exe，或卸载 Node.js 后重新装到该目录。" },
 
+        // ---------- 引导安装 DSH：自定义安装位置（npm 全局目录，--prefix） ----------
+        // 与上面 Node 那套刻意分开：Node 的位置最终变成 msiexec 的 INSTALLDIR，
+        // DSH 的位置变成 npm 的 `--prefix` —— 两处文案必须各自回答「改的是谁」，
+        // 共用一套会让用户在「安装位置」这个词上分不清当前在装什么。
+        // lbl_npm_prefix 同样会被当作 path_shape() 的 field 参数拼进 err_path_* 文案。
+        "lbl_npm_prefix" => if en { "DSH install location (npm global directory)" } else { "DSH 安装位置（npm 全局目录）" },
+        "err_prefix_chars" => if en { "{0}: the path contains characters Windows does not allow in a folder name (< > \" | ? *, a control character, or a ':' after the drive letter)." } else { "{0}：路径含 Windows 不允许的字符（< > \" | ? *、控制字符，或盘符之后多余的「:」）。" },
+        "err_prefix_too_long" => if en { "The install location is too long ({0} characters, limit {1}): npm creates several more levels underneath it, which would run into the Windows path limit and fail halfway through." } else { "安装位置过长（{0} 字符，上限 {1}）：npm 会在其下再建好几层，会撞上 Windows 路径长度限制，导致安装到一半失败。" },
+        "err_prefix_drive" => if en { "{0}: that drive does not exist or is not ready. Pick a folder on an available drive." } else { "{0}：该盘符不存在或未就绪。请选择本机可用磁盘上的目录。" },
+        "err_prefix_system" => if en { "{0}: DSH cannot be installed into a system location (Windows / ProgramData), nor directly into the Program Files root." } else { "{0}：不能把 DSH 装进系统位置（Windows / ProgramData），也不能直接装到 Program Files 根目录。" },
+        "err_prefix_is_file" => if en { "{0} already exists and is a file, not a folder." } else { "{0} 已存在，而且是一个文件而不是文件夹。" },
+        "err_prefix_cmd_chars" => if en { "{0}: the path contains the character \"{1}\", which cannot be handed to npm safely. cmd.exe expands %VAR% even inside double quotes, \"!\" is special once delayed expansion is on, and a double quote would break the quoting. Pick a folder name without % ! or quotes." } else { "{0}：路径含字符「{1}」，无法安全地交给 npm。cmd.exe 即使在双引号内也会展开 %VAR%，开启延迟展开时「!」另有含义，双引号则会破坏引号配对。请换一个不含 % ! 与引号的目录名。" },
+        "err_prefix_mkdir" => if en { "Cannot create the install location {0}: {1}. Pick an existing, writable folder (for example D:\\DSH)." } else { "无法创建安装位置 {0}：{1}。请选择一个已存在、且可写的目录（例如 D:\\DSH）。" },
+
+        // ---------- 首选项：npm 缓存位置（写进 ~/.npmrc 的 cache= 一行） ----------
+        "lbl_npm_cache_dir" => if en { "npm cache location" } else { "npm 缓存位置" },
+        "err_cache_chars" => if en { "{0}: the path contains characters Windows does not allow in a folder name (< > \" | ? *, a control character, or a ':' after the drive letter)." } else { "{0}：路径含 Windows 不允许的字符（< > \" | ? *、控制字符，或盘符之后多余的「:」）。" },
+        "err_cache_too_long" => if en { "The cache location is too long ({0} characters, limit {1}): npm writes content-addressed files more than 150 characters deeper than this folder, and ordinary Windows tools cannot delete paths beyond the classic 260-character limit (Explorer and PowerShell fail; npm itself still works). Keep it short enough that cleanup stays possible." } else { "缓存位置过长（{0} 字符，上限 {1}）：npm 会在这个目录**之下**再写 150 多个字符的内容寻址路径，而超过经典 260 上限后 Windows 的常规工具就删不动了（资源管理器 / PowerShell 都会失败，虽然 npm 自己还能写）。留短一点，将来才清得掉。" },
+        "err_cache_drive" => if en { "{0}: that drive does not exist or is not ready. Pick a folder on an available drive." } else { "{0}：该盘符不存在或未就绪。请选择本机可用磁盘上的目录。" },
+        "err_cache_system" => if en { "{0}: the npm cache cannot live in a system location (Windows / ProgramData), nor directly in the Program Files root." } else { "{0}：不能把 npm 缓存放在系统位置（Windows / ProgramData），也不能直接放在 Program Files 根目录。" },
+        "err_cache_is_file" => if en { "{0} already exists and is a file, not a folder." } else { "{0} 已存在，而且是一个文件而不是文件夹。" },
+        "err_cache_cmd_chars" => if en { "{0}: the path contains the character \"{1}\", which cannot be handed to npm safely (cmd.exe expands %VAR% even inside double quotes, and \"!\" is special once delayed expansion is on)." } else { "{0}：路径含字符「{1}」，无法安全地交给 npm（cmd.exe 即使在双引号内也会展开 %VAR%，开启延迟展开时「!」另有含义）。" },
+        "err_cache_ini_chars" => if en { "{0}: the character \"{1}\" cannot be used here. This value is written into npm's own config file (~/.npmrc), where npm's ini parser treats \"#\" and \";\" as the start of a comment — a path containing them would be silently truncated to a different folder." } else { "{0}：不能用字符「{1}」。这个值会写进 npm 自己的配置文件（~/.npmrc），而 npm 的 ini 解析器把「#」与「;」当作注释起点 —— 含它们的路径会被**静默截断成另一个目录**。" },
+        "err_npmrc_nopath" => if en { "Cannot determine npm's user config file (~/.npmrc), so the npm cache setting was left untouched." } else { "无法确定 npm 的用户配置文件（~/.npmrc），已保持 npm 缓存设置不变。" },
+        "err_npmrc_read" => if en { "Cannot read npm's config file {0}: {1}. Nothing was changed (to avoid rewriting your registry/token lines with the wrong encoding)." } else { "无法读取 npm 配置文件 {0}：{1}。为避免用错误的编码重写你的 registry / token 行，本次没有做任何改动。" },
+        "err_npmrc_write" => if en { "Cannot write npm's config file {0}: {1}" } else { "无法写入 npm 配置文件 {0}：{1}" },
+        "cache_npmrc_written" => if en { "npm cache location set to {0} (written into npm's own config, so terminal npm uses it too)." } else { "npm 缓存位置已设为 {0}（已写入 npm 自己的配置，终端里的 npm 也会用）。" },
+        "cache_npmrc_removed" => if en { "Removed the cache setting from npm's config (was {0}); npm falls back to its default location." } else { "已从 npm 配置里删除缓存设置（原值 {0}），npm 回到默认位置。" },
+        "cache_npmrc_unchanged" => if en { "npm already uses {0}; its config was left untouched." } else { "npm 配置里已经是 {0}，未做改动。" },
+        "cache_npmrc_unchanged_none" => if en { "npm's config has no cache setting; nothing to change." } else { "npm 配置里没有设置缓存位置，无需改动。" },
+
         // ---------- 首次运行引导：DSH ----------
         "err_task_busy" => if en { "An install task is already running" } else { "已有安装任务正在进行" },
         "setup_npm_missing" => if en { "npm.cmd not found ({0}). Install Node.js (which includes npm) first, or set the npm path in Preferences." } else { "未找到 npm.cmd（{0}）。请先安装 Node.js（含 npm），或在「首选项」中配置 npm 路径。" },
-        "setup_dsh_executing" => if en { "[setup] Running: \"{0}\" install -g {1}" } else { "[setup] 正在执行: \"{0}\" install -g {1}" },
+        // setup_dsh_executing 的模板在下面「自定义安装位置」一节（命令行回显改成整串参数）
         "setup_npm_spawn_fail" => if en { "npm failed to start: {0} (wrong path or missing permission?)" } else { "npm 启动失败: {0}（路径错误或权限不足？）" },
         "setup_npm_timeout" => if en { "npm install timed out (15 minutes) and was aborted. Check your network and retry, or run the install command manually." } else { "npm 安装超时（15 分钟），已中止。请检查网络后重试，或手动执行安装命令。" },
         "setup_npm_wait_fail" => if en { "Failed while waiting for npm to exit: {0}" } else { "等待 npm 退出失败: {0}" },
@@ -231,6 +262,15 @@ pub fn t(key: &str) -> &'static str {
         "setup_dsh_ok_log" => if en { "[setup] DSH global install succeeded." } else { "[setup] DSH 全局安装成功。" },
         "setup_dsh_notfound" => if en { "npm reported success but dsh.cmd was not found. Click \"Re-check\", or restart this app." } else { "npm 报告成功但未找到 dsh.cmd。可点击「重新检测」，或重启程序后再试。" },
         "setup_dsh_fail_code" => if en { "npm install -g {0} failed (exit code {1}). Common causes: no network, npm registry unreachable, insufficient permission for the global dir. See the log, or copy the command and run it yourself." } else { "npm install -g {0} 失败（退出码 {1}）。常见原因：无网络、npm 源不可达、全局目录权限不足。详见日志，也可复制命令手动执行。" },
+        // 自定义安装位置：命令行回显、装后核对、用户 PATH
+        // {1} 是**真正的参数表**（含 --prefix / --cache，见 process.rs::dsh_install_args），
+        // 所以文案里只留一个占位符，不自己拼选项 —— 日志与真正执行的命令永远一致。
+        "setup_dsh_executing" => if en { "[setup] Running: \"{0}\" {1}" } else { "[setup] 正在执行: \"{0}\" {1}" },
+        "setup_dsh_prefix_using" => if en { "Installing DSH into the chosen location: {0} (npm's global directory for this install)." } else { "将把 DSH 装到指定位置：{0}（本次安装使用的 npm 全局目录）。" },
+        "setup_dsh_mismatch" => if en { "npm reported success but dsh.cmd was not found in the chosen location {0}. Actually detected: {1}. Copy the command from the log and run it in a terminal to see the real error, or clear the install location to use npm's default directory." } else { "npm 报告成功，但在指定目录 {0} 里没找到 dsh.cmd。实际检测到：{1}。可从日志里复制命令到终端执行，看真实报错；也可以清空安装位置改用 npm 默认目录。" },
+        "setup_path_added" => if en { "[launcher] Added {0} to your user PATH, so `dsh` also works in a terminal (system PATH untouched)." } else { "[launcher] 已把 {0} 加入你的用户 PATH，终端里也能直接使用 dsh（未改动系统 PATH）。" },
+        "setup_path_already" => if en { "[launcher] {0} is already in your user PATH; nothing changed." } else { "[launcher] {0} 已在用户 PATH 中，无需改动。" },
+        "setup_path_add_fail" => if en { "DSH was installed, but adding {0} to your user PATH failed: {1}. This app still starts DSH by its full path; to use `dsh` in a terminal you may need to add that folder to PATH yourself." } else { "DSH 已装好，但把 {0} 写入用户 PATH 失败：{1}。本程序仍会用完整路径启动 DSH；若要在终端里直接使用 dsh，请自行把该目录加入 PATH。" },
         "log_setup_done" => if en { "[launcher] First-run setup finished; configuration saved." } else { "[launcher] 初始化引导已完成，配置已写入。" },
 
         // ---------- 安全模式（独立纯净家目录 %USERPROFILE%\.dsh-safe，端口 3081） ----------

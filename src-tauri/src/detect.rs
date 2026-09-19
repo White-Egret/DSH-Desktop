@@ -85,8 +85,20 @@ fn env_path(var: &str) -> Option<PathBuf> {
 }
 
 /// 定位 node.exe
+///
+/// 查找顺序有意如此：
+///   1. `where`（= 当前进程环境里的 PATH，与用户在同一时刻的终端所见一致）；
+///   2. **注册表 PATH 里的目录** —— 补上「进程环境是旧快照」这一类：程序从资源管理器
+///      启动时继承的是资源管理器自己的环境块，安装器刚写好的目录不在里面，于是
+///      `where` 找不到、而硬编码候选又不认识自定义目录（实测症状：文件装好在
+///      `D:\Programs\Node.js`，程序却说「未检测到 node.exe」）；
+///   3. 最后才是硬编码的常见位置（`%ProgramFiles%\nodejs`、nvm/fnm/volta/scoop）。
+///      注意它们只是**兜底猜测**，过去因为默认目录正好在这里，掩盖了第 2 条缺失。
 pub fn find_node_exe() -> Option<PathBuf> {
     if let Some(p) = where_lookup("node.exe") {
+        return Some(p);
+    }
+    if let Some(p) = find_in_dirs(&registry_path_dirs(), "node.exe") {
         return Some(p);
     }
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -106,6 +118,13 @@ pub fn find_node_exe() -> Option<PathBuf> {
         candidates.push(home.join("scoop").join("apps").join("nodejs").join("current").join("node.exe"));
     }
     candidates.into_iter().find(|p| p.is_file())
+}
+
+/// 在这些目录里找某个文件（按给定顺序，返回第一个确实存在的）。
+fn find_in_dirs(dirs: &[PathBuf], file: &str) -> Option<PathBuf> {
+    dirs.iter()
+        .map(|d| d.join(file))
+        .find(|p| p.is_file())
 }
 
 /// 定位 npm.cmd（npm 与 node 通常同目录）
@@ -218,8 +237,17 @@ pub const NODE_LTS_VERSION: &str = "24.20.0";
 pub const NODE_DOWNLOAD_PAGE: &str = "https://nodejs.org/en/download";
 
 /// 该 LTS 线的滚动目录校验清单（约 2 KB，用来查最新补丁版本号）
+///
+/// 目录名是 `latest-v24.x`（**带 `.x`**），不是 `latest-v24`：少了 `.x` 直接 404，
+/// 而后果不止「探测失败」——它会悄悄退化成固定版本（装一个旧补丁版），并且让下载器
+/// 走 PowerShell 回退，用户会看到一个「要不要允许打开 PowerShell」的弹窗，
+/// 看着像程序在做不该做的事。
+/// 实测：`dist/latest-v24.x/SHASUMS256.txt` = 200；`dist/latest-v24/...` = 404 File not found。
 pub fn node_shasums_url() -> String {
-    format!("https://nodejs.org/dist/latest-v{}/SHASUMS256.txt", NODE_LTS_LINE)
+    format!(
+        "https://nodejs.org/dist/latest-v{}.x/SHASUMS256.txt",
+        NODE_LTS_LINE
+    )
 }
 
 /// 某个**具体版本**目录下的官方清单（与 MSI 同目录，安装前取 SHA-256 用它）
@@ -394,6 +422,44 @@ fn reg_path_slot() -> &'static Mutex<Option<Vec<PathBuf>>> {
 /// 丢弃注册表 PATH 缓存（安装完成后调用，强制重新读取）。
 pub fn invalidate_reg_path_cache() {
     *reg_path_slot().lock().unwrap() = None;
+}
+
+/// 把 `dir` 插到**本进程** PATH 的最前面（已存在则不动），返回是否真的插入。
+///
+/// 为什么需要它：引导安装把 Node 装到自定义目录后，「安装器什么时候、有没有把目录写进
+/// 注册表 PATH」不在我们的控制范围内（实测遇到过：文件全都装好在 `D:\Programs\Node.js`、
+/// 卸载登记也在，但本进程与终端都找不到 `node`）。而目录是**我们自己指定的**，
+/// 所以直接并进本进程 PATH —— 随后同一进程里的 npm/dsh 检测、npm 全局安装以及派生的
+/// 子进程都不再受「PATH 何时生效」影响。（`child_path_for` 会把它带给子进程。）
+pub fn prepend_process_path(dir: &Path) -> bool {
+    let cur = current_path_dirs();
+    let merged = match path_with_dir_first(&cur, dir) {
+        Some(v) => v,
+        None => return false, // 空路径或已在里面，不必改
+    };
+    match std::env::join_paths(&merged) {
+        Ok(joined) => {
+            std::env::set_var("PATH", joined);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// `prepend_process_path` 的纯函数内核：把 dir 放到最前；已在列表里（或 dir 为空）
+/// 返回 None。单独抽出来是为了能单测 —— 它要改进程全局状态，不适合在测试里反复调用。
+fn path_with_dir_first(cur: &[PathBuf], dir: &Path) -> Option<Vec<PathBuf>> {
+    let k = dir_key(dir);
+    if k.is_empty() {
+        return None;
+    }
+    if cur.iter().any(|d| dir_key(d) == k) {
+        return None;
+    }
+    let mut out: Vec<PathBuf> = Vec::with_capacity(cur.len() + 1);
+    out.push(dir.to_path_buf());
+    out.extend(cur.iter().cloned());
+    Some(out)
 }
 
 /// 目录去重键：去尾部分隔符 + 小写（Windows 路径大小写不敏感）。
@@ -707,5 +773,40 @@ mod tests {
             .unwrap_or_else(|e| panic!("预填的默认目录必须合法，却被拒绝: {e}"))
             .expect("预填值非空，应当返回 Some");
         assert_eq!(norm, d.trim_end_matches('\\'));
+    }
+
+    /// 预置目录的纯函数内核：插到最前、按 Windows 语义去重（尾部分隔符 + 大小写）。
+    /// 它本身不进 PATH（改进程全局状态的那层不在这里测），但判断逻辑全在这儿。
+    #[test]
+    fn path_with_dir_first_prepends_and_dedupes() {
+        let cur = vec![
+            PathBuf::from(r"C:\Windows"),
+            PathBuf::from(r"D:\Programs\Node.js\"),
+        ];
+        // 已在列表里（尾部 `\` 与大小写差异不算新目录）→ 返回 None，不重复插
+        assert!(path_with_dir_first(&cur, Path::new(r"d:\programs\node.js")).is_none());
+        let out = path_with_dir_first(&cur, Path::new(r"D:\nodejs")).expect("应当插入");
+        assert_eq!(out[0], PathBuf::from(r"D:\nodejs"), "必须插在最前面");
+        assert_eq!(out.len(), cur.len() + 1);
+        // 空/纯空白路径不动 PATH
+        assert!(path_with_dir_first(&cur, Path::new("   ")).is_none());
+        assert!(path_with_dir_first(&[], Path::new("")).is_none());
+    }
+
+    /// 注册表 PATH 目录扫描：只在文件确实存在时命中，且按给定顺序取第一个。
+    #[test]
+    fn find_in_dirs_only_returns_existing_files() {
+        let dir = std::env::temp_dir().join(format!("dsh-find-in-dirs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hit = dir.join("node.exe");
+        std::fs::write(&hit, b"x").unwrap();
+
+        // 第一个目录里没有，第二个里有 → 命中第二个
+        let dirs = vec![dir.join("nope"), dir.clone()];
+        assert_eq!(find_in_dirs(&dirs, "node.exe"), Some(hit));
+        // 找不到就是找不到（不能凭目录存在就返回路径）
+        assert_eq!(find_in_dirs(&dirs, "npm.cmd"), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

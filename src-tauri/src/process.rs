@@ -2921,6 +2921,26 @@ fn resolve_latest_lts_version(dir: &Path, last_err: &mut String) -> Option<Strin
     None
 }
 
+/// 拼 `INSTALLDIR` 这个 msiexec 属性令牌（**必须原样送进命令行**）。
+///
+/// 为什么单独成函数、为什么不能走 `Command::arg`：msiexec 只认「引号包住值」的形态
+/// （`INSTALLDIR="C:\Program Files\nodejs"`）。走 `Command::arg` 时，Rust 会因为值里
+/// 含空格而把**整个** token 包成 `"INSTALLDIR=C:\Program Files\nodejs"`，msiexec 判定
+/// 命令行非法 → 退出码 **1639**（ERROR_INVALID_COMMAND_LINE），并弹出一个跟 Node 毫无
+/// 关系的 msiexec 对话框（用户会把它当成「奇怪的安装程序」，而 Node 一个字节都没装）。
+///
+/// 真机实测（包路径故意不存在 + `/qn`，解析阶段就能区分形态是否合法）：
+///   裸空格 `INSTALLDIR=C:\Program Files\nodejs` → 被拒；
+///   整段加引号 `"INSTALLDIR=C:\Program Files\nodejs"` → 被拒（这正是 Command::arg 的行为）；
+///   `INSTALLDIR="C:\Program Files\nodejs"` 原样送 → **通过**；无空格路径三种写法都通过。
+///
+/// 所以这个返回值必须经 `CommandExt::raw_arg` 送入，**不要**改回 `cmd.arg(...)`。
+/// 支持它被命令行设置的前提是 MSI 把它列进了 `SecureCustomProperties`
+/// （本机缓存 MSI 实测：`...;INSTALLDIR;...` 在列）。
+fn install_dir_token(dir: &str) -> String {
+    format!("INSTALLDIR=\"{}\"", dir)
+}
+
 /// 引导安装 Node.js 的入口：下载物一律放进一次性随机私有目录，返回前整目录删除
 /// （校验失败、安装失败、超时、用户取消等任何提前 return 的路径都不会留下安装包）。
 fn install_node_blocking(app: &AppHandle, install_dir: Option<&str>) -> Result<String, String> {
@@ -3041,9 +3061,19 @@ fn install_node_verified(
     let mut cmd = Command::new("msiexec");
     cmd.arg("/i").arg(&dest).args(["/passive", "/norestart"]);
     if let Some(d) = install_dir {
-        // 属性值可能含空格（官方默认路径就含）：作为**单个** argv 元素传递，
-        // 由 Windows 负责引号，不要自己拼引号。
-        cmd.arg(format!("INSTALLDIR={}", d));
+        // 必须原样拼接（raw_arg），不能走 arg()：见 install_dir_token 的说明。
+        // 走 arg() 会被重新加引号 → msiexec 1639 + 一个不属于 Node 的对话框。
+        let token = install_dir_token(d);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.raw_arg(token);
+        }
+        // 本程序只在 Windows 跑；这一支只是让 crate 在别的平台也能编译。
+        #[cfg(not(windows))]
+        {
+            cmd.arg(token);
+        }
     }
     apply_no_window(&mut cmd); // 只是不创建控制台窗口；MSI 本身是 GUI 程序不受影响
     let mut child = cmd.spawn().map_err(|e| {
@@ -3085,13 +3115,23 @@ fn install_node_verified(
             if added > 0 {
                 setup_progress(app, "verify", &i18n::fmt("setup_path_refreshed", &[&added]));
             }
+            // 自定义目录：先把该目录并进本进程 PATH，再做检测。这样 node 与**同目录的
+            // npm** 都能被解析到，完全不依赖「安装器何时/是否把注册表 PATH 写成功」。
+            // （实测踩过：文件确实装好在 D:\Programs\Node.js、注册表也有这条，
+            //  但当时探测报「未检测到 node.exe」，向导退回上一步，用户只能手动重装。）
+            if let Some(d) = install_dir {
+                detect::prepend_process_path(Path::new(d));
+            }
             let env = detect::full_detect();
             // 自定义目录的核对：MSI 返回 0 **不等于**「装到了用户要的目录」——
             // 属性名一旦写错、或官方改了 MSI 的作者方式，msiexec 会静默忽略它并
             // 装回默认目录。这里如实报错，把「你以为装到 D 盘、其实在 C 盘」这种
             // 最难发现的情况挡在成功提示之前。
+            // 同时：只要 node.exe 真在那个目录里，就以**它**为准（而不是 PATH 里找到的
+            // 那个），因为我们刚刚正是往那儿装的。
             if let Some(d) = install_dir {
-                if !Path::new(d).join("node.exe").is_file() {
+                let exe = Path::new(d).join("node.exe");
+                if !exe.is_file() {
                     // 先把两个分支统一成 `&str` 再取一次引用：两条分支的类型本来不同
                     // （&str 与 &'static str 能统一，&String 与 &&str 不能），
                     // 写成 &[&d, &(if .. { a } else { b })] 才不依赖上下文类型推导。
@@ -3102,6 +3142,15 @@ fn install_node_verified(
                     };
                     return Err(i18n::fmt("setup_node_dir_mismatch", &[&d, &detected]));
                 }
+                let path = exe.to_string_lossy().to_string();
+                // 版本读不到不影响「装好了」这个事实（与默认目录分支同一尺度）
+                let ver = detect::quick_version(&exe, 10).unwrap_or_default();
+                setup_progress(
+                    app,
+                    "verify",
+                    &i18n::fmt("setup_node_detected", &[&path, &ver]),
+                );
+                return Ok(format!("{} {}", path, ver));
             }
             if env.node_found {
                 let ver = env.node_version.clone().unwrap_or_default();
@@ -3119,6 +3168,9 @@ fn install_node_verified(
             }
         }
         1602 => Err(i18n::t("setup_node_cancelled").to_string()),
+        // 1639 = ERROR_INVALID_COMMAND_LINE：跟权限、磁盘都无关（原来那句通用的
+        // 「权限不足/磁盘空间不足」会把人引到完全错误的方向 —— 实测踩过这个坑）。
+        1639 => Err(i18n::t("setup_node_bad_cmdline").to_string()),
         c => Err(i18n::fmt("setup_node_fail_code", &[&c])),
     }
 }
@@ -3803,7 +3855,7 @@ mod tests {
     fn node_dist_url_guard_accepts_only_official_dist() {
         assert!(is_node_dist_url("https://nodejs.org/dist/v22.23.2/node-v22.23.2-x64.msi"));
         assert!(is_node_dist_url("https://nodejs.org/dist/v22.23.2/SHASUMS256.txt"));
-        assert!(is_node_dist_url("https://nodejs.org/dist/latest-v22/SHASUMS256.txt"));
+        assert!(is_node_dist_url("https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt"));
         // 协议降级
         assert!(!is_node_dist_url("http://nodejs.org/dist/v22.23.2/SHASUMS256.txt"));
         // 前缀伪装 / 换个主机
@@ -3814,6 +3866,41 @@ mod tests {
         // 所有地址都由 detect.rs 用同一个常量前缀拼出，出现变体就说明有人绕过了构造路径
         assert!(!is_node_dist_url("HTTPS://nodejs.org/dist/x"));
         assert!(!is_node_dist_url(""));
+    }
+
+    /// 滚动目录必须带 `.x`：`dist/latest-v24` 是 404（实测 File not found），
+    /// 而 404 的后果不是「探测失败」这么轻 —— 会悄悄退化成固定版本，
+    /// 并让下载器走 PowerShell 回退（用户看到一个来路不明的「允许打开 PowerShell」弹窗）。
+    #[test]
+    fn lts_manifest_url_keeps_the_dot_x_directory() {
+        let u = detect::node_shasums_url();
+        assert_eq!(
+            u,
+            format!(
+                "https://nodejs.org/dist/latest-v{}.x/SHASUMS256.txt",
+                detect::NODE_LTS_LINE
+            )
+        );
+        assert!(u.contains(".x/"), "滚动目录必须带 .x：{u}");
+        assert!(is_node_dist_url(&u));
+    }
+
+    /// `INSTALLDIR` 令牌必须是「引号包住值」，**不能**是「整段加引号」。
+    /// 后者正是 `Command::arg` 遇到空格时的自动行为，会被 msiexec 判为非法命令行
+    /// （退出码 1639 + 一个跟 Node 无关的对话框，Node 一个字节都装不上）。
+    /// 这条断言同时守住「别把它改回 `cmd.arg(format!("INSTALLDIR={}", d))`」。
+    #[test]
+    fn install_dir_token_quotes_only_the_value() {
+        assert_eq!(
+            install_dir_token(r"C:\Program Files\nodejs"),
+            r#"INSTALLDIR="C:\Program Files\nodejs""#
+        );
+        assert_eq!(install_dir_token(r"D:\nodejs"), r#"INSTALLDIR="D:\nodejs""#);
+        // 反面：整段加引号的形态（= Command::arg 的产出）不允许再出现
+        assert_ne!(
+            install_dir_token(r"C:\Program Files\nodejs"),
+            "\"INSTALLDIR=C:\\Program Files\\nodejs\""
+        );
     }
 
     #[test]

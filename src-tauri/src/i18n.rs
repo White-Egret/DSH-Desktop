@@ -199,6 +199,8 @@ pub fn t(key: &str) -> &'static str {
         "setup_node_detected" => if en { "Detected Node.js: {0} {1}" } else { "检测到 Node.js：{0} {1}" },
         "setup_node_not_detected" => if en { "The installer exited (code {0}) but node.exe was not detected. Right after installing, PATH may only refresh after a restart — click \"Re-check\" or install manually from {1}." } else { "安装程序已退出（退出码 {0}），但未检测到 node.exe。刚装完可能需要重新打开程序使 PATH 生效；可点击「重新检测」，或到 {1} 手动安装。" },
         "setup_node_cancelled" => if en { "Installation was cancelled (exit code 1602). Try once more, or install manually from https://nodejs.org." } else { "安装被取消（退出码 1602）。可再次尝试一键安装，或到 https://nodejs.org 手动安装。" },
+        // 1639 = ERROR_INVALID_COMMAND_LINE。单独一条是为了不再把用户引向「权限/磁盘」。
+        "setup_node_bad_cmdline" => if en { "The installer rejected the command line (exit code 1639 = ERROR_INVALID_COMMAND_LINE). This is not a permission or disk-space problem — it means the install location was not handed to the installer correctly. Clear the install location to use the official default, then retry. (Nothing was installed.)" } else { "安装程序拒绝了这条命令行（退出码 1639 = ERROR_INVALID_COMMAND_LINE）。这与权限、磁盘空间都无关 —— 是「安装位置」没能正确交给安装程序。可清空安装位置改用官方默认目录后重试。（本次没有安装任何东西。）" },
         "setup_node_fail_code" => if en { "Installation failed (msiexec exit code {0}). Common causes: insufficient permissions (UAC declined), low disk space. Retry, or download manually from https://nodejs.org." } else { "安装失败（msiexec 退出码 {0}）。常见原因：权限不足（UAC 被拒绝）、磁盘空间不足。可重试或到 https://nodejs.org 手动下载安装。" },
         "setup_word_ok" => if en { "succeeded" } else { "成功" },
         "setup_word_fail" => if en { "failed" } else { "失败" },

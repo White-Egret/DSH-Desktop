@@ -1348,6 +1348,14 @@ function refreshDshCmd() {
   el.textContent = dshInstallCommand(det && det.npm_path);
 }
 
+/// 向导「缺少 pnpm」一步展示的命令 —— 与 Rust 端 install_pnpm_blocking 真正执行的
+/// `npm install -g pnpm` 逐字一致（pnpm 不带 --prefix：它必须落在 npm 自己的全局目录里，
+/// 那通常已经在 PATH 中，装到别处反而要额外处理 PATH）。
+function pnpmInstallCommand(npmPath) {
+  const npm = '"' + (npmPath || 'npm') + '"';
+  return `${npm} install -g pnpm`;
+}
+
 function setWizFlag(flagId, pathId, found, detail) {
   const f = $(flagId);
   f.textContent = found ? t('wiz_installed') : t('wiz_notfound');
@@ -1440,6 +1448,8 @@ function renderWiz() {
   }
   setWizFlag('wiz-npm-flag', 'wiz-npm-path', d.npm_found, d.npm_path);
   setWizFlag('wiz-dsh-flag', 'wiz-dsh-path', d.dsh_found, d.dsh_path);
+  // pnpm：Node 就绪后才谈得上装它（缺 Node 时先装 Node，装完后端会自动补 pnpm）
+  setWizFlag('wiz-pnpm-flag', 'wiz-pnpm-path', !!d.pnpm_found, d.pnpm_path);
 
   const allOK = d.node_found && d.npm_found && d.dsh_found;
 
@@ -1447,6 +1457,11 @@ function renderWiz() {
   $('wiz-step-node').classList.toggle('hidden', wiz.busy || d.node_found);
   // DSH 步骤：node+npm 就绪但缺 DSH 时显示
   $('wiz-step-dsh').classList.toggle('hidden', wiz.busy || !d.node_found || !d.npm_found || d.dsh_found);
+  // pnpm 步骤：node+npm 就绪、但 pnpm 缺失时显示（只提示、不阻断 —— pnpm 不影响 DSH 启动，
+  // 所以「完成」按钮在 pnpm 缺失时依然按 node/npm/dsh 三项判定是否「全部就绪」）。
+  // 要求 npm 在场：pnpm 只能由 `npm install -g pnpm` 装，npm 缺失时给出按钮必然失败。
+  $('wiz-step-pnpm').classList.toggle('hidden',
+    wiz.busy || !d.node_found || !d.npm_found || !!d.pnpm_found);
 
   // Node 版本过低告警：node 在、但版本低于下限（用户已确认继续时不弹；版本读不出时
   // 只显示警示、不显示一键升级以外的引导——它可能其实是够的）
@@ -1467,6 +1482,8 @@ function renderWiz() {
   if (urlEl) urlEl.textContent = d.node_msi_url || 'https://nodejs.org/en/download';
   const cmdEl = $('wiz-dsh-cmd');
   if (cmdEl) cmdEl.textContent = dshInstallCommand(d.npm_path);
+  const pnpmCmdEl = $('wiz-pnpm-cmd');
+  if (pnpmCmdEl) pnpmCmdEl.textContent = pnpmInstallCommand(d.npm_path);
 
   // 完成按钮：全部就绪 → 直接进入；有缺失 → 等同「跳过」
   const finishBtn = $('wiz-btn-finish');
@@ -1477,7 +1494,8 @@ function renderWiz() {
   // 安装进行中禁用相关按钮
   ['wiz-btn-install-node', 'wiz-btn-recheck', 'wiz-btn-skip-node', 'wiz-btn-upgrade-node',
    'wiz-btn-node-manual', 'wiz-btn-node-ignore', 'wiz-btn-node-recheck',
-   'wiz-btn-install-dsh', 'wiz-btn-copy-dsh-cmd', 'wiz-btn-recheck2', 'wiz-btn-skip-dsh']
+   'wiz-btn-install-dsh', 'wiz-btn-copy-dsh-cmd', 'wiz-btn-recheck2', 'wiz-btn-skip-dsh',
+   'wiz-btn-install-pnpm', 'wiz-btn-recheck-pnpm']
     .forEach((id) => { $(id).disabled = wiz.busy; });
 }
 
@@ -1789,6 +1807,29 @@ function bindUI() {
       toast(String(e), true);
     }
   };
+  // ---- 缺少 pnpm：一键安装 / 重新检测 ----
+  // pnpm 是「DSH 装好之后安装插件」用的包管理器，缺失不阻断 DSH 启动，
+  // 所以这里是**建议**而不是必经步骤（点下方「完成」即可跳过）。
+  // 进度与结果由 setup-status / setup-result（target = "pnpm"）事件驱动；
+  // 后端装完会重新检测，成功后 onSetupResult 自动刷新本页状态。
+  $('wiz-btn-install-pnpm').onclick = async () => {
+    if (wiz.busy) return;
+    wiz.busy = true;
+    appendLog('launcher', t('log_pnpm_install_manual'));
+    renderWiz();
+    setWizProgress(true, t('wiz_install_pnpm_progress'));
+    $('wiz-log').classList.remove('hidden');
+    try {
+      await invoke('setup_install_pnpm');
+    } catch (e) {
+      wiz.busy = false;
+      setWizProgress(false);
+      renderWiz();
+      $('wiz-log').classList.remove('hidden');
+      toast(String(e), true);
+    }
+  };
+  $('wiz-btn-recheck-pnpm').onclick = () => wizDetect();
   // 官网链接用事件委托：applyDom 重写 html 后 <a> 会被重建，直接绑会丢
   $('setup-wizard').addEventListener('click', (ev) => {
     const a = ev.target.closest('a#wiz-open-node-page');

@@ -366,6 +366,7 @@
       <div class="setup-desc" data-i18n-html="wiz_desc_html">
         本程序<b>不内置 Node.js 和 DSH</b>，需要本机已安装：<br />
         ① <b>Node.js</b>（含 npm，建议 LTS 版）　② <b>DSH</b>（npm 包 <code>@deepseek-ai/dsh</code>）<br />
+        ③ <b>pnpm</b>（可选：装好后用它安装 DSH 插件；检测到 Node 也会检查它）<br />
         已装好可直接点「完成」；缺什么可用下方按钮引导安装，也可以跳过后自行安装。
       </div>
 
@@ -375,6 +376,7 @@
           <tr><td data-i18n="lbl_node">Node.js</td><td id="wiz-node-flag" data-i18n="wiz_detecting_row">检测中…</td><td id="wiz-node-path" class="mono"></td></tr>
           <tr><td data-i18n="lbl_npm">npm</td><td id="wiz-npm-flag" data-i18n="wiz_detecting_row">检测中…</td><td id="wiz-npm-path" class="mono"></td></tr>
           <tr><td data-i18n="lbl_dsh">DSH</td><td id="wiz-dsh-flag" data-i18n="wiz_detecting_row">检测中…</td><td id="wiz-dsh-path" class="mono"></td></tr>
+          <tr><td data-i18n="lbl_pnpm">pnpm</td><td id="wiz-pnpm-flag" data-i18n="wiz_detecting_row">检测中…</td><td id="wiz-pnpm-path" class="mono"></td></tr>
         </tbody>
       </table>
 
@@ -464,6 +466,24 @@
           </div>
         </label>
         <div class="wiz-warn-note" data-i18n="wiz_dsh_dir_note">这是 npm 的全局目录：改成 D:\dsh 之类即可装到别的盘（清空则用 npm 默认目录）。装到自定义目录后会自动把该目录加入你的用户 PATH（终端里也能直接用 dsh，不改系统 PATH）。</div>
+      </div>
+
+      <!-- 缺少 pnpm 的引导步骤：**只在 Node 已就绪而 pnpm 缺失时**出现。
+           pnpm 不阻断 DSH 启动，它的意义是「DSH 装好之后用它安装插件」；
+           另一条入口是后端自动的 —— 首次一键装完 Node 会紧接着执行
+           `npm install -g pnpm`（见 process.rs::pnpm_note_after_node_install），
+           所以这一步主要服务「Node 本来就有 / 手动装的 Node」这类机器。 -->
+      <div id="wiz-step-pnpm" class="wiz-step hidden">
+        <div class="wiz-step-title" data-i18n="wiz_step_pnpm_title">缺少 pnpm</div>
+        <div class="wiz-step-body" data-i18n-html="wiz_step_pnpm_body_html">
+          将执行以下命令全局安装 pnpm（之后可用它安装 DSH 插件）：
+          <code id="wiz-pnpm-cmd" class="block-code"></code>
+          可由程序代为执行并显示输出；pnpm 不是必需的，也可以点下方「完成」跳过。
+        </div>
+        <div class="row gap left">
+          <button id="wiz-btn-install-pnpm" class="btn primary" data-i18n="wiz_btn_install_pnpm">一键安装 pnpm</button>
+          <button id="wiz-btn-recheck-pnpm" class="btn" data-i18n="wiz_btn_recheck">重新检测</button>
+        </div>
       </div>
 
       <div id="wiz-progress" class="wiz-progress hidden">

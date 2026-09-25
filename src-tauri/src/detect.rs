@@ -20,6 +20,9 @@ pub struct EnvPaths {
     pub node: Option<PathBuf>,
     pub npm: Option<PathBuf>,
     pub dsh: Option<PathBuf>,
+    /// pnpm（`npm install -g pnpm` 的产物；首装向导据此提示/代装，
+    /// 以便 DSH 装好后能用它安装插件）
+    pub pnpm: Option<PathBuf>,
 }
 
 static CACHE: OnceLock<Mutex<Arc<EnvPaths>>> = OnceLock::new();
@@ -55,6 +58,7 @@ fn scan() -> EnvPaths {
         node: find_node_exe(),
         npm: find_npm_cmd(),
         dsh: find_dsh_cmd(),
+        pnpm: find_pnpm_cmd(),
     }
 }
 
@@ -150,7 +154,38 @@ pub fn find_npm_cmd() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
-/// 用户在向导里给 DSH 指定的**自定义安装位置**（npm 的全局目录），进程内登记在这里。
+/// 定位 pnpm（`pnpm.cmd` / `pnpm.exe`）。
+///
+/// 查找顺序与 `find_dsh_cmd` 完全同款，理由也相同：
+///   1. `where`（当前进程 PATH，= 用户同一时刻的终端所见）；
+///   2. 注册表 PATH 里的目录 —— 补上「本进程环境块是旧快照」这一类
+///      （刚装完 Node / 刚装完 pnpm 的同一次运行里，`where` 还看不见新目录）；
+///   3. npm 的全局 bin 目录兜底（`%APPDATA%\npm`、向导登记的自定义目录、node 同目录）。
+///
+/// 为什么同时认 `pnpm.exe`：除 `npm install -g pnpm`（写 `pnpm.cmd` 进 npm 全局目录）
+/// 之外，pnpm 官方独立安装版装的是 `pnpm.exe`（默认 `%LOCALAPPDATA%\pnpm`），
+/// 那种情况下 `where pnpm.cmd` 必然落空。
+pub fn find_pnpm_cmd() -> Option<PathBuf> {
+    for name in ["pnpm.cmd", "pnpm.exe"] {
+        if let Some(p) = where_lookup(name) {
+            return Some(p);
+        }
+    }
+    for name in ["pnpm.cmd", "pnpm.exe"] {
+        if let Some(p) = find_in_dirs(&registry_path_dirs(), name) {
+            return Some(p);
+        }
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for dir in npm_global_bin_dirs() {
+        candidates.push(dir.join("pnpm.cmd"));
+        candidates.push(dir.join("pnpm.exe"));
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// 用户在向导里指定的**自定义安装位置**（npm 的全局目录），进程内登记在这里。
+/// 两个来源：DSH 的自定义安装位置、pnpm 落在的 npm 自定义全局目录（见 add_extra_bin_dir）。
 ///
 /// 为什么需要这份登记：npm 的 `--prefix <目录>` 只负责把 dsh.cmd 写进那个目录，
 /// **不会**把它加进 PATH，而本进程的路径探测（`where dsh`）与 `%APPDATA%\npm`
@@ -172,6 +207,23 @@ pub fn set_extra_bin_dirs(dirs: Vec<PathBuf>) {
             return;
         }
         *guard = wanted;
+    }
+    invalidate_cache();
+}
+
+/// **追加**一个 bin 目录（不动已登记的那些）。
+///
+/// 与 `set_extra_bin_dirs` 的区别就是「追加 vs 覆盖」：pnpm 装进 npm 的自定义全局目录
+/// （`.npmrc` 里配过 `prefix`）时用它登记 —— 那个目录通常不在 PATH 里，不登记的话
+/// 向导会一直显示「缺少 pnpm」，即便我们刚刚亲手把它装上。而 DSH 那边可能同时登记着
+/// 另一个自定义目录，覆盖过去会把 DSH 的登记抹掉。
+pub fn add_extra_bin_dir(dir: PathBuf) {
+    {
+        let mut guard = extra_bin_dirs_slot().lock().unwrap();
+        if guard.iter().any(|d| dir_key(d) == dir_key(&dir)) {
+            return; // 已在列表里：什么都不用改，也不必丢缓存
+        }
+        guard.push(dir);
     }
     invalidate_cache();
 }
@@ -837,7 +889,7 @@ pub fn child_path_for(exes: &[&str]) -> std::ffi::OsString {
     }
     dirs.extend(npm_global_bin_dirs());
     let cached = detect_all(false);
-    for p in [&cached.node, &cached.npm, &cached.dsh] {
+    for p in [&cached.node, &cached.npm, &cached.dsh, &cached.pnpm] {
         if let Some(p) = p {
             if let Some(d) = p.parent() {
                 dirs.push(d.to_path_buf());
@@ -970,6 +1022,10 @@ pub struct EnvDetection {
     pub node_min_version: String,
     pub npm_found: bool,
     pub npm_path: String,
+    /// pnpm 是否可用（首装向导据此在「Node 已就绪」时提示/代装 pnpm ——
+    /// 它是之后安装 DSH 插件要用的包管理器，缺失不阻断 DSH 启动）
+    pub pnpm_found: bool,
+    pub pnpm_path: String,
     pub dsh_found: bool,
     pub dsh_path: String,
     /// 引导安装将下载的官方 Node.js LTS MSI 地址（展示用）
@@ -1020,6 +1076,8 @@ pub fn full_detect() -> EnvDetection {
         node_min_version: NODE_MIN_VERSION_LABEL.to_string(),
         npm_found: paths.npm.is_some(),
         npm_path: opt_to_string(&paths.npm),
+        pnpm_found: paths.pnpm.is_some(),
+        pnpm_path: opt_to_string(&paths.pnpm),
         dsh_found: paths.dsh.is_some(),
         dsh_path: opt_to_string(&paths.dsh),
         node_msi_url: node_msi_url(),

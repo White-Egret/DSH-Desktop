@@ -83,6 +83,8 @@ pub fn run(launched_by_autostart: bool) {
             // 首次运行引导安装
             process::setup_install_node,
             process::setup_install_dsh,
+            // 向导「缺少 pnpm」一步：`npm install -g pnpm`（Node 自动安装成功后也会自动补装）
+            process::setup_install_pnpm,
             process::finish_setup,
             process::set_language,
             // 首次运行向导的「Node 版本过低」告警：保留旧版本并继续（只写 node_min_ack 一个键）

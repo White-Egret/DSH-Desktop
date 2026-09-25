@@ -318,7 +318,7 @@ pub struct SetupStatus {
     pub message: String,
 }
 
-/// 首次运行引导安装：最终结果（target = node | dsh）
+/// 首次运行引导安装：最终结果（target = node | dsh | pnpm）
 #[derive(Clone, Serialize)]
 pub struct SetupResult {
     pub target: String,
@@ -2738,6 +2738,21 @@ pub async fn setup_install_node(app: AppHandle, dir: Option<String>) -> Result<(
     let app2 = app.clone();
     std::thread::spawn(move || {
         let outcome = install_node_blocking(&app2, target.as_deref());
+        let outcome = match outcome {
+            // Node 装好后**自动补装 pnpm**（用户拍板的流程：首装 Node 成功即执行
+            // `npm install -g pnpm`，好让 DSH 装好后能用它安装插件）。
+            // 补装的任何结果都只作为追加提示：pnpm 没装上不能把「Node 已装好」
+            // 改判成失败 —— 两者是各自独立的事实。
+            Ok(msg) => {
+                let note = pnpm_note_after_node_install(&app2);
+                Ok(if note.is_empty() {
+                    msg
+                } else {
+                    format!("{}\n{}", msg, note)
+                })
+            }
+            Err(e) => Err(e),
+        };
         let (ok, msg) = match outcome {
             Ok(m) => (true, m),
             Err(e) => (false, e),
@@ -2765,6 +2780,140 @@ pub async fn setup_install_node(app: AppHandle, dir: Option<String>) -> Result<(
 /// （上限同时是读入内存前的一道保险，避免用任意大的文件把内存打满）。
 const NODE_MSI_MIN_BYTES: u64 = 10 * 1024 * 1024;
 const NODE_MSI_MAX_BYTES: u64 = 200 * 1024 * 1024;
+
+// ---------- 引导安装 pnpm（Node 就绪后补装，供之后安装 DSH 插件使用） ----------
+//
+// 两条入口，共用同一个 install_pnpm_blocking：
+//   ① 向导「缺少 pnpm」一步的一键安装（setup_install_pnpm，自己占 setup_busy）；
+//   ② 首次自动安装 Node 成功之后的补装（跑在 Node 那条线程里，setup_busy 已被
+//      Node 占着 —— 所以下面这些函数**不碰任何状态标志**，只干活）。
+
+/// `npm install -g pnpm` 并**核对装完能探测到 pnpm** 才算成功。
+///
+/// 为什么不能只看退出码：与 Node/DSH 同一条教训 —— npm 报告成功 ≠ 终端里能用
+/// （npm 的全局目录不在 PATH、或 `.npmrc` 配了 prefix 落到别处时，两者会分家）。
+/// 成功时返回 pnpm 的实际路径（展示用）。
+fn install_pnpm_blocking(app: &AppHandle) -> Result<String, String> {
+    let npm = detect::find_npm_cmd()
+        .ok_or_else(|| i18n::t("setup_pnpm_npm_missing").to_string())?;
+    let npm_s = npm.to_string_lossy().to_string();
+    let args: Vec<String> = vec![
+        "install".to_string(),
+        "-g".to_string(),
+        "pnpm".to_string(),
+    ];
+    setup_progress(app, "install", &i18n::fmt("setup_pnpm_executing", &[&npm_s]));
+    // 复用 run_cmd_capture：它已经带超时、不弹窗口，并给子进程补 PATH
+    // （刚装完 Node 时本进程 PATH 还是旧快照，裸 `node` 要靠它才能被解析到）。
+    // pnpm 很小（几 MB），10 分钟是宽松上限，只为网络极差时能自己收场。
+    let (ok, out) = run_cmd_capture(&npm_s, &args, "", Duration::from_secs(10 * 60))?;
+    // 输出落盘：成功也留痕（排查「装到哪去了」时唯一能查到的现场）
+    if !out.trim().is_empty() {
+        logger::append_line(
+            &logger::desktop_log_path(app),
+            &format!("[setup][pnpm] {}", out.trim()),
+        );
+    }
+    if !ok {
+        return Err(i18n::fmt("setup_pnpm_fail", &[&output_tail(&out)]));
+    }
+
+    setup_progress(app, "verify", i18n::t("setup_pnpm_verifying"));
+    detect::invalidate_cache();
+    if let Some(p) = detect::find_pnpm_cmd() {
+        let path = p.to_string_lossy().to_string();
+        setup_progress(app, "verify", &i18n::fmt("setup_pnpm_detected", &[&path]));
+        return Ok(path);
+    }
+    // npm 的全局目录不在 PATH 里（`.npmrc` 配过 prefix 之类）：直接到那儿找，
+    // 找到就登记为额外 bin 目录 —— 否则向导会一直显示「缺少 pnpm」，
+    // 哪怕我们刚刚亲手把它装上（与 DSH 自定义安装位置同一条处理逻辑）。
+    let prefix = detect::default_npm_prefix();
+    if !prefix.is_empty() {
+        let hit = ["pnpm.cmd", "pnpm.exe"]
+            .iter()
+            .map(|n| Path::new(&prefix).join(*n))
+            .find(|p| p.is_file());
+        if let Some(p) = hit {
+            let path = p.to_string_lossy().to_string();
+            detect::add_extra_bin_dir(PathBuf::from(&prefix));
+            setup_progress(app, "verify", &i18n::fmt("setup_pnpm_detected", &[&path]));
+            return Ok(path);
+        }
+    }
+    Err(i18n::t("setup_pnpm_notfound").to_string())
+}
+
+/// 失败提示里带的输出片段：**末尾**若干字符，压成单行。
+///
+/// 取末尾：npm 的报错（EACCES / ENOTFOUND / 网络错误）总是打在最后，取头部只会拿到
+/// 「npm warn …」这类噪声。压成单行：结果提示是一行文本，原始输出里的换行与连续空白
+/// 只会把它撑成好几行、把真正的原因挤出视野（完整输出已经原样写进 desktop.log，
+/// 见上面那行 `[setup][pnpm]`）。截断则是为了别把整屏 ANSI 转义塞进 toast。
+fn output_tail(out: &str) -> String {
+    const MAX: usize = 400;
+    let flat = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    let len = flat.chars().count();
+    if len <= MAX {
+        return flat;
+    }
+    format!("…{}", flat.chars().skip(len - MAX).collect::<String>())
+}
+
+/// 首次自动安装 Node 成功后的 pnpm 补装，返回要拼进成功提示的附加行。
+///
+/// - 本机已有 pnpm → 空串（什么都不用做，也别去动它）；
+/// - 刚装好 → `setup_pnpm_auto_ok`（带实际路径）；
+/// - 失败 → `setup_pnpm_auto_fail`（**不改判 Node 的结果**，只告诉用户可去向导重试）。
+fn pnpm_note_after_node_install(app: &AppHandle) -> String {
+    if detect::find_pnpm_cmd().is_some() {
+        return String::new();
+    }
+    match install_pnpm_blocking(app) {
+        Ok(path) => i18n::fmt("setup_pnpm_auto_ok", &[&path]),
+        Err(e) => i18n::fmt("setup_pnpm_auto_fail", &[&e]),
+    }
+}
+
+/// 向导「缺少 pnpm」一步的一键安装：`npm install -g pnpm`。
+///
+/// 与 setup_install_node 共用 setup_busy（同一时刻只允许一个引导安装任务）；
+/// 结果经 setup-result（target = "pnpm"）事件回传，进度走 setup-status。
+/// pnpm **不加 `--prefix`**：它要装进 npm 自己的全局目录 —— 那通常就在 PATH 里，
+/// 装到别处反而要额外处理 PATH（DSH 那步的「安装位置」是另一回事）。
+#[tauri::command]
+pub async fn setup_install_pnpm(app: AppHandle) -> Result<(), String> {
+    {
+        let state = app.state::<AppState>();
+        if state.setup_busy.swap(true, Ordering::SeqCst) {
+            return Err(i18n::t("err_setup_busy").to_string());
+        }
+    }
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let outcome = install_pnpm_blocking(&app2);
+        let (ok, msg) = match outcome {
+            Ok(m) => (true, m),
+            Err(e) => (false, e),
+        };
+        logger::append_line(
+            &logger::desktop_log_path(&app2),
+            &i18n::fmt(
+                "setup_pnpm_result_line",
+                &[
+                    &i18n::t(if ok { "setup_word_ok" } else { "setup_word_fail" }),
+                    &msg,
+                ],
+            ),
+        );
+        let _ = app2.emit(
+            "setup-result",
+            SetupResult { target: "pnpm".to_string(), success: ok, message: msg },
+        );
+        app2.state::<AppState>().setup_busy.store(false, Ordering::SeqCst);
+    });
+    Ok(())
+}
 
 // ---------- 官方安装包的完整性校验（MEDIUM-2 修复） ----------
 //
@@ -4350,6 +4499,25 @@ mod tests {
             heights.len() >= 2,
             "高度应当随 top 变化（收起时铺满整窗、展开时让出工具栏），实际只有 {heights:?}"
         );
+    }
+
+    /// pnpm 安装失败时塞进提示里的输出片段：压成单行 + 取末尾 + 超长截断。
+    /// 这段文本会直接进 toast / setup 结果行（一行文本），原始输出里的换行会把它
+    /// 撑成一屏，把真正的原因挤出视野；完整输出另有 [setup][pnpm] 一行落在 desktop.log。
+    #[test]
+    fn output_tail_flattens_and_keeps_the_end() {
+        assert_eq!(output_tail(""), "");
+        // 空白（含换行、缩进）压成单个空格；npm 的报错在末尾，所以保留的是它
+        assert_eq!(
+            output_tail("  npm error code EACCES \n  npm error path C:\\x \n"),
+            "npm error code EACCES npm error path C:\\x"
+        );
+        // 超长：先压平再取末尾 400 字符，并用省略号标出被截掉的开头
+        let long = format!("{}TAIL", "a ".repeat(500));
+        let t = output_tail(&long);
+        assert!(t.starts_with('…'), "截断时应有省略号标记: {t}");
+        assert!(t.ends_with("TAIL"), "末尾（真正的报错）必须保留: {t}");
+        assert!(t.chars().count() <= 401, "截断后长度应受控: {}", t.chars().count());
     }
 
     /// 引导安装 DSH 的参数表：`--prefix` / `--cache` 只能出现在「-g 之后、包名之前」，

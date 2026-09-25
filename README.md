@@ -31,7 +31,7 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 - Version check against both npm dist-tags (`npm view <pkg> dist-tags`); the toolbar flags "update available" when your install trails the newest channel
 - Close-to-tray or quit-on-close behavior (configurable); tray menu with Show Main Window / Start with Windows / Exit; tray restore does show + unminimize + set_focus
 - Start with Windows (official autostart plugin, HKCU registry only, no admin rights); autostart runs silently in tray and delays DSH launch by 12 s to avoid the boot-time IO spike
-- First-run setup wizard: detects Node.js/npm/DSH and can guide installation (official nodejs.org LTS installer download or `npm install -g @deepseek-ai/dsh`), with a **choosable Node.js / DSH install location** (e.g. onto another drive) — fully skippable
+- First-run setup wizard: detects Node.js/npm/DSH/pnpm and can guide installation (official nodejs.org LTS installer download or `npm install -g @deepseek-ai/dsh`), with a **choosable Node.js / DSH install location** (e.g. onto another drive) — fully skippable. Once Node.js is found it also checks **pnpm** and offers a one-click install; the guided Node.js install **automatically runs `npm install -g pnpm`** afterwards (so DSH plugins can be installed later)
 - **Node.js minimum-version guard (22.19.0)**: detects an installed-but-too-old Node.js, warns with the exact versions, offers a one-click upgrade to the official LTS (same verified installer flow), keeps a "download it myself" link and a "keep this version and continue" escape hatch, and refuses to start DSH with a plain-language reason instead of letting it die on an opaque error — see [Node.js version check](#nodejs-version-check)
 - **Bilingual UI (Chinese / English)**: choose a language in Preferences; the whole launcher (toolbar, status, dialogs, logs, tray menu) switches, and DSH's own web UI follows via its `settings.yaml`
 - **Light / Dark / Follow-system appearance**: pick it in Preferences; the launcher (toolbar, dialogs, wizard, native title bar) and the embedded DSH page switch together through `ui-theme.preference` in DSH's `settings.yaml` — open DSH pages follow **live, no DSH restart needed**
@@ -47,10 +47,11 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 | WebView2 Runtime | Usually preinstalled with Edge on Windows 10/11; installers bootstrap it if missing |
 | Node.js | **22.19.0 or newer** (DSH's runtime floor). **Not bundled.** |
 | DSH | Installed globally via npm. **Not bundled.** |
+| pnpm | **Optional**: the wizard checks it once Node.js is found and offers a one-click install (also installed automatically after a guided Node.js install). DSH does not depend on it. |
 
 ## Prerequisites
 
-You need both of these before DSH Desktop can start a service:
+You need these before DSH Desktop can start a service (only the first two are required):
 
 1. **Node.js** (with npm) — install the official LTS from <https://nodejs.org/en/download>. **22.19.0 or newer is required** (see [Node.js version check](#nodejs-version-check)).
 2. **DSH** — install globally:
@@ -58,6 +59,14 @@ You need both of these before DSH Desktop can start a service:
    ```bash
    npm install -g @deepseek-ai/dsh
    ```
+
+3. **pnpm (optional, not required)** — used later to install DSH plugins:
+
+   ```bash
+   npm install -g pnpm
+   ```
+
+   The first-run wizard checks pnpm once Node is found and offers a one-click install; if you let the app install Node.js for you, it runs the command above **automatically** right after the Node install. DSH itself does not depend on pnpm — skipping it changes nothing.
 
 Verify manually if you like:
 
@@ -67,7 +76,7 @@ npm --version
 dsh --version
 ```
 
-If anything is missing when the app starts, it shows a clear error (which component was not found, where it looked, and how to fix it) instead of waiting forever. The first-run wizard can also do this for you: it detects the environment and offers to run the official Node.js LTS installer (downloaded from nodejs.org at runtime, never bundled) or to execute `npm install -g @deepseek-ai/dsh` for you. Every guided step is skippable ("稍后手动安装" / skip), and every failure mode (no network, download failed, permission denied, user cancelled) is reported explicitly.
+If anything is missing when the app starts, it shows a clear error (which component was not found, where it looked, and how to fix it) instead of waiting forever. The first-run wizard can also do this for you: it detects the environment (Node.js / npm / DSH / pnpm) and offers to run the official Node.js LTS installer (downloaded from nodejs.org at runtime, never bundled) or to execute `npm install -g @deepseek-ai/dsh` for you. **Once Node.js is detected, pnpm is checked too**: the wizard shows a "pnpm is missing" step with a one-click install, and **choosing the guided Node.js install also installs pnpm automatically afterwards** (`npm install -g pnpm`) so you can install DSH plugins later. Every guided step is skippable ("稍后手动安装" / skip), and every failure mode (no network, download failed, permission denied, user cancelled) is reported explicitly.
 
 ### Choosing where Node.js gets installed
 
@@ -179,9 +188,10 @@ Artifacts land in `src-tauri/target/release/bundle/nsis/`, `.../msi/`, and the r
 ## Usage
 
 1. Install/start **DSH Desktop**. Default window is 1376×774.
-2. On first run the setup wizard checks Node.js / npm / DSH:
+2. On first run the setup wizard checks Node.js / npm / DSH / pnpm:
    - Everything installed → click "完成，进入主界面" (done).
    - Something missing → use the guided buttons or skip and continue to the main UI anyway.
+   - Node.js present but **pnpm** missing → an extra "pnpm is missing" step offers a one-click install (optional; DSH starts fine without it).
 3. Click **▶ 启动 (Start)** (or let the app auto-start DSH): status shows "starting… waited X s", then the DSH page embeds seamlessly once ready.
 4. Toolbar right side always shows: status dot · current port · version info (with an "update available" badge when a newer `latest` / `next` exists — see [Version check](#version-check-latest-vs-next)).
 5. Closing the window hides to tray by default (configurable); use the tray icon or menu to bring it back; tray menu **退出 (Exit)** truly quits and stops the DSH process tree this app started.
@@ -192,6 +202,7 @@ Example commands the app effectively runs (using your configured values):
 Default DSH web URL:      http://127.0.0.1:3080
 Example DSH start command: dsh web --port 3080
 Example global install:    npm install -g @deepseek-ai/dsh
+Example pnpm install:      npm install -g pnpm
 ```
 
 ## Configuration

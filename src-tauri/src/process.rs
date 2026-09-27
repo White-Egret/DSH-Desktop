@@ -3879,7 +3879,7 @@ fn fetch_python_installer_sha256(
 /// 打不开 / 读不满两字节一律返回 false —— 那种情况交给 `read_download_text`
 /// 报真正的读盘错误，这里抢答反而会把错误埋掉。
 fn file_starts_with_gzip(path: &Path) -> bool {
-    use std::io::Read;
+    // `Read` 已在模块顶部 use（第 4 行），这里不再重复引入
     let mut head = [0u8; 2];
     let Ok(mut f) = std::fs::File::open(path) else {
         return false;
@@ -3963,24 +3963,83 @@ fn extract_sha256_for_file(html: &str, file_name: &str) -> Option<String> {
     None
 }
 
-/// 去掉一段 HTML 里的所有标签（`<…>`），只留标签之间的文本。
+/// 去掉一段 HTML 里的标签，只留标签之间的文本，并按标签**是不是行内**决定要不要
+/// 补一个空格当边界：
 ///
-/// 用途只有一个：让被 `<wbr>`、`<span>` 切开的校验和重新接上。属性里再像哈希的内容
-/// 也随标签一起被删掉，所以不会引入新的可乘之机；若遇到没有闭合 `>` 的残缺标签，
-/// 剩下的文本一律丢弃 —— 少几个字符顶多让提取返回 None（调用方中止安装），
-/// 绝不会因为「猜标签到哪儿结束」而拼出一个假的哈希。
+/// - **结构行外**（`td`/`th`/`tr`/`div`/`p`/`a`/`br`… 以及任何不认识的标签）→ 补空格。
+///   不补会把相邻两格的文本直接粘起来，两个方向都出过事：
+///   文件名 `…amd64.exe` 的词尾 `e` 与隔壁格 63 位的短串粘成**恰好 64 位**，会被当成
+///   哈希接受（既有单测 `release_page_sha256_comes_from_the_files_own_row` 盯的就是这条）；
+///   而单元格以 `31.7 MB` 结尾时，又会把哈希顶成 65 位而被拒 —— 真实页面这次是靠
+///   HTML 缩进里的空白侥幸逃过的，不能赌。
+/// - **行内**（`wbr`/`span`/`code`/`b`…）→ 直接消失。python.org 正是用 `<wbr>` 把
+///   校验和切成四段、再套两层 `<span>`：补空格会把哈希切碎，删掉才拼得回。
+///
+/// 不认识的标签一律按边界处理：宁可多断一次也不断错方向 —— 断错顶多让提取返回 None
+/// （调用方中止安装），而「该断没断」会拼出一个 64 位的假哈希去参与比对。
 fn strip_html_tags(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_tag = false;
+    let mut tag = String::new();
     for c in s.chars() {
         match c {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
+            '<' => {
+                in_tag = true;
+                tag.clear();
+            }
+            '>' if in_tag => {
+                in_tag = false;
+                if !is_inline_html_tag(&tag) {
+                    out.push(' ');
+                }
+                tag.clear();
+            }
+            _ if in_tag => tag.push(c),
+            _ => out.push(c),
         }
     }
     out
+}
+
+/// 标签是否行内（不该产生文本边界）。
+///
+/// 标签名取 `<…>` 里开头那段字母数字，去掉前导空白与闭合斜杠后小写比较。
+/// 取不到名字（`<` 后面直接是标点、HTML 注释之类）返回 false = 按边界处理，
+/// 理由见 `strip_html_tags` 的注释。
+fn is_inline_html_tag(tag: &str) -> bool {
+    let name: String = tag
+        .trim_start()
+        .trim_start_matches('/')
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    // 只列「纯排版」标签：它们要么出现在文本内部，要么**就长在校验和中间**（wbr）
+    matches!(
+        name.as_str(),
+        "wbr" | "span"
+            | "code"
+            | "b"
+            | "i"
+            | "em"
+            | "strong"
+            | "u"
+            | "s"
+            | "small"
+            | "sub"
+            | "sup"
+            | "font"
+            | "tt"
+            | "kbd"
+            | "samp"
+            | "var"
+            | "cite"
+            | "q"
+            | "abbr"
+            | "time"
+            | "mark"
+            | "big"
+    )
 }
 
 /// 运行官方安装程序并等待退出，返回退出码。
@@ -4200,13 +4259,29 @@ fn fetch_expected_sha256(dir: &Path, version: &str, msi_name: &str) -> Result<St
     let dest = dir.join("SHASUMS256.txt");
 
     let mut curl_err = String::new();
-    let downloaded = try_download_curl(&url, &dest, &mut curl_err, None, &page)
-        || try_download_powershell(&url, &dest, &page).is_ok();
+    let mut ps_err = String::new();
+    let mut downloaded = try_download_curl(&url, &dest, &mut curl_err, None, &page);
+    // 与发布页那条路同一道防线（原来只有发布页有，这条是复核指出的不对称）：
+    // curl 报成功但落盘的是**没解开的 gzip** 就当失败，交给 PowerShell 兜底重取一次。
+    // 校验清单是「必须读到内容」的关键路径，不该因为一次编码故障就直接把用户堵死在中止上。
+    if downloaded && file_starts_with_gzip(&dest) {
+        downloaded = false;
+    }
     if !downloaded {
-        let detail = if curl_err.trim().is_empty() {
-            i18n::t("setup_no_dl_tool").to_string()
-        } else {
+        match try_download_powershell(&url, &dest, &page) {
+            Ok(()) => downloaded = true,
+            Err(e) => ps_err = e,
+        }
+    }
+    if !downloaded {
+        // 优先给 curl 的失败原因（最具体）；gzip 那条路上 curl 是「成功」的，
+        // 此时 curl_err 为空，改用 PowerShell 的失败原因
+        let detail = if !curl_err.trim().is_empty() {
             curl_err
+        } else if !ps_err.trim().is_empty() {
+            ps_err
+        } else {
+            i18n::t("setup_no_dl_tool").to_string()
         };
         return Err(i18n::fmt("setup_verify_dl_fail", &[&detail, &page]));
     }
@@ -4562,7 +4637,10 @@ fn mb_str(bytes: u64) -> String {
 fn emit_download_progress(app: &AppHandle, done: u64, total: Option<u64>) {
     let msg = match total {
         Some(t) if t > 0 => {
-            let pct = (((done as f64) / (t as f64)) * 100.0).round().max(0.0) as u64;
+            // 卡在 0..100：探大小那次 HEAD 不带 `--compressed`，而 GET 现在带 ——
+            // 万一源站对某个文件也回压缩，已落盘（解压后）字节数就会超过 HEAD 看到的
+            // 压缩长度，算出 >100% 的进度（甚至「53.6 / 11.5 MB」这种自相矛盾的显示）。
+            let pct = (((done as f64) / (t as f64)) * 100.0).round().clamp(0.0, 100.0) as u64;
             i18n::fmt("setup_dl_progress", &[&pct, &mb_str(done), &mb_str(t)])
         }
         _ => i18n::fmt("setup_dl_progress_unknown", &[&mb_str(done)]),

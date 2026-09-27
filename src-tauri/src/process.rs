@@ -2073,8 +2073,9 @@ pub struct HomeEnvReport {
     pub changed: bool,
 }
 
-/// 首选项「把家目录写入用户环境变量 DSH_HOME」：按开关把家目录同步进
-/// `HKCU\Environment`，返回一条**说清到底动没动**的消息，由前端直接提示。
+/// 用户环境变量 DSH_HOME 的**自动同步（首选项没有开关）**：家目录不是默认值 →
+/// 保存后写进 `HKCU\Environment`，让**用户另外打开的终端**里的 `dsh` 也用同一个家目录；
+/// 家目录改回默认值 → 按归属规则删值。返回一条**说清到底动没动**的消息，由前端直接提示。
 ///
 /// 为什么单独一条命令、而不是并进 save_config：这一步会 spawn `reg.exe` 动用户环境，
 /// 失败原因（注册表被策略锁定、权限不足）值得单独报给用户；而 save_config 是同步命令，
@@ -2082,12 +2083,12 @@ pub struct HomeEnvReport {
 /// 保存被校验拦下时一个字节都不该动。
 ///
 /// 参数刻意用单词名（Tauri 的 snake/camel 转换在多词参数上最容易对不上键名）：
-/// - `dir`  = 开关打开时的家目录（`None` = 关闭开关）；
-/// - `prev` = **本次保存之前**配置里的家目录（前端覆盖 config 前记下来）：关闭开关时
-///   用它认领「上一次保存写进去的值」，否则「同一时刻既改家目录又关开关」会把旧值
+/// - `dir`  = 保存后的家目录（是否写入由 `config::is_default_home_dir` 当场判断）；
+/// - `prev` = **本次保存之前**配置里的家目录（前端覆盖 config 前记下来）：改回默认值
+///   时用它认领「上一次保存写进去的值」，否则"同一时刻既改家目录又回到默认"会把旧值
 ///   留在注册表里没人清。
 ///
-/// 归属规则：只删指向本程序配置过的家目录的值，用户自己设的别的值一律原样保留
+/// 归属规则：只删指向本程序配置过的家目录的值，用户自己 setx 的别的值一律原样保留
 /// （决策内核 detect::plan_home_env，边界用例见它的单测）。
 /// 安全模式不受影响：它启动时用 `cmd.env("DSH_HOME", …)` 覆盖继承值，安全家目录
 /// 还另由 USERPROFILE 推导（safe.rs），所以这里写入的值到不了安全实例上。
@@ -2099,7 +2100,17 @@ pub async fn apply_dsh_home_env(
 ) -> Result<HomeEnvReport, String> {
     // 与其它路径字段一样：写进注册表之前先过同一套家目录校验（非法值直接拦下）
     let desired = match dir {
-        Some(d) => Some(config::validate_home_dir(&d)?),
+        Some(d) => {
+            let v = config::validate_home_dir(&d)?;
+            // 自动规则（取代早期那个勾选框）：默认家目录没什么可同步的 —— 它本来就是
+            // 终端里 dsh 的回退目标，写进去只会把一句废话钉进注册表；于是转成"删值"，
+            // 归属规则照旧：只删本程序写过的值
+            if config::is_default_home_dir(&v) {
+                None
+            } else {
+                Some(v)
+            }
+        }
         None => None,
     };
     // 「可由本程序删除」的家目录 = 保存后的当前值 + 保存前的旧值。
@@ -3743,7 +3754,17 @@ fn resolve_latest_python_version(dir: &Path, last_err: &mut String) -> Option<St
         };
         return None;
     }
-    let html = std::fs::read_to_string(&dest).unwrap_or_default();
+    // 按文本读回（认得出裸 gzip、坏字节走 lossy，见 decode_download_bytes）。
+    // 解不出来必须如实记账：否则「页面改版了」和「内容没解压」会说成同一句话，
+    // 而这两件事的排查方向是相反的。
+    let html = match read_download_text(&dest) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = std::fs::remove_file(&dest);
+            *last_err = e;
+            return None;
+        }
+    };
     let _ = std::fs::remove_file(&dest);
 
     match find_python_version_in_downloads_page(&html) {
@@ -3817,27 +3838,77 @@ fn fetch_python_installer_sha256(
     let dest = dir.join("python-release.html");
 
     let mut curl_err = String::new();
-    let downloaded = try_download_curl(
-        &page,
-        &dest,
-        &mut curl_err,
-        None,
-        detect::PYTHON_DOWNLOAD_PAGE,
-    ) || try_download_powershell(&page, &dest, detect::PYTHON_DOWNLOAD_PAGE).is_ok();
+    let mut ps_err = String::new();
+    let mut downloaded =
+        try_download_curl(&page, &dest, &mut curl_err, None, detect::PYTHON_DOWNLOAD_PAGE);
+    // curl 会把「响应没声明压缩却塞来 gzip」的字节原样落盘（`--compressed` 只认响应头），
+    // 这种文件读文本必炸 —— 先按魔数认出来，**当失败处理**，交给下面的 PowerShell
+    // 兜底重取一次（Invoke-WebRequest 自己声明并解开压缩，通常能拿回明文）。
+    if downloaded && file_starts_with_gzip(&dest) {
+        downloaded = false;
+    }
     if !downloaded {
-        let detail = if curl_err.trim().is_empty() {
-            i18n::t("setup_no_dl_tool").to_string()
-        } else {
+        match try_download_powershell(&page, &dest, detect::PYTHON_DOWNLOAD_PAGE) {
+            Ok(()) => downloaded = true,
+            Err(e) => ps_err = e,
+        }
+    }
+    if !downloaded {
+        // 错误优先给 curl 的（最具体）；gzip 那条路上 curl 是「成功」的，此时
+        // curl_err 是空的，就用 PowerShell 的失败原因；两条都没有才落到「没下载工具」。
+        let detail = if !curl_err.trim().is_empty() {
             curl_err
+        } else if !ps_err.trim().is_empty() {
+            ps_err
+        } else {
+            i18n::t("setup_no_dl_tool").to_string()
         };
         return Err(i18n::fmt("setup_py_hash_dl_fail", &[&detail, &page]));
     }
-    let html = std::fs::read_to_string(&dest)
-        .map_err(|e| i18n::fmt("setup_py_hash_dl_fail", &[&e.to_string(), &page]))?;
+    // 按「文本」读回：认得出裸 gzip（给一句准确的话，而不是「不是 UTF-8」那种
+    // 看着像网络坏了的错），个别坏字节走 lossy —— 见 decode_download_bytes。
+    let html = read_download_text(&dest)
+        .map_err(|e| i18n::fmt("setup_py_hash_dl_fail", &[&e, &page]))?;
     let _ = std::fs::remove_file(&dest);
 
     extract_sha256_for_file(&html, file_name)
         .ok_or_else(|| i18n::fmt("setup_py_hash_missing", &[&file_name, &page]))
+}
+
+/// 文件开头是不是 gzip 魔数 `1f 8b`。
+/// 打不开 / 读不满两字节一律返回 false —— 那种情况交给 `read_download_text`
+/// 报真正的读盘错误，这里抢答反而会把错误埋掉。
+fn file_starts_with_gzip(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 2];
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    f.read_exact(&mut head).is_ok() && head == [0x1fu8, 0x8b]
+}
+
+/// 读回下载好的**文本**文件（发布页 HTML、SHASUMS 清单），解码规则见下。
+fn read_download_text(dest: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(dest).map_err(|e| e.to_string())?;
+    decode_download_bytes(&bytes)
+}
+
+/// 把下载到的字节按文本解出来。两道防线都来自真实故障：
+///
+/// 1. **裸 gzip**：python.org 的发布页（Fastly 缓存）在客户端压根没请求压缩时也回
+///    `content-encoding: gzip`，curl 没带 `--compressed` 就把压缩字节存了下来，
+///    `read_to_string` 随即抛「stream did not contain valid UTF-8」—— 用户照那句
+///    提示去「检查网络」重试多少次都没用（内容其实完整，只是没解压；浏览器能打开
+///    正是因为浏览器会按响应头解压）。这里认出 `1f 8b` 魔数，给一句准确的话。
+/// 2. **lossy 解码**：页面里混进个别非 UTF-8 字节不该让整个安装中止。
+///    这不放松任何安全性 —— 解出来的字符串只喂给哈希提取：凑不出恰好 64 位就在
+///    下一关报「找不到哈希」，凑出来了也要与实下载文件的 SHA-256 比对，对不上
+///    一律中止；而 U+FFFD 不是 ASCII，伪造不出 `<tr>` / `</tr>` / 十六进制串。
+fn decode_download_bytes(bytes: &[u8]) -> Result<String, String> {
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        return Err(i18n::t("setup_gzip_undecoded").to_string());
+    }
+    Ok(String::from_utf8_lossy(bytes).into_owned())
 }
 
 /// 从发布页 HTML 里取出 `file_name` **所在表格行**的 64 位十六进制串（小写返回）。
@@ -3848,6 +3919,9 @@ fn fetch_python_installer_sha256(
 ///     的导航/正文里提到过这个文件名时，早期实现会把窗口开到**隔壁那一行**，
 ///     取到别的文件的哈希 —— 比对必然失败，还报成「下载可能被篡改」，比报错更糟；
 ///   - 行没闭合（页面改版成 div/ul 之类）就不猜，交给调用方报「页面可能已改版」；
+///   - 行内文本**先剥标签再找**（见 `strip_html_tags`）：python.org 把哈希切成两段
+///     `<span class="checksum-half">`、每 16 位再插一个 `<wbr>`，直接在原始 HTML 上
+///     扫永远扫不到连续 64 位，会把「明明有哈希」报成「找不到哈希」；
 ///   - 只接受**恰好 64 个十六进制字符**的一段：短了不是 SHA-256，长了说明它属于别的东西。
 fn extract_sha256_for_file(html: &str, file_name: &str) -> Option<String> {
     for (idx, _) in html.match_indices(file_name) {
@@ -3864,8 +3938,12 @@ fn extract_sha256_for_file(html: &str, file_name: &str) -> Option<String> {
         let Some(end) = rest.find("</tr>") else {
             continue; // 行没闭合：不猜，宁可报「找不到哈希」
         };
-        let window = &rest[..end];
-        let chars: Vec<char> = window.chars().collect();
+        // python.org 把校验和**切碎了**再输出：两段 <span class="checksum-half">，
+        // 每 16 位还插一个 <wbr>（防超宽长串撑破页面）——原始 HTML 里压根不存在
+        // 连续的 64 位十六进制（整页搜得到 0 个）。先剥掉标签，行内文本才会重新
+        // 拼回完整哈希；属性里的内容随标签一起消失，比在原始 HTML 上扫更干净。
+        let plain = strip_html_tags(&rest[..end]);
+        let chars: Vec<char> = plain.chars().collect();
         let mut i = 0usize;
         while i < chars.len() {
             if !chars[i].is_ascii_hexdigit() {
@@ -3883,6 +3961,26 @@ fn extract_sha256_for_file(html: &str, file_name: &str) -> Option<String> {
         // 这一行里没有 64 位串（说明这个文件名出现在没有哈希的行里）：继续看它的下一次出现
     }
     None
+}
+
+/// 去掉一段 HTML 里的所有标签（`<…>`），只留标签之间的文本。
+///
+/// 用途只有一个：让被 `<wbr>`、`<span>` 切开的校验和重新接上。属性里再像哈希的内容
+/// 也随标签一起被删掉，所以不会引入新的可乘之机；若遇到没有闭合 `>` 的残缺标签，
+/// 剩下的文本一律丢弃 —— 少几个字符顶多让提取返回 None（调用方中止安装），
+/// 绝不会因为「猜标签到哪儿结束」而拼出一个假的哈希。
+fn strip_html_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// 运行官方安装程序并等待退出，返回退出码。
@@ -4112,8 +4210,9 @@ fn fetch_expected_sha256(dir: &Path, version: &str, msi_name: &str) -> Result<St
         };
         return Err(i18n::fmt("setup_verify_dl_fail", &[&detail, &page]));
     }
-    let text = std::fs::read_to_string(&dest)
-        .map_err(|e| i18n::fmt("setup_verify_dl_fail", &[&e.to_string(), &page]))?;
+    // 同发布页那条路：认得出裸 gzip、坏字节走 lossy（见 decode_download_bytes）
+    let text = read_download_text(&dest)
+        .map_err(|e| i18n::fmt("setup_verify_dl_fail", &[&e, &page]))?;
     // 去掉可能的 UTF-8 BOM：否则它会粘在第一行的哈希令牌前面，让 64 位长度校验误判
     let text = text.strip_prefix('\u{feff}').unwrap_or(text.as_str());
 
@@ -4165,7 +4264,16 @@ fn resolve_latest_lts_version(dir: &Path, last_err: &mut String) -> Option<Strin
         };
         return None;
     }
-    let text = std::fs::read_to_string(&dest).unwrap_or_default();
+    // 同发布页那条路：解不出来就如实记账并回退固定版本（默认值会把「没解压」
+    // 伪装成「清单是空的」，日志里看不出到底发生了什么）
+    let text = match read_download_text(&dest) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = std::fs::remove_file(&dest);
+            *last_err = e;
+            return None;
+        }
+    };
     let _ = std::fs::remove_file(&dest);
 
     // 清单每行形如：`<sha256>  node-v24.20.0-x64.msi`
@@ -4573,6 +4681,12 @@ fn try_download_curl(
         "--connect-timeout".into(),
         "15".into(),
         "-sS".into(), // 静默（进度由我们自己按文件大小计算），但保留错误输出
+        // 申请压缩并**由 curl 自动解压**。实测起因：python.org 的发布页（Fastly 缓存）
+        // 在客户端压根没请求压缩时也回 `content-encoding: gzip`，于是落盘的是裸 gzip，
+        // 后面读文本直接抛「stream did not contain valid UTF-8」—— 浏览器里能打开，
+        // 是因为浏览器看到这个响应头就会解压。这个开关只在**响应头声明了压缩**时解码，
+        // 对 MSI / exe / SHASUMS 这类没有 Content-Encoding 的下载没有任何副作用。
+        "--compressed".into(),
         "-o".into(),
         dest.to_string_lossy().to_string(),
         url.to_string(),
@@ -5362,6 +5476,24 @@ mod tests {
         assert_eq!(find_python_version_in_downloads_page(""), None);
     }
 
+    /// 下载内容的解码两道防线（python.org 发布页实测踩过的坑，见 decode_download_bytes）：
+    /// 裸 gzip 要被认成「没解压」，个别坏字节不能让整份文本作废。
+    #[test]
+    fn decode_download_bytes_flags_gzip_and_tolerates_bad_utf8() {
+        // gzip 魔数：curl 不带 --compressed 时，python.org 发布页落盘文件的前两字节
+        assert!(decode_download_bytes(&[0x1f, 0x8b, 0x08, 0x00]).is_err());
+        // 明文原样返回
+        assert_eq!(
+            decode_download_bytes("<tr><td>x</td></tr>".as_bytes()).unwrap(),
+            "<tr><td>x</td></tr>"
+        );
+        // 单个非 UTF-8 字节：换 U+FFFD，前后的可用内容必须保留下来
+        let out = decode_download_bytes(&[b'a', 0xff, b'b']).unwrap();
+        assert_eq!(out, "a\u{fffd}b");
+        // U+FFFD 不是 ASCII —— 提取关口认的 <tr> / 六十四位十六进制伪造不出来
+        assert!(!out.contains('<'));
+    }
+
     /// 发布页哈希抽取：只在**文件自己那一行**里找恰好 64 位的十六进制串。
     /// 找不到就返回 None（调用方中止安装），绝不能把隔壁文件的哈希算到自己头上 ——
     /// 那会让校验必然失败、或者更糟：让用户以为文件被篡改。
@@ -5391,6 +5523,34 @@ mod tests {
         // 文件根本不在页面上 → None
         assert_eq!(extract_sha256_for_file("<tr><td>other.exe</td></tr>", f), None);
         assert_eq!(extract_sha256_for_file("", f), None);
+    }
+
+    /// 真实页面结构：python.org 把哈希切成两段 `<span class="checksum-half">`，
+    /// 每 16 位再插一个 `<wbr>` —— 原始 HTML 里没有连续的 64 位十六进制。
+    /// 剥掉标签必须能拼回完整哈希；否则 gzip 那关一过，紧接着就会报「找不到 SHA-256」。
+    #[test]
+    fn release_page_hash_survives_wbr_split_in_real_markup() {
+        let f = "python-3.14.7-amd64.exe";
+        let h = "9d9eb2709ef81bf5cd30db3c2096bdbc4ea10087c22e62f27d356b36f6ae9649";
+        // 与 python.org 发布页的实际输出同构（行结构、标签名、切法都照抄）
+        let real = format!(
+            "<tr>\
+             <td><a href=\"https://www.python.org/ftp/python/3.14.7/{f}\">Windows installer</a></td>\
+             <td>Windows</td><td>Recommended</td><td>31.7 MB</td>\
+             <td><code class=\"checksum\">\
+             <span class=\"checksum-half\">{a}<wbr>{b}</span>\
+             <wbr><span class=\"checksum-half\">{c}<wbr>{d}</span>\
+             </code></td>\
+             </tr>",
+            a = &h[0..16],
+            b = &h[16..32],
+            c = &h[32..48],
+            d = &h[48..64],
+        );
+        assert_eq!(extract_sha256_for_file(&real, f).as_deref(), Some(h));
+        // 没有哈希的行仍然是 None（剥标签不会凭空造出 64 位串）
+        let no_hash = format!("<tr><td>{f}</td><td>31.7 MB</td></tr>");
+        assert_eq!(extract_sha256_for_file(&no_hash, f), None);
     }
 
     /// Python 这一侧的下载来源守卫（与 nodejs.org/dist 同一尺度）。

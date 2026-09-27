@@ -22,15 +22,14 @@ pub struct Config {
     pub dsh_path: String,
     /// DSH 家目录：DSH 摆放配置文件的地方（通过 DSH_HOME 环境变量传给 DSH）
     /// 启动进程的工作目录自动取其上一级目录；DSH 的工作区在网页内随意指定
-    pub dsh_home_dir: String,
-    /// 首选项「把家目录写入用户环境变量 DSH_HOME」（默认 false = 不写）。
-    /// 开启时由 `apply_dsh_home_env`（保存后单独调用）把 `dsh_home_dir` 写进
-    /// `HKCU\Environment\DSH_HOME`（REG_SZ），这样**用户另外打开的终端**里的 `dsh`
-    /// 也用同一个家目录；关闭时按归属规则删值 —— 只删指向本程序配置过的家目录的值，
-    /// 用户自己 setx 的别的值原样保留（决策内核见 detect::plan_home_env）。
-    /// 关键边界：它**不影响本程序自己** —— 日常启动（process.rs）与安全模式（safe.rs）
+    ///
+    /// 与它配套的用户环境变量**没有开关**（早期版本有一个「写入 DSH_HOME」勾选框，
+    /// 用户拍板改成自动）：只要这个家目录不是默认值，保存后就由 `apply_dsh_home_env`
+    /// 自动写进 `HKCU\Environment\DSH_HOME`（REG_SZ），这样**用户另外打开的终端**里的
+    /// `dsh` 也用同一个家目录；改回默认值则按归属规则删值（决策内核 detect::plan_home_env）。
+    /// 关键边界不变：它**不影响本程序自己** —— 日常启动（process.rs）与安全模式（safe.rs）
     /// 都用 `cmd.env("DSH_HOME", …)` 显式覆盖继承值，安全家目录还另由 USERPROFILE 推导。
-    pub export_home_env: bool,
+    pub dsh_home_dir: String,
     /// 「把 pnpm 的源对齐到 npm」**之前** pnpm 的源（恢复按钮要靠它原路退回）。
     /// 空串 = 没有记录（从未对齐过、或已恢复）。
     ///
@@ -100,9 +99,9 @@ impl Default for Config {
             npm_cache_dir: String::new(),
             dsh_path: String::new(),
             dsh_home_dir: default_dsh_home_dir(),
-            // 默认**不写**用户环境变量：写注册表是外部副作用（还要广播 WM_SETTINGCHANGE），
-            // 只在用户于首选项里显式打开后才做；老配置没有这个键时按 false 加载
-            export_home_env: false,
+            // 旧配置里的 `export_home_env` 键没有对应字段了：写不写 DSH_HOME 现在按
+            // 「家目录是否默认」自动决定（见 is_default_home_dir），serde 不认未知字段，
+            // 老 config.json 里那个键会被安静地忽略。
             // 还没有「对齐前的 pnpm 源」可记
             pnpm_registry_prev: String::new(),
             port: 3080,
@@ -138,6 +137,20 @@ fn default_dsh_home_dir() -> String {
         .join(".dsh")
         .to_string_lossy()
         .to_string()
+}
+
+/// 当前家目录是不是**默认值**（`%USERPROFILE%\.dsh`；大小写与尾分隔符不敏感，
+/// 比较标准与 detect::home_key 同源 —— 不另立一把尺子）。
+///
+/// 这是「要不要写用户环境变量 DSH_HOME」这条**自动规则**的唯一判据（首选项没有开关）：
+/// - 非默认 → 保存后把家目录写进 `HKCU\Environment\DSH_HOME`，让另外打开的终端里的
+///   `dsh` 也用同一个家目录；
+/// - 默认值 → 没什么可同步的（默认家目录本来就是 `dsh` 的回退目标），于是走"删值"，
+///   按归属规则只删本程序写过的值（见 detect::plan_home_env）。
+///
+/// 入参应已过 `validate_home_dir`（那里的规范化与这里的比较键互不影响，裸值也能比对）。
+pub fn is_default_home_dir(dir: &str) -> bool {
+    detect::home_key(dir) == detect::home_key(&default_dsh_home_dir())
 }
 
 /// DSH / npm 进程的工作目录：家目录的上一级（如 C:\Users\<你>\.dsh -> C:\Users\<你>）。
@@ -1726,6 +1739,20 @@ mod tests {
         let src5 = "registry=https://x/";
         assert_eq!(edit_npmrc_cache(src5, None), src5);
         assert_eq!(edit_npmrc_cache("", None), "");
+    }
+
+    /// 「家目录是不是默认值」—— 自动写用户环境变量 DSH_HOME 的**唯一判据**（没有开关）。
+    /// 大小写与尾分隔符不敏感；只要不是默认那一个目录（哪怕只多一段），一律判否。
+    #[test]
+    fn is_default_home_dir_only_matches_the_default_home() {
+        let def = default_dsh_home_dir();
+        assert!(is_default_home_dir(&def));
+        // 大小写 / 尾分隔符差异不算「换了家目录」——否则会白白重写一次注册表
+        assert!(is_default_home_dir(&format!("{}\\", def.to_uppercase())));
+        // 只多一段就不是默认（不假设 CI 上 USERPROFILE 具体是什么）
+        assert!(!is_default_home_dir(&format!("{}x", def)));
+        // 本机实际用的家目录 → 非默认 → 保存后要写 DSH_HOME
+        assert!(!is_default_home_dir(r"D:\DSH\AppData"));
     }
 
     /// 源地址校验：护栏只拦「写进去与读出来不一致」的形态（非 http(s)、空白、

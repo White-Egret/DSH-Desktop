@@ -186,6 +186,9 @@ pub fn t(key: &str) -> &'static str {
         "err_lang_persist_fail" => if en { "[launcher] Failed to persist the language choice: {0}" } else { "[launcher] 语言选择保存失败: {0}" },
         "setup_curl_fallback" => if en { "curl download unavailable ({0}); falling back to PowerShell..." } else { "curl 下载不可用（{0}），改用 PowerShell…" },
         "setup_no_dl_tool" => if en { "No usable download tool found" } else { "未找到可用的下载工具" },
+        // 只在「响应没声明压缩却塞来 gzip」时出现（见 process.rs::decode_download_bytes）：
+        // 必须与「网络坏了」区分开 —— 内容其实完整，只是没解压，别让人白查半天网络。
+        "setup_gzip_undecoded" => if en { "the downloaded content is gzip-compressed, but the response did not declare it, so it could not be decoded" } else { "下载到的是 gzip 压缩内容，而响应没有声明压缩，无法解码" },
         "setup_dl_bad_url" => if en { "Refusing to download from an unexpected address: {0} (only https://nodejs.org/dist/ and https://www.python.org/ are allowed)." } else { "拒绝从非预期地址下载：{0}（只允许 https://nodejs.org/dist/ 与 https://www.python.org/）。" },
         "setup_no_curl" => if en { "curl.exe not found" } else { "未找到 curl.exe" },
         "setup_curl_fail" => if en { "curl failed: {0}" } else { "curl 执行失败: {0}" },

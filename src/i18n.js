@@ -72,9 +72,8 @@
     cache_eff_set: 'npm 配置：{0}',
     cache_eff_diff: 'npm 配置：{0}　⚠ 实际生效：{1}（被环境变量或项目级 .npmrc 覆盖）',
     toast_npm_cache_fail: '已保存设置，但 npm 配置没改成功：{0}',
-    // ---- 首选项：把家目录写入用户环境变量 DSH_HOME（只影响用户另外打开的终端） ----
-    lbl_export_home_env: '把家目录写入用户环境变量 DSH_HOME（这样你另外打开的终端里的 dsh 也用同一个家目录；新开的终端才生效）',
-    note_export_home_env: '写进当前用户的 HKCU\\Environment（REG_SZ，不需要管理员、不碰系统环境），只影响你另外打开的 cmd / PowerShell：本程序启动 DSH（含安全模式）时会显式注入 DSH_HOME 覆盖继承值，所以它不影响本程序自己。不写的话，那里的 dsh 会回退到默认家目录 ~/.dsh —— 设置、凭据、会话各存一份、互不相通。已开着的终端要新开才会拿到新值。',
+    // ---- 首选项：用户环境变量 DSH_HOME（**没有开关**：家目录非默认就自动写、改回默认
+    //      就自动删，只影响用户另外打开的终端）—— 这里只保留「读出来显示」那两行文案 ----
     home_env_now: '当前用户环境变量：DSH_HOME={0}',
     home_env_now_unset: '当前用户环境变量：未设置（新终端里的 dsh 会用默认家目录 ~/.dsh）',
     toast_home_env_fail: '已保存设置，但用户环境变量 DSH_HOME 没改成功：{0}',
@@ -124,7 +123,7 @@
     ph_extra: '例如: --trusted-host example.com',
     lbl_pkg_name: 'DSH 的 npm 包名（用于查询 dist-tags 与拼装更新命令）',
     lbl_update_cmd_fixed: '更新命令固定为 npm install -g <包名>@<频道>；频道（latest / next）在点「更新 DSH」时选择，不再单独设置参数。',
-    set_hint_html: '配置保存于：<span id="set-config-path"></span><br />路径留空或失效时会自动检测本机的 Node / npm / DSH（npm / dsh 的程序路径不在此处提供修改入口 —— 它们会被<b>执行</b>，由程序自动检测更安全）；也可点上方「自动检测」。<br />家目录是 DSH 摆放配置文件的地方（通过 DSH_HOME 传给 DSH；要不要同时写进你的用户环境变量、让你自己开的终端里的 dsh 也用它，见下方「写入用户环境变量 DSH_HOME」开关）；进程工作目录自动取其上一级，DSH 的工作区在网页内随意指定。端口 / 参数修改在<b>下次启动 DSH</b> 时生效；语言切换即时生效，并同步写入 DSH 的 settings.yaml（DSH 界面语言在其重启后变化）；外观同样写入 settings.yaml（ui-theme.preference），DSH 页面<b>实时</b>跟随切换。<br />Desktop 日志：同目录 desktop.log；DSH 输出日志：&lt;家目录&gt;\\logs\\dsh.log。',
+    set_hint_html: '配置保存于：<span id="set-config-path"></span><br />路径留空或失效时会自动检测本机的 Node / npm / DSH（npm / dsh 的程序路径不在此处提供修改入口 —— 它们会被<b>执行</b>，由程序自动检测更安全）；也可点上方「自动检测」。<br />家目录是 DSH 摆放配置文件的地方（通过 DSH_HOME 传给 DSH；只要它不是默认值，保存后就会自动写进你的用户环境变量，让你自己开的终端里的 dsh 也用同一个家目录，改回默认值则自动删掉）；进程工作目录自动取其上一级，DSH 的工作区在网页内随意指定。端口 / 参数修改在<b>下次启动 DSH</b> 时生效；语言切换即时生效，并同步写入 DSH 的 settings.yaml（DSH 界面语言在其重启后变化）；外观同样写入 settings.yaml（ui-theme.preference），DSH 页面<b>实时</b>跟随切换。<br />Desktop 日志：同目录 desktop.log；DSH 输出日志：&lt;家目录&gt;\\logs\\dsh.log。',
     btn_detect_pkg: '检测全局包名（npm list -g）',
     btn_cancel: '取消', btn_save: '保存',
     flag_exists: '✔ 存在', flag_missing: '✘ 未找到',
@@ -211,7 +210,7 @@
     init_fail: '初始化失败: {0}',
     // 首次运行向导
     wiz_title: '欢迎使用 DSH Desktop —— 环境检查',
-    wiz_desc_html: '本程序<b>不内置 Node.js 和 DSH</b>，需要本机已安装：<br />① <b>Node.js</b>（含 npm，建议 LTS 版）　② <b>DSH</b>（npm 包 <code>@deepseek-ai/dsh</code>）<br />③ <b>pnpm</b>（<b>要求 ≥ v10</b>：装好后用它安装 DSH 插件；缺失或版本过低会单独出一步，解决前不能点「完成」）<br />已装好可直接点「完成」；Node / npm / DSH 缺了可用下方按钮引导安装，也可以跳过后自行安装。',
+    wiz_desc_html: '本程序<b>不内置 Node.js 和 DSH</b>，需要本机已安装：<br />① <b>Node.js</b>（含 npm，建议 LTS 版）　② <b>pnpm</b>（<b>要求 ≥ v10</b>：装好后用它安装 DSH 插件；缺失或版本过低会单独出一步，解决前不能点「完成」）<br />③ <b>DSH</b>（npm 包 <code>@deepseek-ai/dsh</code>）<br />已装好可直接点「完成」；Node / npm / DSH 缺了可用下方按钮引导安装，也可以跳过后自行安装。',
     th_component: '组件', th_status: '状态', th_path: '路径 / 版本',
     lbl_node: 'Node.js', lbl_npm: 'npm', lbl_dsh: 'DSH', lbl_pnpm: 'pnpm',
     wiz_installed: '✔ 已安装', wiz_notfound: '✘ 未找到', wiz_detecting_row: '检测中…',
@@ -375,10 +374,10 @@
     cache_eff_set: 'npm config: {0}',
     cache_eff_diff: 'npm config: {0}　⚠ actually in effect: {1} (overridden by an env var or a project .npmrc)',
     toast_npm_cache_fail: 'Settings saved, but npm config was not updated: {0}',
-    // ---- Preferences: write the home dir into the user environment variable DSH_HOME
-    //      (it only affects terminals the user opens themselves) ----
-    lbl_export_home_env: 'Write the home directory into the user environment variable DSH_HOME (so `dsh` in a terminal you open yourself uses the same home; only newly opened terminals pick it up)',
-    note_export_home_env: "Written to HKCU\\Environment (REG_SZ — no admin rights, the system environment is untouched), affecting only cmd / PowerShell windows you open yourself: starting DSH (safe mode included) always injects DSH_HOME explicitly and overrides the inherited value, so this never changes what this app does. Without it, `dsh` there falls back to the default home ~/.dsh — settings, credentials and sessions are kept separately and never meet. Already-open terminals must be reopened.",
+    // ---- Preferences: user environment variable DSH_HOME (**no switch**: written
+    //      automatically while the home dir is non-default, removed when it is the
+    //      default again; it only affects terminals the user opens themselves) ----
+    //      Only the "read it back for display" strings live here.
     home_env_now: 'User environment: DSH_HOME={0}',
     home_env_now_unset: 'User environment: not set (dsh in a new terminal uses the default home ~/.dsh)',
     toast_home_env_fail: 'Settings saved, but the user environment variable DSH_HOME was not updated: {0}',
@@ -428,7 +427,7 @@
     ph_extra: 'e.g. --trusted-host example.com',
     lbl_pkg_name: 'DSH npm package name (used for dist-tags queries and the update command)',
     lbl_update_cmd_fixed: 'The update command is fixed to npm install -g <package>@<channel>; pick the channel (latest / next) in the "Update DSH" dialog instead.',
-    set_hint_html: 'Configuration is saved to: <span id="set-config-path"></span><br />Empty or invalid paths are auto-detected on this machine (Node / npm / DSH); the npm / dsh program paths have no editing field here — they are <b>executed</b>, so letting the app detect them is safer. You can also click "Auto-detect" above.<br />The home dir is where DSH keeps its config (passed to DSH as DSH_HOME; whether it is also written into your user environment variable, so `dsh` in a terminal you open yourself follows it, is the switch below); the process working dir is its parent — the DSH workspace is chosen inside the web UI. Port / argument changes take effect on the <b>next DSH start</b>; language applies immediately and is also synced into DSH\'s settings.yaml (DSH\'s own UI changes after DSH restarts); appearance is likewise written to settings.yaml (ui-theme.preference) and the DSH page follows it <b>live</b>.<br />Desktop log: desktop.log in the same folder; DSH output log: &lt;home&gt;\\logs\\dsh.log.',
+    set_hint_html: 'Configuration is saved to: <span id="set-config-path"></span><br />Empty or invalid paths are auto-detected on this machine (Node / npm / DSH); the npm / dsh program paths have no editing field here — they are <b>executed</b>, so letting the app detect them is safer. You can also click "Auto-detect" above.<br />The home dir is where DSH keeps its config (passed to DSH as DSH_HOME; while it is not the default, it is automatically written into your user environment variable on save so `dsh` in a terminal you open yourself follows it — changing it back to the default removes it again); the process working dir is its parent — the DSH workspace is chosen inside the web UI. Port / argument changes take effect on the <b>next DSH start</b>; language applies immediately and is also synced into DSH\'s settings.yaml (DSH\'s own UI changes after DSH restarts); appearance is likewise written to settings.yaml (ui-theme.preference) and the DSH page follows it <b>live</b>.<br />Desktop log: desktop.log in the same folder; DSH output log: &lt;home&gt;\\logs\\dsh.log.',
     btn_detect_pkg: 'Detect global package (npm list -g)',
     btn_cancel: 'Cancel', btn_save: 'Save',
     flag_exists: '✔ found', flag_missing: '✘ not found',
@@ -509,7 +508,7 @@
     log_autostart_silent: '[launcher] Launched by autostart: the window stays hidden and DSH starts after a 12 s delay (to avoid the boot spike). Click the tray icon to show the window.',
     init_fail: 'Initialization failed: {0}',
     wiz_title: 'Welcome to DSH Desktop — Environment Check',
-    wiz_desc_html: 'This app does <b>not</b> bundle Node.js or DSH — both must be installed on this machine:<br />① <b>Node.js</b> (with npm; LTS recommended) ② <b>DSH</b> (npm package <code>@deepseek-ai/dsh</code>)<br />③ <b>pnpm</b> (<b>10 or newer required</b>: used to install DSH plugins later; if it is missing or too old the wizard shows its own step and "Done" stays disabled until it is fixed)<br />If everything is installed just click "Done"; missing Node / npm / DSH can be installed via the guided buttons below, or skipped and installed yourself later.',
+    wiz_desc_html: 'This app does <b>not</b> bundle Node.js or DSH — all three must be installed on this machine:<br />① <b>Node.js</b> (with npm; LTS recommended) ② <b>pnpm</b> (<b>10 or newer required</b>: used to install DSH plugins later; if it is missing or too old the wizard shows its own step and "Done" stays disabled until it is fixed)<br />③ <b>DSH</b> (npm package <code>@deepseek-ai/dsh</code>)<br />If everything is installed just click "Done"; missing Node / npm / DSH can be installed via the guided buttons below, or skipped and installed yourself later.',
     th_component: 'Component', th_status: 'Status', th_path: 'Path / Version',
     lbl_node: 'Node.js', lbl_npm: 'npm', lbl_dsh: 'DSH', lbl_pnpm: 'pnpm',
     wiz_installed: '✔ installed', wiz_notfound: '✘ not found', wiz_detecting_row: 'detecting…',

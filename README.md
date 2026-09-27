@@ -46,27 +46,29 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 | OS | Windows 10 or 11, x64 |
 | WebView2 Runtime | Usually preinstalled with Edge on Windows 10/11; installers bootstrap it if missing |
 | Node.js | **22.19.0 or newer** (DSH's runtime floor). **Not bundled.** |
-| DSH | Installed globally via npm. **Not bundled.** |
 | pnpm | **10 or newer** (required by this app). The wizard checks it once Node.js is found; a missing **or too-old** pnpm raises a dedicated step and **blocks "完成 / Done" until it is installed or updated** (also installed automatically after a guided Node.js install). |
+| DSH | Installed globally via npm. **Not bundled.** |
+
+> Component order (Node.js / npm / pnpm first, DSH last) matches the first-run wizard — DSH is the one installed *through* npm, so it comes last.
 
 ## Prerequisites
 
-You need these before DSH Desktop can start a service (only the first two are required):
+You need these three before DSH Desktop is ready (the wizard checks all of them in this order — **pnpm must be ≥ 10**, and DSH comes last):
 
 1. **Node.js** (with npm) — install the official LTS from <https://nodejs.org/en/download>. **22.19.0 or newer is required** (see [Node.js version check](#nodejs-version-check)).
-2. **DSH** — install globally:
-
-   ```bash
-   npm install -g @deepseek-ai/dsh
-   ```
-
-3. **pnpm (10 or newer)** — used later to install DSH plugins:
+2. **pnpm (10 or newer)** — used later to install DSH plugins:
 
    ```bash
    npm install -g pnpm
    ```
 
    The first-run wizard checks pnpm once Node is found: when it is missing **or below version 10**, the wizard shows a dedicated "pnpm is missing" / "pnpm version too old" step with a one-click install or update, and **blocks the "Done" button until pnpm reaches the floor** (this app requires pnpm ≥ 10 — DSH installs its plugins through it). If you let the app install Node.js for you, it runs the command above **automatically** right after the Node install.
+
+3. **DSH** — install globally:
+
+   ```bash
+   npm install -g @deepseek-ai/dsh
+   ```
 
 Verify manually if you like:
 
@@ -213,24 +215,25 @@ Open **⚙ 首选项 (Preferences)** from the toolbar. The paths of the two prog
 
 | Setting | Default | Notes |
 |---|---|---|
-| npm cache location | empty (npm config untouched) | written into npm's own `~/.npmrc` (the `cache` line), so terminal npm follows it too — see *npm cache location* |
 | DSH home dir | `%USERPROFILE%\.dsh` | passed to DSH as `DSH_HOME`; process cwd is its parent; not your workspace |
-| Write the home dir into the user env var `DSH_HOME` | off | when on, the home dir is written to the current user's `HKCU\Environment`, so `dsh` in a terminal **you open yourself** uses the same home; this app (safe mode included) always injects `DSH_HOME` explicitly, so its own behaviour is untouched — see *Write the home dir into `DSH_HOME`* below |
+| User env var `DSH_HOME` | automatic (no switch) | **automatic rule**: while the home dir is not the default, saving writes it into the current user's `HKCU\Environment`, so `dsh` in a terminal **you open yourself** uses the same home; changing back to the default removes it. This app (safe mode included) always injects `DSH_HOME` explicitly, so its own behaviour is untouched — see *Write the home dir into `DSH_HOME`* below |
 | Port | `3080` | must be 1–65535; validated on save; takes effect on next DSH start |
 | Ready timeout | `300` seconds | cold start can take minutes; **0 = wait forever** (as long as the process lives) |
 | When clicking X | hide to tray | or "quit program" (stops the DSH process started by this session) |
 | Extra args | empty | appended after `dsh web --port N --no-open`; plain flags only (see below) |
 | Package name | `@deepseek-ai/dsh` | used for the `dist-tags` version query **and** to build the update command |
 | Start with Windows | off | immediate effect, `HKCU\...\Run`, also toggleable from the tray menu |
+| npm cache location | empty (npm config untouched) | written into npm's own `~/.npmrc` (the `cache` line), so terminal npm follows it too — see *npm cache location* |
+| Package sources (registry) | read-only hint, **changed only on click** | the status line compares the registry npm and pnpm would each use in the DSH working dir; the button appears only when they differ; touches pnpm only — see *Package sources (registry)* |
 | Python environment | off by default | a status line plus **基本安装 / 额外安装** buttons — see [Python environment](#python-environment) |
 | Interface language | `zh` (中文) | `zh` / `en`; switches the whole launcher and syncs DSH's `settings.yaml` — see [Language](#language) |
 | Appearance | `system` (follow system) | `light` / `dark` / `system`; switches the launcher and syncs DSH's `ui-theme.preference` — see [Appearance](#appearance) |
 
-> There is deliberately **no "update args" setting any more**: the update command is always `npm install -g <package name>@<channel>` (plus a `--prefix` derived from where `dsh.cmd` actually lives, when DSH is installed outside npm's default directory — see *Choosing where DSH gets installed*), and the channel (`latest` / `next`) is chosen in the **⤓ 更新 DSH** dialog itself — see [Update DSH](#update-dsh). Extra npm knobs (registry, proxy) belong in an `.npmrc` next to the DSH home dir.
+> There is deliberately **no "update args" setting any more**: the update command is always `npm install -g <package name>@<channel>` (plus a `--prefix` derived from where `dsh.cmd` actually lives, when DSH is installed outside npm's default directory — see *Choosing where DSH gets installed*), and the channel (`latest` / `next`) is chosen in the **⤓ 更新 DSH** dialog itself — see [Update DSH](#update-dsh). Extra npm knobs (registry, proxy) belong in the **user-level** `~/.npmrc` — global effect, no extra file inside the DSH directory tree (this is how this machine is configured); an `.npmrc` next to the DSH home dir works too (that is where npm reads `./.npmrc`) but adds a file there. Note that **pnpm does not read `~/.npmrc`**: its own global source lives in the `auth.ini` written by `pnpm config set registry`, which is exactly what the Preferences *Package sources (registry)* button manages.
 
 ### Python environment
 
-Generating Office files (`.docx` / `.pptx` / `.xlsx`) and doing any real data analysis needs Python on the machine, so Preferences carries a **Python 环境** block right under *Start with Windows*:
+Generating Office files (`.docx` / `.pptx` / `.xlsx`) and doing any real data analysis needs Python on the machine, so Preferences carries a **Python 环境** block below *Start with Windows* and the two package-source rows (npm cache / registry):
 
 - **Status line** — whether a usable Python (≥ 3.8) exists, its version and path, and whether the two recommended package sets are actually importable. The probe is `importlib.util.find_spec`, not `pip list`: a package that is installed but broken counts as missing, and a Python 2 install or Microsoft Store's `python.exe` alias (which exists as a file but opens the Store) counts as "no Python".
 - **基本安装 / Basic install** — if a usable interpreter is already present, the installer is skipped entirely. Otherwise it downloads the newest stable CPython from python.org (version parsed from the download page; if that fails a pinned fallback version is used), reads that release's **SHA-256 from the official release page and verifies it before executing anything** (no hash ⇒ no install, exactly like the Node.js flow), runs the official installer with `/passive InstallAllUsers=0 PrependPath=1 Include_test=0` — per-user, no UAC, self-added to PATH, and its own progress window — then runs `pip install python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile typing_extensions`.
@@ -251,17 +254,19 @@ This one setting is different in kind from the rest: **it edits npm's own file.*
 - **Value rules**: absolute, no `..`, drive must exist, no `< > " | ? *`, not inside `Windows` / `ProgramData`, no `%` or `!` (the value travels through `cmd.exe`), **no `#` or `;`** (npm's ini parser treats them as comment starts — measured: `cache=D:\a#b` reads back as `D:\a`, i.e. silently a different folder), and a **100-character limit**: npm writes content-addressed paths 158 characters deep below the cache root (measured), and beyond the classic 260-character limit Explorer/PowerShell can no longer delete that tree — npm itself still works, but "cannot be cleaned up" is the worse outcome.
 - **The app does not create the folder** — npm does that itself (measured: pointing at a non-existent directory still installs fine).
 
-### Write the home dir into `DSH_HOME` (so terminal `dsh` uses the same home)
+### Write the home dir into `DSH_HOME` (automatic — no switch)
 
-**This setting only affects terminals you open yourself — never this app.** Every time this app starts DSH it **injects** `DSH_HOME` explicitly (`cmd.env("DSH_HOME", …)` in the daily start path and in safe mode; the safe home is additionally derived from `%USERPROFILE%`), which overrides any inherited user-level value. Writing the variable therefore changes nothing about what this app does — that is exactly why safe mode is unaffected.
+**This is an automatic rule, not a setting**: whenever the *DSH home dir* is not the default `%USERPROFILE%\.dsh`, pressing Save writes it into `HKCU\Environment\DSH_HOME`; changing the home dir back to the default removes the value again. The only question asked is "is it the default?" (`config::is_default_home_dir`, case- and trailing-separator-insensitive), and the write/delete boundary lives in `detect::plan_home_env` (pure function, edge cases covered by unit tests that run in CI). The default value is deliberately **not** written — it would only repeat the fallback `dsh` already uses, while adding a registry value for nothing.
 
-What you get while it stays off: `%DSH_HOME%` is simply **undefined** in your own cmd / PowerShell (`echo %DSH_HOME%` prints the literal `%DSH_HOME%`), so `dsh` run there resolves along "explicit config > `$DSH_HOME` > `~/.dsh`" and lands on the **default home `~/.dsh`**. Settings, credentials and sessions then exist in two places that never meet, with no warning at all (verified locally: `dsh --profile web …` in a terminal wrote `~/.dsh\profiles\web\cordis.yml`).
+**It only affects terminals you open yourself — never this app.** Every time this app starts DSH it **injects** `DSH_HOME` explicitly (`cmd.env("DSH_HOME", …)` in the daily start path and in safe mode; the safe home is additionally derived from `%USERPROFILE%`), which overrides any inherited user-level value. The automatic write therefore changes nothing about what this app does — that is exactly why safe mode is unaffected.
+
+With the default home dir nothing is written, so `%DSH_HOME%` stays **undefined** in your own cmd / PowerShell (`echo %DSH_HOME%` prints the literal `%DSH_HOME%`) and `dsh` there resolves along "explicit config > `$DSH_HOME` > `~/.dsh`" onto the **default home `~/.dsh`** — which is also the home this app uses, so both sides agree and there is no second copy of settings (verified locally: with a non-default home and no variable, `dsh --profile web …` in a terminal wrote `~/.dsh\profiles\web\cordis.yml`, separate from this app's copy — that divergence is exactly what the automatic write prevents).
 
 - **Where it lands**: `DSH_HOME` under `HKCU\Environment` (`REG_SZ`, storing the **literal** path — `%…%` is not expanded). Current user only, system environment untouched, no admin rights; `WM_SETTINGCHANGE` is broadcast afterwards, so **newly opened** terminals pick it up — already-open ones must be reopened (or you log out again). Same technique as writing the user PATH.
-- **Turning it off removes the value, but only ours**: the value is deleted only when it points at a home this app has configured (the current one, or the one from before this save). A `DSH_HOME` you set yourself elsewhere is **left untouched** and reported as such. The ownership decision lives in `detect::plan_home_env`, covered by unit tests that run in CI.
-- **Failures are reported honestly**: if the registry is locked down by policy or the write is denied, you get the real reason instead of a "switch is off" that never happened.
+- **Changing back to the default removes the value, but only ours**: the value is deleted only when it points at a home this app has configured (the current one, or the one from before this save). A `DSH_HOME` you set yourself elsewhere is **left untouched** and reported as such. The ownership decision lives in `detect::plan_home_env`, covered by unit tests that run in CI.
+- **Failures are reported honestly**: if the registry is locked down by policy or the write is denied, you get the real reason instead of a silent no-op pretending the value was written or deleted.
 - **Safe mode is unaffected**: entering safe mode overrides `DSH_HOME` with `%USERPROFILE%\.dsh-safe` (a process-level value always beats the user-level one); to open the safe home in a terminal yourself, `set DSH_HOME=%USERPROFILE%\.dsh-safe`.
-- Preferences shows the **current persisted value** under the switch; when it is unset, it says that `dsh` in a new terminal uses the default home `~/.dsh`.
+- Preferences keeps only the **current persisted value** line (the checkbox and its long explanation were removed by request); when it is unset, it says that `dsh` in a new terminal uses the default home `~/.dsh`.
 
 ### Package sources (registry) — shown as a hint, changed only on click
 

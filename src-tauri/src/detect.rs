@@ -1412,7 +1412,7 @@ pub fn set_user_env_value(name: &str, value: &str) -> Result<(), String> {
 
 /// 删除 `HKCU\Environment` 里的一个值。值不存在时 `reg delete` 同样会失败 —— 调用方
 /// 先用 [`plan_home_env`] 判断过「确实有值且归我们管」，所以这里的失败都是真失败
-/// （策略锁注册表、权限不足），必须如实报出来而不是假装已经关掉了开关。
+/// （策略锁注册表、权限不足），必须如实报出来而不是假装值已经被删掉了。
 pub fn delete_user_env_value(name: &str) -> Result<(), String> {
     let mut cmd = Command::new("reg");
     cmd.arg("delete")
@@ -1448,18 +1448,19 @@ pub enum HomeEnvAction {
     Write(String),
     /// 删掉注册表里这个值（携带将被删除的当前值，用于提示「原值是什么」）
     Remove(String),
-    /// 关闭开关时发现已有值、但它不指向本程序配置过的任何家目录：原样保留并说明
+    /// 家目录改回默认、准备删值时发现已有值、但它不指向本程序配置过的任何家目录：原样保留并说明
     KeepForeign(String),
 }
 
-/// `apply_dsh_home_env` 的决策内核：
-/// - `desired` = 开关打开时要写入的家目录（`None` = 关闭开关）；
+/// `apply_dsh_home_env` 的决策内核（**自动规则，没有开关**）：
+/// - `desired` = 该写入的家目录（`None` = 家目录就是默认值，此时没有可同步的值、
+///   走"删值"这条路 —— 由 config::is_default_home_dir 判定后传进来）；
 /// - `current` = 注册表现值（`None` = 这个值不存在）；
 /// - `owned`   = 「可以由本程序删掉」的家目录集合（当前配置的家目录 + 本次保存
-///   **之前**的家目录 —— 后者用来认领「同一时刻既改家目录又关开关」时留下的旧值）。
+///   **之前**的家目录 —— 后者用来认领「同一时刻既改家目录又回到默认」时留下的旧值）。
 ///
 /// 归属规则是这里唯一要紧的判断：**只删指向本程序配置过的家目录的值**。
-/// 用户可能自己 `setx DSH_HOME` 指向别的地方，关掉开关不该顺手把它删掉 ——
+/// 用户可能自己 `setx DSH_HOME` 指向别的地方，家目录回到默认时不该顺手把它删掉 ——
 /// 那个值不是我们写进去的。
 pub fn plan_home_env(
     desired: Option<&str>,
@@ -1491,7 +1492,9 @@ pub fn plan_home_env(
 
 /// 家目录比较键：去首尾空白 + 去尾部分隔符 + 小写（Windows 路径大小写不敏感）。
 /// 复用 PATH 那边的 `dir_key`，免得两处对「是不是同一个目录」的标准不一致。
-fn home_key(s: &str) -> String {
+/// `pub(crate)` 给 config::is_default_home_dir 用：它必须拿同一把尺子去比
+/// 「当前家目录是不是默认值」，否则会在大小写 / 尾斜杠上误判、白写一次注册表。
+pub(crate) fn home_key(s: &str) -> String {
     dir_key(Path::new(s))
 }
 
@@ -1832,12 +1835,13 @@ mod tests {
         assert_eq!(pick_registry_line("registry=https://a/\n"), None);
     }
 
-    /// 用户环境变量 DSH_HOME 的写 / 删决策（plan_home_env 纯函数内核）。
+    /// 用户环境变量 DSH_HOME 的写 / 删决策（plan_home_env 纯函数内核；**自动规则**：
+    /// 非默认家目录 → 写，默认家目录 → 删，没有开关）。
     /// 判错的两种代价分别是「终端继续用错家目录」与「删掉用户自己 setx 的值」，
     /// 所以每条分支都单独钉住 —— 这段跑在 CI 上（开发机没有 Rust 工具链）。
     #[test]
     fn plan_home_env_writes_removes_and_protects_foreign_values() {
-        // ---------- 开关打开（desired = Some） ----------
+        // ---------- 非默认家目录（desired = Some）：要写入 ----------
         // 值不同 → 写
         assert!(matches!(
             plan_home_env(Some(r"D:\DSH\AppData"), Some(r"C:\Users\me\.dsh"), &[]),
@@ -1859,7 +1863,7 @@ mod tests {
             HomeEnvAction::Write(_)
         ));
 
-        // ---------- 关闭开关（desired = None） ----------
+        // ---------- 默认家目录（desired = None）：没有可同步的值，走删值 ----------
         let configured = vec![r"D:\DSH\AppData".to_string()];
         // 没有这个值 → 什么都不做
         assert!(matches!(
@@ -1872,7 +1876,8 @@ mod tests {
             HomeEnvAction::Remove(v) if v == r"D:\DSH\AppData\"
         ));
         // 指向**本次保存之前**的家目录 → 也要删：
-        // 「同一时刻既改家目录又关开关」时，注册表里躺着的是旧值，只比对新值会漏清
+        // 「同一时刻既改家目录、又把它改回默认值」时，注册表里躺着的是旧值，
+        // 只比对新值会漏清
         let before_and_now = vec![
             r"D:\DSH\NewHome".to_string(),
             r"D:\DSH\AppData".to_string(),

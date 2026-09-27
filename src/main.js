@@ -910,8 +910,8 @@ function openSettings() {
   $('set-safe-verify').value = Number.isFinite(sv) ? sv : 80;
   $('set-config-path').textContent = config.config_path;
   markFlag('home-exists-flag', config.home_exists);
-  // 「写入用户环境变量 DSH_HOME」开关 + 它下面那行小字（新终端会拿到的持久值）
-  $('set-export-home-env').checked = config.export_home_env === true;
+  // 用户环境变量 DSH_HOME 那行小字（新终端会拿到的持久值）：勾选框已经改成自动规则，
+  // 这里只剩「每次打开设置页读一次注册表现值」
   refreshHomeEnvInfo();
   refreshNpmCacheInfo();
   // 包源 registry 那行状态（+ 两个按钮的可见性）：读是零风险的，每次打开都重问一次
@@ -1143,8 +1143,6 @@ async function saveSettings() {
     npm_cache_dir: $('set-npm-cache').value.trim(),
     dsh_path: (config && config.dsh_path) || '',
     dsh_home_dir: $('set-home-dir').value.trim(),
-    // 把家目录写入用户环境变量 DSH_HOME（真正的写/删在保存之后由 apply_dsh_home_env 落地）
-    export_home_env: $('set-export-home-env').checked === true,
     port,
     close_action: $('set-close-action').value === 'quit' ? 'quit' : 'tray',
     language: $('set-language').value === 'en' ? 'en' : 'zh',
@@ -1173,8 +1171,8 @@ async function saveSettings() {
     // 更新命令不再有可配置参数：固定 install -g <包名>@<频道>，
     // 频道由「更新 DSH」弹窗里的 latest / next 单选决定（见 renderUpdateModal）
   };
-  // 本次保存**之前**的家目录：关闭「写入 DSH_HOME」时，后端要靠它认领上一次写进去的值
-  //（必须在 config 被 save_config 的返回值覆盖之前记下来）
+  // 本次保存**之前**的家目录：家目录被改回默认值（于是自动删 DSH_HOME）时，
+  // 后端要靠它认领上一次写进去的值（必须在 config 被 save_config 的返回值覆盖之前记下来）
   const prevHome = (config && config.dsh_home_dir) || '';
   const langChanged = cfg.language !== I18N.lang;
   const appearanceChanged = appearance !== (config && config.appearance);
@@ -1204,12 +1202,13 @@ async function saveSettings() {
       toast(t('toast_npm_cache_fail', e), true);
       appendLog('launcher', t('toast_npm_cache_fail', e));
     }
-    // 「把家目录写入用户环境变量 DSH_HOME」与 npm 缓存同款：保存之后单独做、单独报结果。
+    // 用户环境变量 DSH_HOME 与 npm 缓存同款：保存之后单独做、单独报结果 —— 但它已经
+    // **没有开关**：后端按「家目录是不是默认值」自动决定写还是删（is_default_home_dir）。
     // 影响面只有**用户另外打开的终端** —— 本程序启动 DSH（日常与安全模式）时都会显式
     // 注入 DSH_HOME 覆盖继承值，所以这里写不写都不改变本程序自己的行为。
     try {
       const envRep = await invoke('apply_dsh_home_env', {
-        dir: cfg.export_home_env ? cfg.dsh_home_dir : null,
+        dir: cfg.dsh_home_dir,
         prev: prevHome || null,
       });
       // 每次都进日志（「没动」也是个结论）；只有真改了注册表才弹 toast ——

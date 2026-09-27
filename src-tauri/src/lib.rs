@@ -55,8 +55,9 @@ pub fn run(launched_by_autostart: bool) {
             // 首选项「npm 缓存位置」：同步进 npm 自己的 ~/.npmrc（最小行编辑）+ 读回实际生效值
             process::apply_npm_cache,
             process::npm_cache_info,
-            // 首选项「把家目录写入用户环境变量 DSH_HOME」：只影响用户另外打开的终端
-            //（本程序启动 DSH 时显式注入，覆盖继承值），写/删 HKCU\Environment + 读回现值
+            // 用户环境变量 DSH_HOME 的**自动**同步（没有开关）：家目录非默认 → 写入、
+            // 改回默认 → 按归属规则删值；只影响用户另外打开的终端（本程序启动 DSH 时
+            // 显式注入、覆盖继承值），写/删 HKCU\Environment + 读回现值
             process::apply_dsh_home_env,
             process::dsh_home_env_info,
             // 首选项「包源 registry 对齐」：读是零风险的（info 自动刷），写要用户点按钮

@@ -318,12 +318,24 @@ pub struct SetupStatus {
     pub message: String,
 }
 
-/// 首次运行引导安装：最终结果（target = node | dsh | pnpm）
+/// 首次运行引导安装：最终结果（target = node | dsh | pnpm | python | python-extra）
 #[derive(Clone, Serialize)]
 pub struct SetupResult {
     pub target: String,
     pub success: bool,
     pub message: String,
+}
+
+/// 首选项「Python 环境」块的状态（只读，打开设置页时查一次）。
+/// `basic_ok` / `extra_ok` 回答的是「那组包现在 import 得了吗」，不是「pip list 里有没有」——
+/// 别的虚拟环境里装过、或文件损坏，都要以真正能 import 为准。
+#[derive(Clone, Serialize)]
+pub struct PythonStatus {
+    pub found: bool,
+    pub path: String,
+    pub version: String,
+    pub basic_ok: bool,
+    pub extra_ok: bool,
 }
 
 /// 端口可用性检查结果
@@ -1900,6 +1912,255 @@ pub async fn npm_cache_info(_app: AppHandle) -> NpmCacheInfo {
     }
 }
 
+// ---------- 包源（registry）对齐：程序只提示，点下去才改 ----------
+//
+// 为什么是按钮而不是开关（用户拍板的形态）：registry 决定**今后所有安装流量去哪**，
+// 属于供应链敏感设置，而且它不是需要持续维护的状态 —— 每次保存都重写一遍，反而会跟
+// 用户手动 `pnpm config set` 改的值打架。于是读（零风险）由设置页自动做，写必须点一次。
+
+/// `registry_align_info` 的返回值：一行状态 + 两个按钮要不要出现所需的原料。
+#[derive(Serialize, Clone)]
+pub struct RegistryAlignReport {
+    /// 比较用的目录（DSH 工作目录 = 家目录上一级）：提示里带上它，用户才知道在哪儿不一致
+    pub cwd: String,
+    /// 已按当前语言生成好的状态行（前端直接渲染，避免同一句话在两处维护两份文案）
+    pub line: String,
+    /// 对齐目标 = npm 在 cwd 下的生效值；空串 = 读不到（此时不显示对齐按钮）
+    pub target: String,
+    /// 两边是否已一致（一致时不需要对齐按钮）
+    pub aligned: bool,
+    /// 没有 pnpm 就没有「对齐 pnpm」这回事（DSH 装插件也要用它）
+    pub pnpm_exists: bool,
+    /// 有「对齐前的原值」记录才显示恢复按钮
+    pub prev: String,
+}
+
+/// 首选项用：读「npm 与 pnpm 在 DSH 工作目录下各自生效的源」，给出状态行与按钮可见性。
+/// `async` 是因为要 spawn 两个子进程问值（同 `npm_cache_info`：别把子进程等待放主线程）。
+#[tauri::command]
+pub async fn registry_align_info(app: AppHandle) -> RegistryAlignReport {
+    let cfg = config::load(&app);
+    let cwd = config::workspace_cwd(&cfg).unwrap_or_default();
+    let pnpm_exists = detect::find_pnpm_cmd().is_some();
+    let npm_reg = detect::npm_effective_registry(&cwd).unwrap_or_default();
+    let pnpm_reg = if pnpm_exists {
+        detect::pnpm_effective_registry(&cwd).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let prev = cfg.pnpm_registry_prev.trim().to_string();
+    // 两边都读到了才算"一致"：读不到的一侧不能拿空串去比，否则会误判成不一致、
+    // 亮出一个目标为空的按钮
+    let aligned = !npm_reg.is_empty() && npm_reg.eq_ignore_ascii_case(&pnpm_reg);
+    let line = if !pnpm_exists {
+        i18n::t("reg_line_pnpm_missing").to_string()
+    } else if npm_reg.is_empty() {
+        i18n::fmt("reg_line_npm_unknown", &[&cwd])
+    } else if pnpm_reg.is_empty() {
+        i18n::fmt("reg_line_pnpm_unknown", &[&npm_reg, &cwd])
+    } else if aligned {
+        i18n::fmt("reg_line_ok", &[&npm_reg, &cwd])
+    } else {
+        i18n::fmt("reg_line_diff", &[&npm_reg, &pnpm_reg, &cwd])
+    };
+    RegistryAlignReport {
+        cwd,
+        line,
+        target: npm_reg,
+        aligned,
+        pnpm_exists,
+        prev,
+    }
+}
+
+/// 把 pnpm 的源对齐到 npm 在 DSH 工作目录下生效的源（前端点按钮才调用）。
+///
+/// 写完必须**读回来核对**：pnpm 退出码 0 不等于「生效值变了」—— 项目级 `.npmrc` 与
+/// `npm_config_registry` 环境变量仍可能压过它。核对不符就如实报错，绝不谎报成功
+/// （同款纪律见 install_dir_token 那条：动作做完要核对落点，而不是看退出码）。
+#[tauri::command]
+pub async fn registry_align_apply(app: AppHandle) -> Result<String, String> {
+    let cfg = config::load(&app);
+    let cwd = config::workspace_cwd(&cfg)?;
+    let npm_reg = detect::npm_effective_registry(&cwd)
+        .ok_or_else(|| i18n::fmt("err_reg_npm_read", &[&cwd]))?;
+    let target = config::validate_registry_url(&npm_reg)?;
+    let pnpm = detect::find_pnpm_cmd()
+        .ok_or_else(|| i18n::t("err_reg_pnpm_missing").to_string())?;
+    let pnpm_s = pnpm.to_string_lossy().to_string();
+    let prev = detect::pnpm_effective_registry(&cwd).unwrap_or_default();
+    if prev.eq_ignore_ascii_case(&target) {
+        return Ok(i18n::fmt("reg_unchanged", &[&target]));
+    }
+    let args = [
+        "config".to_string(),
+        "set".to_string(),
+        "registry".to_string(),
+        target.clone(),
+    ];
+    // cwd 传空（继承本进程）：真机实测 pnpm config set **无条件**写它自己的
+    // %LOCALAPPDATA%\pnpm\config\auth.ini —— 在带 package.json 的项目目录里跑也一样，
+    // 不会在项目里生成 .npmrc，所以工作目录不影响写到哪儿。
+    let (ok, out) = run_cmd_capture(&pnpm_s, &args, "", Duration::from_secs(60))?;
+    if !ok {
+        return Err(i18n::fmt("err_reg_apply", &[&output_tail(&out)]));
+    }
+    let after = detect::pnpm_effective_registry(&cwd).unwrap_or_default();
+    if !after.eq_ignore_ascii_case(&target) {
+        return Err(i18n::fmt("err_reg_verify", &[&target, &after]));
+    }
+    // 记原值供恢复按钮用：记不上不算对齐失败，但要说清「这次的恢复按钮用不了」
+    let note = match config::set_pnpm_registry_prev(&app, &prev) {
+        Ok(()) => String::new(),
+        Err(e) => format!(" {}", i18n::fmt("reg_prev_lost", &[&e])),
+    };
+    Ok(format!(
+        "{}{}",
+        i18n::fmt("reg_aligned", &[&prev, &target]),
+        note
+    ))
+}
+
+/// 恢复 pnpm 的原源（前端点按钮才调用）：把记录的「对齐前的值」写回去，
+/// 核对无误后**才**清掉记录 —— 清早了按钮就永久消失，用户想退也退不回去。
+#[tauri::command]
+pub async fn registry_restore(app: AppHandle) -> Result<String, String> {
+    let cfg = config::load(&app);
+    let prev = cfg.pnpm_registry_prev.trim().to_string();
+    if prev.is_empty() {
+        return Err(i18n::t("err_reg_prev_none").to_string());
+    }
+    let target = config::validate_registry_url(&prev)?;
+    let cwd = config::workspace_cwd(&cfg)?;
+    let pnpm = detect::find_pnpm_cmd()
+        .ok_or_else(|| i18n::t("err_reg_pnpm_missing").to_string())?;
+    let pnpm_s = pnpm.to_string_lossy().to_string();
+    let cur = detect::pnpm_effective_registry(&cwd).unwrap_or_default();
+    if cur.eq_ignore_ascii_case(&target) {
+        // 已经是原值（用户手动改回去了之类）：顺手清记录，让恢复按钮消失
+        let _ = config::set_pnpm_registry_prev(&app, "");
+        return Ok(i18n::fmt("reg_unchanged", &[&target]));
+    }
+    let args = [
+        "config".to_string(),
+        "set".to_string(),
+        "registry".to_string(),
+        target.clone(),
+    ];
+    let (ok, out) = run_cmd_capture(&pnpm_s, &args, "", Duration::from_secs(60))?;
+    if !ok {
+        return Err(i18n::fmt("err_reg_apply", &[&output_tail(&out)]));
+    }
+    let after = detect::pnpm_effective_registry(&cwd).unwrap_or_default();
+    if !after.eq_ignore_ascii_case(&target) {
+        return Err(i18n::fmt("err_reg_verify", &[&target, &after]));
+    }
+    // 清记录失败不改判「恢复成功」：按钮留着也无害（再点一次会走上面的"已是原值"分支）
+    let _ = config::set_pnpm_registry_prev(&app, "");
+    Ok(i18n::fmt("reg_restored", &[&target]))
+}
+
+/// `apply_dsh_home_env` 的返回值：一句话 + 「到底动没动」。
+///
+/// 为什么不是只给一句字符串：`toast` 是**单元素**的（后一条覆盖前一条），若每次保存
+/// 都弹一句「无需改动」，既制造噪音、又会把紧随其后的「npm 缓存」提示盖掉。
+/// 所以 `changed = false` 时前端只写日志、不弹 toast。
+#[derive(Serialize, Clone)]
+pub struct HomeEnvReport {
+    /// 用户可读的一句话（未变更 / 已写入 / 已删除 / 保留了非本程序的值）
+    pub message: String,
+    /// 是否真的改了注册表
+    pub changed: bool,
+}
+
+/// 首选项「把家目录写入用户环境变量 DSH_HOME」：按开关把家目录同步进
+/// `HKCU\Environment`，返回一条**说清到底动没动**的消息，由前端直接提示。
+///
+/// 为什么单独一条命令、而不是并进 save_config：这一步会 spawn `reg.exe` 动用户环境，
+/// 失败原因（注册表被策略锁定、权限不足）值得单独报给用户；而 save_config 是同步命令，
+/// 不该在里面做子进程等待。前端在 save_config **之后**调它 —— 设置先落地，再谈环境，
+/// 保存被校验拦下时一个字节都不该动。
+///
+/// 参数刻意用单词名（Tauri 的 snake/camel 转换在多词参数上最容易对不上键名）：
+/// - `dir`  = 开关打开时的家目录（`None` = 关闭开关）；
+/// - `prev` = **本次保存之前**配置里的家目录（前端覆盖 config 前记下来）：关闭开关时
+///   用它认领「上一次保存写进去的值」，否则「同一时刻既改家目录又关开关」会把旧值
+///   留在注册表里没人清。
+///
+/// 归属规则：只删指向本程序配置过的家目录的值，用户自己设的别的值一律原样保留
+/// （决策内核 detect::plan_home_env，边界用例见它的单测）。
+/// 安全模式不受影响：它启动时用 `cmd.env("DSH_HOME", …)` 覆盖继承值，安全家目录
+/// 还另由 USERPROFILE 推导（safe.rs），所以这里写入的值到不了安全实例上。
+#[tauri::command]
+pub async fn apply_dsh_home_env(
+    app: AppHandle,
+    dir: Option<String>,
+    prev: Option<String>,
+) -> Result<HomeEnvReport, String> {
+    // 与其它路径字段一样：写进注册表之前先过同一套家目录校验（非法值直接拦下）
+    let desired = match dir {
+        Some(d) => Some(config::validate_home_dir(&d)?),
+        None => None,
+    };
+    // 「可由本程序删除」的家目录 = 保存后的当前值 + 保存前的旧值。
+    // 旧值过不了校验时不报错 —— 它只用来比对，永远不会被写入。
+    let cfg = config::load(&app);
+    let mut owned: Vec<String> = Vec::new();
+    if let Ok(o) = config::validate_home_dir(&cfg.dsh_home_dir) {
+        owned.push(o);
+    }
+    if let Some(p) = prev.as_deref() {
+        if let Ok(o) = config::validate_home_dir(p) {
+            owned.push(o);
+        }
+    }
+    let current = detect::user_env_raw(detect::HOME_ENV_NAME);
+    // 单独取出计划再 match：`plan_home_env` 的入参借用了 desired / current，
+    // 让借用在这一行就结束，后面的 match 可以自由地 move desired
+    let plan = detect::plan_home_env(desired.as_deref(), current.as_deref(), &owned);
+    let (message, changed) = match plan {
+        detect::HomeEnvAction::Unchanged => (
+            match desired {
+                // desired=Some 时 Unchanged 只可能是「现值就是它」；desired=None 时只可能是
+                // 「本来就没有这个值」—— 两种提示必须分开，否则用户不知道现在到底是什么
+                Some(v) => i18n::fmt("home_env_unchanged", &[&v]),
+                None => i18n::t("home_env_unset").to_string(),
+            },
+            false,
+        ),
+        detect::HomeEnvAction::Write(v) => {
+            detect::set_user_env_value(detect::HOME_ENV_NAME, &v)
+                .map_err(|e| i18n::fmt("err_home_env_write", &[&e]))?;
+            // 与写用户 PATH 同一顺序：先落值再广播。广播失败也不用管 ——
+            // 重新登录后照样生效（detect.rs 的 broadcast_env_change 不返回错误）
+            detect::broadcast_env_change();
+            (i18n::fmt("home_env_written", &[&v]), true)
+        }
+        detect::HomeEnvAction::Remove(v) => {
+            detect::delete_user_env_value(detect::HOME_ENV_NAME)
+                .map_err(|e| i18n::fmt("err_home_env_delete", &[&e]))?;
+            detect::broadcast_env_change();
+            (i18n::fmt("home_env_removed", &[&v]), true)
+        }
+        // 保留别人设的值：如实记进日志即可 —— 设置页那行小字本来就显示着它，
+        // 每次保存都弹一次反而会盖住真正动了的那条提示
+        detect::HomeEnvAction::KeepForeign(v) => (i18n::fmt("home_env_kept", &[&v]), false),
+    };
+    Ok(HomeEnvReport {
+        message,
+        changed,
+    })
+}
+
+/// 首选项用：读用户环境变量 DSH_HOME 的**持久值**（`HKCU\Environment`；空串 = 没设置）。
+///
+/// 读注册表而不是本进程环境：本进程的环境块是启动时的快照，而且本程序启动 DSH 时还会
+/// 显式覆盖它 —— 用户在设置页想看到的是「我自己新开的终端会拿到什么」。
+#[tauri::command]
+pub async fn dsh_home_env_info(_app: AppHandle) -> String {
+    detect::user_env_raw(detect::HOME_ENV_NAME).unwrap_or_default()
+}
+
 #[tauri::command]
 pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, String> {
     // 端口必须是 1~65535 的数字（要求一.5）
@@ -1908,9 +2169,6 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     }
     if config.dsh_home_dir.trim().is_empty() {
         return Err(i18n::t("err_home_empty").to_string());
-    }
-    if config.dsh_path.trim().is_empty() || config.npm_path.trim().is_empty() {
-        return Err(i18n::t("err_paths_empty").to_string());
     }
     // 这两个字段最终会拼成子进程的命令行，在保存入口就把 cmd 元字符挡掉，
     // 用户能立刻在设置页看到原因（使用点还有第二道校验，手改的配置文件绕不过去）。
@@ -1925,9 +2183,19 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     // 存在性由执行点的 validate_program_file 把关。
     // 顺手把规范化后的路径落盘：磁盘上留的就是安全形态，也避免同一路径多种写法。
     let mut config = config;
+    // npm / dsh 的**程序路径不再有设置页字段**（用户不该改动它们，见 index.html）：
+    // 前端回传的是内存里那份，可能带着「新装机器还没检测到」的空值。先按本机环境补一次
+    // —— 与加载时同一条 autofill_from_detection；补完仍为空就**不再拦保存**（原来那句
+    // err_paths_empty 会把没有 npm / DSH 的机器卡死在设置页上，而界面上已经没有地方能改它）。
+    // 空值在每个使用点都有自己的明确报错：启动 → err_dsh_missing，更新 → err_no_npm_update。
+    config::autofill_from_detection(&mut config);
     config.dsh_home_dir = config::validate_home_dir(&config.dsh_home_dir)?;
-    config.dsh_path = config::validate_program_shape("dsh_path", &config.dsh_path)?;
-    config.npm_path = config::validate_program_shape("npm_path", &config.npm_path)?;
+    if !config.dsh_path.trim().is_empty() {
+        config.dsh_path = config::validate_program_shape("dsh_path", &config.dsh_path)?;
+    }
+    if !config.npm_path.trim().is_empty() {
+        config.npm_path = config::validate_program_shape("npm_path", &config.npm_path)?;
+    }
     // npm 缓存位置（首选项）：空 = 不设置；非空则规范化后落盘。与其它路径字段同一套
     // 「保存时校验 + 每次使用点再校验」—— 这里拒掉，就不会出现「设置页存了个非法值，
     // 保存后才在写 npm 配置文件那一步炸」。
@@ -2695,10 +2963,15 @@ pub async fn check_port(app: AppHandle) -> Result<PortCheck, String> {
     Ok(PortCheck { port: cfg.port, in_use: port_in_use(cfg.port) })
 }
 
-/// 完整环境检测（强制刷新缓存）：Node.js / npm / DSH 的存在性与路径、Node 版本
+/// 完整环境检测（强制刷新缓存）：Node.js / npm / DSH / pnpm 的存在性、路径与版本
 #[tauri::command]
 pub async fn detect_environment(_app: AppHandle) -> Result<detect::EnvDetection, String> {
-    Ok(detect::full_detect())
+    // full_detect 会连着跑几组子进程（node --version、pnpm --version、npm config get
+    // prefix，每组都带超时上限），最坏要占十几秒。放在 async 函数里同步跑会卡住
+    // 运行时的工作线程 —— 与 python_status 同一条教训（见那里的说明），挪去阻塞线程。
+    tauri::async_runtime::spawn_blocking(detect::full_detect)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ---------- 首次运行引导安装（要求七；不内置 Node/DSH，只在线引导官方安装包） ----------
@@ -2822,6 +3095,7 @@ fn install_pnpm_blocking(app: &AppHandle) -> Result<String, String> {
     detect::invalidate_cache();
     if let Some(p) = detect::find_pnpm_cmd() {
         let path = p.to_string_lossy().to_string();
+        verify_pnpm_new_enough(&p)?;
         setup_progress(app, "verify", &i18n::fmt("setup_pnpm_detected", &[&path]));
         return Ok(path);
     }
@@ -2837,11 +3111,37 @@ fn install_pnpm_blocking(app: &AppHandle) -> Result<String, String> {
         if let Some(p) = hit {
             let path = p.to_string_lossy().to_string();
             detect::add_extra_bin_dir(PathBuf::from(&prefix));
+            verify_pnpm_new_enough(&p)?;
             setup_progress(app, "verify", &i18n::fmt("setup_pnpm_detected", &[&path]));
             return Ok(path);
         }
     }
     Err(i18n::t("setup_pnpm_notfound").to_string())
+}
+
+/// 装完 / 更新完核对版本 **≥ PNPM_MIN_VERSION**，不够就报错。
+///
+/// 为什么装完还要再问一次：`npm install -g pnpm` 走的是当前 npm 源，私有镜像、企业代理、
+/// 离线缓存完全可能给回一个旧版 —— 退出码 0、`pnpm` 也在 PATH 上，唯独版本不够。
+/// 这正是「pnpm 必须 ≥ 10」这条要求的收口点：不核对就等于把要求写在了文档里。
+///
+/// 版本**读不出**时不拦（与 detect.rs 那条「unknown 不判过低」同一纪律），
+/// 只是拿不准时不去冤枉一次成功安装。
+fn verify_pnpm_new_enough(p: &Path) -> Result<(), String> {
+    let Some(raw) = detect::quick_version(p, 10) else {
+        return Ok(());
+    };
+    let v = raw.trim().to_string();
+    if v.is_empty() {
+        return Ok(());
+    }
+    if detect::pnpm_version_at_least_min(&v) == Some(false) {
+        return Err(i18n::fmt(
+            "setup_pnpm_too_old_after",
+            &[&v, &detect::PNPM_MIN_VERSION_LABEL.to_string()],
+        ));
+    }
+    Ok(())
 }
 
 /// 失败提示里带的输出片段：**末尾**若干字符，压成单行。
@@ -2913,6 +3213,721 @@ pub async fn setup_install_pnpm(app: AppHandle) -> Result<(), String> {
         app2.state::<AppState>().setup_busy.store(false, Ordering::SeqCst);
     });
     Ok(())
+}
+
+// ---------- 首选项「Python 环境」块：状态检测 + 基本安装 / 数据分析扩展包 ----------
+//
+// 后端三件事：
+//   ① `python_status`              —— 只读：有没有可用的 Python、什么版本、两组推荐包装了没；
+//   ② `setup_install_python`       —— 基本安装：必要时先装 Python 本体，再装办公文档读写包；
+//   ③ `setup_install_python_extra` —— 数据分析扩展包（用户在基本安装之后再点一次）。
+//
+// 进度走 `setup-status`，结果走 `setup-result`（target = "python" / "python-extra"），
+// pip 的逐行输出走 `python-log`。与首装向导**共用 setup_busy**：同一时刻只允许一个
+// 安装任务，所以向导不会和 Python 安装抢进度区，撞上时前端拿到 err_setup_busy 即可。
+
+/// 基本安装的 8 个包。**顺序与拼写必须与前端 `py_packages_html` 的文案一致**（改这里就同步改 i18n.js）。
+const PY_BASIC_PKGS: [&str; 8] = [
+    "python-docx",
+    "python-pptx",
+    "openpyxl",
+    "XlsxWriter",
+    "lxml",
+    "Pillow",
+    "et_xmlfile",
+    "typing_extensions",
+];
+
+/// 数据分析扩展包（同样与前端文案同源）
+const PY_EXTRA_PKGS: [&str; 5] = ["numpy", "pandas", "python-dateutil", "tzdata", "six"];
+
+/// 上面两组包对应的**导入名**（python-docx → docx、python-dateutil → dateutil、
+/// XlsxWriter → xlsxwriter、Pillow → PIL —— 与包名不是一回事）。
+/// 状态行回答的是「这些库现在 import 得了吗」，而不是「pip list 里有没有」：
+/// 在别的虚拟环境里装过、或文件损坏，都必须以真正能 import 为准。
+const PY_BASIC_MODULES: &str = "docx pptx openpyxl xlsxwriter lxml PIL et_xmlfile typing_extensions";
+const PY_EXTRA_MODULES: &str = "numpy pandas dateutil tzdata six";
+
+/// 官方安装包的体积粗筛（真机 3.14.7 amd64 ≈ 32MB）。真正的完整性判断在下面那次
+/// SHA-256 比对，这里只是防「截断的下载 / 一个 HTML 错误页被当成安装包」。
+const PY_INSTALLER_MIN_BYTES: u64 = 5 * 1024 * 1024;
+const PY_INSTALLER_MAX_BYTES: u64 = 250 * 1024 * 1024;
+
+/// 首选项里的 Python 状态（只读；打开设置页、语言切换时各查一次）
+#[tauri::command]
+pub async fn python_status() -> Result<PythonStatus, String> {
+    // 探测要起 1~N 个子进程（每个候选跑一次 `--version`，包探测上限 60 秒）。
+    // 直接在 async 命令里跑会**独占 async_runtime 的一个 worker** 最长一分钟，
+    // 期间其它异步命令排队；python 卡住（损坏安装 / 网络盘）时用户一开设置页
+    // 整条命令通道都会变慢 —— 所以下到阻塞线程池里去。
+    tauri::async_runtime::spawn_blocking(python_status_blocking)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn python_status_blocking() -> PythonStatus {
+    let none = PythonStatus {
+        found: false,
+        path: String::new(),
+        version: String::new(),
+        basic_ok: false,
+        extra_ok: false,
+    };
+    let Some(py) = detect::find_python() else {
+        return none;
+    };
+    let path = py.program.to_string_lossy().to_string();
+    let version = py.version().unwrap_or_default();
+    let (basic_ok, extra_ok) = probe_python_packages(&py);
+    PythonStatus { found: true, path, version, basic_ok, extra_ok }
+}
+
+/// 用 `importlib.util.find_spec` 探两组包（比 `pip list` 慢一点但**说真话**：
+/// 装了 import 不动一样算没装）。探测失败（没有这个 python、脚本写错、超时）
+/// 返回 (false, false) = 「两组都没装」，状态行照常显示而不是报错 ——
+/// 这是首选项里的一行状态，不该因为一次探测失败弹错误。
+///
+/// 输出带固定前缀 `__PYSUM__`：**全部装齐时 miss 是空串、打印出来就是一行空白**，
+/// 没有这个前缀就没法区分「探测成功且全装了」与「脚本什么都没打印」，
+/// 后者会被当成「全都装好了」——恰恰是最需要发现的那个状态。
+fn probe_python_packages(py: &detect::PythonExe) -> (bool, bool) {
+    let code = format!(
+        "import importlib.util as u\n\
+         mods = ('{b} {e}').split()\n\
+         miss = []\n\
+         for m in mods:\n\
+         \x20   try:\n\
+         \x20       if u.find_spec(m) is None:\n\
+         \x20           miss.append(m)\n\
+         \x20   except Exception:\n\
+         \x20       miss.append(m)\n\
+         print('__PYSUM__' + ','.join(miss))",
+        b = PY_BASIC_MODULES,
+        e = PY_EXTRA_MODULES,
+    );
+    let args = py.full_args(&["-c", code.as_str()]);
+    let Ok((true, out)) =
+        run_cmd_capture(&py.program.to_string_lossy(), &args, "", Duration::from_secs(60))
+    else {
+        return (false, false);
+    };
+    // 找带前缀的那一行（脚本只打印它；万一 python 先吐了别的告警也不受影响）
+    let Some(line) = out.lines().map(str::trim).find(|l| l.starts_with("__PYSUM__")) else {
+        return (false, false);
+    };
+    let miss: Vec<&str> = line["__PYSUM__".len()..]
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let missing = |modules: &str| modules.split_whitespace().any(|m| miss.contains(&m));
+    (!missing(PY_BASIC_MODULES), !missing(PY_EXTRA_MODULES))
+}
+
+/// 「基本安装」按钮：确保本机有可用的 Python（**已装且够新就跳过本体**），
+/// 再装办公文档读写那 8 个包。
+///
+/// `dir` = 首选项里填的自定义安装位置；空 = Python 官方默认（per-user，不弹 UAC）。
+#[tauri::command]
+pub async fn setup_install_python(app: AppHandle, dir: Option<String>) -> Result<(), String> {
+    // 参数名刻意用单词 `dir`（与 setup_install_node 同一条理由）：多词名会被
+    // Tauri 的 camelCase/snake_case 转换绕晕，`Option<String>` 会**静默**变成 None ——
+    // 表现为「用户填了安装位置却装进了默认目录」，比直接报错难查得多。
+    let target = config::validate_python_install_dir(dir.as_deref().unwrap_or(""))?;
+    spawn_python_task(app, "python", move |a| {
+        python_basic_install_blocking(a, target.as_deref())
+    })
+}
+
+/// 「数据分析扩展包」按钮：在基本包之上再装 5 个（先要有 Python，否则直接给出明确提示）。
+#[tauri::command]
+pub async fn setup_install_python_extra(app: AppHandle) -> Result<(), String> {
+    spawn_python_task(app, "python-extra", |a| {
+        let py = detect::find_python().ok_or_else(|| i18n::t("setup_py_missing").to_string())?;
+        let list = PY_EXTRA_PKGS.join(" ");
+        setup_progress(a, "install", &i18n::fmt("setup_py_pip_start", &[&list]));
+        pip_install_blocking(a, &py, &PY_EXTRA_PKGS)
+    })
+}
+
+/// 抢 `setup_busy` → 开线程跑安装 → 统一回传 `setup-result` → **无论如何释放 busy**。
+/// 两颗按钮共用这一条收尾：busy 忘了复位会让设置页永久卡在「安装中」。
+fn spawn_python_task(
+    app: AppHandle,
+    target: &'static str,
+    work: impl FnOnce(&AppHandle) -> Result<String, String> + Send + 'static,
+) -> Result<(), String> {
+    if app.state::<AppState>().setup_busy.swap(true, Ordering::SeqCst) {
+        return Err(i18n::t("err_setup_busy").to_string());
+    }
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        // panic 也必须走完收尾：`work` 一旦 unwind，下面的 emit 与 busy 复位就都不会执行，
+        // 前端两颗按钮会**永久**停在「安装中」（只能重启程序）。catch_unwind 把 panic
+        // 变成一次普通失败回传，界面照常复位、状态照常释放。
+        //
+        // panic 的原因还得落盘 —— GUI 程序（windows_subsystem="windows"）没有 stderr，
+        // 不写进 desktop.log 就等于丢了，setup_py_panicked 那句「详情见 desktop.log」
+        // 也就成了空话。这里只**算**出原因（&str / String 两种常见 payload），
+        // 记日志放进下面统一的收尾兜底里去做：记日志本身也可能 panic（文件被占用…），
+        // 放在兜底里才不会把这次保护绕过去。
+        let mut panic_detail: Option<String> = None;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&app2)))
+            .unwrap_or_else(|payload| {
+                panic_detail = Some(
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|s| (*s).to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "non-string panic payload".to_string()),
+                );
+                Err(i18n::t("setup_py_panicked").to_string())
+            });
+        let (ok, msg) = match outcome {
+            Ok(m) => (true, m),
+            Err(e) => (false, e),
+        };
+        // 收尾本身也兜一层：记日志 / 发事件那一步要是再 panic（日志文件被占用、
+        // 某把锁被毒化…），最下面那句 busy 复位就永远不会执行 —— 那才是真正的卡死。
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Some(detail) = &panic_detail {
+                logger::append_line(
+                    &logger::desktop_log_path(&app2),
+                    &format!("[setup] Python setup panicked: {detail}"),
+                );
+            }
+            logger::append_line(
+                &logger::desktop_log_path(&app2),
+                &i18n::fmt(
+                    "setup_py_result_line",
+                    &[
+                        &i18n::t(if ok { "setup_word_ok" } else { "setup_word_fail" }),
+                        &msg,
+                    ],
+                ),
+            );
+            let _ = app2.emit(
+                "setup-result",
+                SetupResult { target: target.to_string(), success: ok, message: msg },
+            );
+        }));
+        app2.state::<AppState>().setup_busy.store(false, Ordering::SeqCst);
+    });
+    Ok(())
+}
+
+/// 基本安装的主体：本体（缺才装）→ 办公文档读写包。
+fn python_basic_install_blocking(
+    app: &AppHandle,
+    install_dir: Option<&str>,
+) -> Result<String, String> {
+    setup_progress(app, "install", i18n::t("setup_py_detect"));
+    let py = match detect::find_python() {
+        Some(py) => {
+            // 已有可用的 Python（≥ 3.8）就跳过本体 —— 再装一份只会留下两个解释器、
+            // 两份 PATH，而用户也说不清到底用的是哪个。
+            let line = i18n::fmt(
+                "setup_py_skip",
+                &[
+                    &py.version().unwrap_or_default(),
+                    &py.program.to_string_lossy().to_string(),
+                ],
+            );
+            setup_progress(app, "install", &line);
+            py
+        }
+        None => {
+            install_python_official(app, install_dir)?;
+            detect::find_python().ok_or_else(|| i18n::t("setup_py_missing").to_string())?
+        }
+    };
+    setup_progress(app, "install", &i18n::fmt("setup_py_pip_start", &[&PY_BASIC_PKGS.join(" ")]));
+    pip_install_blocking(app, &py, &PY_BASIC_PKGS)
+}
+
+/// `python -m pip install <包...>`：逐行把 pip 的输出送到 `python-log`（进度区里看得见），
+/// 结果也照实回一句。
+fn pip_install_blocking(
+    app: &AppHandle,
+    py: &detect::PythonExe,
+    pkgs: &[&str],
+) -> Result<String, String> {
+    let mut args = py.full_args(&["-m", "pip", "install"]);
+    args.extend(pkgs.iter().map(|s| (*s).to_string()));
+    // pip 装 numpy / pandas 这类要编译或拉大量依赖时几分钟很常见，给足余量
+    let ok = run_cmd_streaming(
+        app,
+        &py.program.to_string_lossy(),
+        &args,
+        Duration::from_secs(30 * 60),
+    )?;
+    if !ok {
+        return Err(i18n::fmt("setup_py_pip_fail", &[&pkgs.join(" ")]));
+    }
+    let msg = i18n::fmt("setup_py_pip_ok", &[&pkgs.join(" ")]);
+    setup_progress(app, "install", &msg);
+    Ok(msg)
+}
+
+/// 跑一条命令，把输出**逐行**推给前端（`python-log` 事件）+ desktop.log。
+/// 返回 `Ok(退出码 0?)`；spawn / 超时 / 等待失败才是 Err。
+///
+/// 为什么不复用 `spawn_log_reader`：那条路把行流转发到「日志」模态框的事件上，
+/// 而这里的行必须落在设置页的进度区里。pip 失败时**看得见最后一屏**是最有用的诊断，
+/// 所以输出不能攒到结束才一次性给。
+fn run_cmd_streaming(
+    app: &AppHandle,
+    program: &str,
+    args: &[String],
+    timeout: Duration,
+) -> Result<bool, String> {
+    use std::sync::mpsc;
+
+    let mut cmd = command_for(program, args)?;
+    apply_no_window(&mut cmd);
+    cmd.env("PATH", detect::child_path_for(&[program]));
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| i18n::fmt("err_cmd_spawn", &[&program.to_string(), &e.to_string()]))?;
+
+    // 两个管道各开一个读线程：只读一侧会让另一侧填满管道、子进程跟着卡死
+    let (tx, rx) = mpsc::channel::<String>();
+    if let Some(pipe) = child.stdout.take() {
+        pump_lines(tx.clone(), pipe);
+    }
+    if let Some(pipe) = child.stderr.take() {
+        pump_lines(tx.clone(), pipe);
+    }
+    drop(tx); // 主线程不持有 sender：读者线程都结束即 Disconnected
+
+    let mut status: Option<std::process::ExitStatus> = None;
+    let started = Instant::now();
+    loop {
+        while let Ok(line) = rx.try_recv() {
+            python_log_line(app, &line);
+        }
+        match child.try_wait() {
+            Ok(Some(st)) => status = Some(st),
+            Ok(None) => {}
+            Err(e) => return Err(i18n::fmt("err_cmd_wait", &[&e.to_string()])),
+        }
+        if status.is_some() {
+            break;
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(i18n::fmt("err_cmd_timeout", &[&timeout.as_secs()]));
+        }
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(line) => python_log_line(app, &line),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            // 读者都退出了、子进程还没退出：稍等再查，别在这儿空转成忙等
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
+        }
+    }
+    // 退出后把管道里剩下的行收干净（读者遇到 EOF 会自行结束，5 秒兜底防挂）
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(line) => python_log_line(app, &line),
+            Err(_) => break,
+        }
+    }
+    Ok(status.map(|s| s.success()).unwrap_or(false))
+}
+
+/// 读一条管道到 EOF：非空行逐行发给调用方（去行尾换行，跳过纯空白行）。
+fn pump_lines<R: std::io::Read + Send + 'static>(
+    tx: std::sync::mpsc::Sender<String>,
+    pipe: R,
+) {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(pipe);
+        loop {
+            let mut raw = Vec::new();
+            match reader.read_until(b'\n', &mut raw) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+            while matches!(raw.last(), Some(b'\n') | Some(b'\r')) {
+                raw.pop();
+            }
+            if raw.iter().all(|b| b.is_ascii_whitespace()) {
+                continue;
+            }
+            if tx.send(decode_console_output(&raw)).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// 把一行输出同时送到两处：desktop.log 与前端 `python-log` 事件。
+/// `secret::redact` 跟 `spawn_log_reader` 同一道规矩：token / 授权头在日志里必须先打码。
+fn python_log_line(app: &AppHandle, line: &str) {
+    let shown = crate::secret::redact(line);
+    logger::append_line(&logger::desktop_log_path(app), &shown);
+    let _ = app.emit(
+        "python-log",
+        LogEvent { stream: "python".to_string(), line: shown },
+    );
+}
+
+/// 「Python 本体」安装：解析最新稳定版 → 官方发布页取 SHA-256 → 下载 → 比对 →
+/// 官方安装程序 → 落点核对。私有临时目录由外层负责删除（成功失败都删）。
+fn install_python_official(
+    app: &AppHandle,
+    install_dir: Option<&str>,
+) -> Result<String, String> {
+    let dir = create_private_temp_dir("py")?;
+    let out = install_python_verified(&dir, app, install_dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+fn install_python_verified(
+    dir: &Path,
+    app: &AppHandle,
+    install_dir: Option<&str>,
+) -> Result<String, String> {
+    // ① 最新稳定版：python.org 下载页上那句 `Download Python X.Y.Z`
+    let mut probe_err = String::new();
+    let version = match resolve_latest_python_version(dir, &mut probe_err) {
+        Some(v) => {
+            setup_progress(app, "download", &i18n::fmt("setup_py_resolved", &[&v]));
+            v
+        }
+        None => {
+            setup_progress(
+                app,
+                "download",
+                &i18n::fmt(
+                    "setup_py_resolve_fallback",
+                    &[&probe_err, &detect::PYTHON_FALLBACK_VERSION.to_string()],
+                ),
+            );
+            detect::PYTHON_FALLBACK_VERSION.to_string()
+        }
+    };
+
+    let file_name = detect::python_installer_file_name_for(&version);
+    let url = detect::python_installer_url_for(&version);
+    let dest = dir.join(&file_name);
+    let page = detect::PYTHON_DOWNLOAD_PAGE.to_string();
+
+    // ② 官方发布页上这个文件的 SHA-256 —— 拿不到就中止（不给「无校验安装」留退路，
+    //    这也是 Node 那条路修过的坑：只看体积就执行 = 执行一个来路不明的 exe）
+    let expected = fetch_python_installer_sha256(dir, &version, &file_name)?;
+
+    // ③ 下载：curl 优先（实时进度），PowerShell 兜底
+    setup_progress(app, "download", &i18n::fmt("setup_py_dl_start", &[&version, &url]));
+    let mut last_err = i18n::t("setup_no_dl_tool").to_string();
+    if !try_download_curl(&url, &dest, &mut last_err, Some(app), &page) {
+        setup_progress(app, "download", &i18n::fmt("setup_curl_fallback", &[&last_err]));
+        try_download_powershell(&url, &dest, &page)?;
+    }
+
+    // 体积粗筛（防截断、防把 HTML 错误页当安装包），真正的判断是接下来的哈希比对
+    let meta = std::fs::metadata(&dest)
+        .map_err(|_| i18n::fmt("setup_dl_missing", &[&dest.display().to_string(), &page]))?;
+    if meta.len() < PY_INSTALLER_MIN_BYTES {
+        return Err(i18n::fmt("setup_dl_incomplete", &[&meta.len(), &page]));
+    }
+    if meta.len() > PY_INSTALLER_MAX_BYTES {
+        return Err(i18n::fmt(
+            "setup_dl_too_large",
+            &[&meta.len(), &PY_INSTALLER_MAX_BYTES],
+        ));
+    }
+
+    // ④ 核心校验：不一致就中止（不安装、不重试、不降级为无校验）
+    let actual = sha256_hex_of(&dest, PY_INSTALLER_MAX_BYTES)?;
+    if actual != expected {
+        return Err(i18n::fmt(
+            "setup_py_hash_mismatch",
+            &[&file_name, &expected, &actual],
+        ));
+    }
+    setup_progress(app, "download", &i18n::fmt("setup_hash_ok", &[&version, &actual]));
+
+    // ⑤ 启动官方安装程序。**安装页面要显示安装进程**（用户原话）→ `/passive`
+    //    画出进度窗口但不需要逐页点击；这里再报一次我们正在做什么，免得窗口弹出时
+    //    用户不知道是谁弹的。
+    setup_progress(app, "install", i18n::t("setup_py_launch"));
+    if let Some(d) = install_dir {
+        // `&d` 而不是 `d`：i18n::fmt 收 &[&dyn Display]，&str 指向不定长的 str，
+        // 要再取一层引用才 coerce 得过去（见 install_node_verified 里的同一段说明）
+        setup_progress(app, "install", &i18n::fmt("setup_dir_using", &[&d]));
+    }
+    let code = run_python_installer(&dest, install_dir)?;
+    let _ = std::fs::remove_file(&dest);
+
+    // ⑥ 落点核对：Python 的属性名拼错同样可能被静默忽略，返回 0 ≠ 装到了指定位置
+    detect::invalidate_cache();
+    setup_progress(app, "verify", i18n::t("setup_py_verifying"));
+    match code {
+        0 | 3010 => {
+            // 安装器只改了注册表里的 PATH，本进程环境还是启动时的旧快照 —— 不刷新，
+            // 随后 `python -m pip` 可能解析到旧的（或 Store 别名的）那个解释器。
+            let added = detect::refresh_process_path();
+            if added > 0 {
+                setup_progress(app, "verify", &i18n::fmt("setup_py_path_refreshed", &[&added]));
+            }
+            if let Some(d) = install_dir {
+                // 与 Node 同一条：先把该目录并进本进程 PATH，再检测 —— 不依赖
+                // 「安装器何时/是否把注册表 PATH 写成功」
+                detect::prepend_process_path(Path::new(d));
+            }
+            if let Some(d) = install_dir {
+                let Some(exe) = detect::python_exe_in_dir(Path::new(d)) else {
+                    let detected = detect::find_python()
+                        .map(|p| p.program.to_string_lossy().to_string())
+                        .unwrap_or_else(|| i18n::t("setup_word_undetected").to_string());
+                    return Err(i18n::fmt("setup_py_dir_mismatch", &[&d.to_string(), &detected]));
+                };
+                let py = detect::PythonExe { program: exe, prefix: Vec::new() };
+                let ver = py.version().unwrap_or_default();
+                let path = py.program.to_string_lossy().to_string();
+                setup_progress(app, "verify", &i18n::fmt("setup_py_detected", &[&path, &ver]));
+                return Ok(format!("{} {}", path, ver));
+            }
+            match detect::find_python() {
+                Some(py) => {
+                    let path = py.program.to_string_lossy().to_string();
+                    let ver = py.version().unwrap_or_default();
+                    setup_progress(
+                        app,
+                        "verify",
+                        &i18n::fmt("setup_py_detected", &[&path, &ver]),
+                    );
+                    Ok(format!("{} {}", path, ver))
+                }
+                None => Err(i18n::fmt(
+                    "setup_py_not_detected",
+                    &[&code, &page],
+                )),
+            }
+        }
+        // 只有 0 / 3010 算成功。1602（ERROR_INSTALL_USEREXIT）与 1639
+        // （ERROR_INVALID_COMMAND_LINE）是 Windows 安装器家族通用的错误码，出现时
+        // 给一句更有指向性的文案；**其余任何码一律落到下面的通用分支**（带退出码），
+        // 不猜含义 —— 猜错比直说「失败，退出码 X」更难排查。
+        1602 => Err(i18n::t("setup_py_cancelled").to_string()),
+        1639 => Err(i18n::t("setup_py_bad_cmdline").to_string()),
+        c => Err(i18n::fmt("setup_py_fail_code", &[&c])),
+    }
+}
+
+/// 从 python.org 下载页解析「最新稳定版」版本号（如 `3.14.7`）。
+/// 下载失败 / 页面改版都返回 None，由调用方回退固定版本 —— 与 resolve_latest_lts_version 同一策略。
+fn resolve_latest_python_version(dir: &Path, last_err: &mut String) -> Option<String> {
+    let url = detect::PYTHON_DOWNLOAD_PAGE;
+    let dest = dir.join("python-downloads.html");
+
+    let mut curl_err = String::new();
+    let downloaded = try_download_curl(url, &dest, &mut curl_err, None, url)
+        || try_download_powershell(url, &dest, url).is_ok();
+    if !downloaded {
+        *last_err = if curl_err.trim().is_empty() {
+            i18n::t("setup_no_dl_tool").to_string()
+        } else {
+            curl_err
+        };
+        return None;
+    }
+    let html = std::fs::read_to_string(&dest).unwrap_or_default();
+    let _ = std::fs::remove_file(&dest);
+
+    match find_python_version_in_downloads_page(&html) {
+        Some(v) => Some(v),
+        None => {
+            *last_err = i18n::t("setup_py_no_version_entry").to_string();
+            None
+        }
+    }
+}
+
+/// 在 python.org 下载页里找 `Download Python X.Y.Z`（首屏那个按钮），返回版本号。
+/// 纯函数 —— 页面改版时靠 tests 里的样例第一时间发现，而不是让用户去猜安装为什么失败。
+fn find_python_version_in_downloads_page(html: &str) -> Option<String> {
+    const MARKER: &str = "Download Python ";
+    let mut from = 0usize;
+    while let Some(rel) = html.get(from..).and_then(|s| s.find(MARKER)) {
+        let start = from + rel + MARKER.len();
+        let rest = &html[start..];
+        if let Some(v) = take_leading_version(rest) {
+            if detect::is_safe_python_version(&v) {
+                return Some(v);
+            }
+        }
+        from = start;
+    }
+    None
+}
+
+/// 取字符串开头那段 `X.Y.Z`：必须**恰好三段**、每段纯数字，且紧跟的字符不能是
+/// 字母数字（挡住 `3.15.0rc1` 这类预发布后缀）。少于三段的一律不要 —— `3.15 pre`
+/// 这种残缺值拼出来的 URL 必然 404，宁可走回退版本。
+fn take_leading_version(s: &str) -> Option<String> {
+    let end = s
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(s.len());
+    let raw = s[..end].trim_end_matches('.');
+    if s[end..]
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_alphanumeric())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let mut parts = 0usize;
+    for p in raw.split('.') {
+        if p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        parts += 1;
+    }
+    if parts != 3 {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
+/// 取官方发布页表格里 `file_name` 那一行的 SHA-256。
+/// python.org **不发布** SHASUMS256.txt 之类的清单文件（只有发布页 HTML 里每个文件
+/// 自己那行挂着哈希），所以只能抓页面解析；解析不到一律中止。
+fn fetch_python_installer_sha256(
+    dir: &Path,
+    version: &str,
+    file_name: &str,
+) -> Result<String, String> {
+    if !detect::is_safe_python_version(version) {
+        return Err(i18n::fmt("setup_py_bad_version", &[&version]));
+    }
+    let page = detect::python_release_page_url_for(version);
+    let dest = dir.join("python-release.html");
+
+    let mut curl_err = String::new();
+    let downloaded = try_download_curl(
+        &page,
+        &dest,
+        &mut curl_err,
+        None,
+        detect::PYTHON_DOWNLOAD_PAGE,
+    ) || try_download_powershell(&page, &dest, detect::PYTHON_DOWNLOAD_PAGE).is_ok();
+    if !downloaded {
+        let detail = if curl_err.trim().is_empty() {
+            i18n::t("setup_no_dl_tool").to_string()
+        } else {
+            curl_err
+        };
+        return Err(i18n::fmt("setup_py_hash_dl_fail", &[&detail, &page]));
+    }
+    let html = std::fs::read_to_string(&dest)
+        .map_err(|e| i18n::fmt("setup_py_hash_dl_fail", &[&e.to_string(), &page]))?;
+    let _ = std::fs::remove_file(&dest);
+
+    extract_sha256_for_file(&html, file_name)
+        .ok_or_else(|| i18n::fmt("setup_py_hash_missing", &[&file_name, &page]))
+}
+
+/// 从发布页 HTML 里取出 `file_name` **所在表格行**的 64 位十六进制串（小写返回）。
+///
+/// 规则刻意保守，宁可返回 None 让调用方中止安装，也不要拿一个可疑的串去比对：
+///   - 只在「某次出现确实落在 `<tr …> … </tr>` 之内」时才认（逐次出现试，
+///     靠 `html[..idx]` 里最近的 `<tr` / `</tr>` 判定是否在行内）。页面在**表格之前**
+///     的导航/正文里提到过这个文件名时，早期实现会把窗口开到**隔壁那一行**，
+///     取到别的文件的哈希 —— 比对必然失败，还报成「下载可能被篡改」，比报错更糟；
+///   - 行没闭合（页面改版成 div/ul 之类）就不猜，交给调用方报「页面可能已改版」；
+///   - 只接受**恰好 64 个十六进制字符**的一段：短了不是 SHA-256，长了说明它属于别的东西。
+fn extract_sha256_for_file(html: &str, file_name: &str) -> Option<String> {
+    for (idx, _) in html.match_indices(file_name) {
+        // 这次出现之前最近的行开/闭标记：`<tr` 在后 = 仍在这一行里
+        let Some(open) = html[..idx].rfind("<tr") else {
+            continue; // 一个表格都还没开始，说明它在正文里，不是哈希所在的行
+        };
+        if let Some(close) = html[..idx].rfind("</tr>") {
+            if close > open {
+                continue; // 已经闭合过了，这次出现在表格之外
+            }
+        }
+        let rest = &html[idx..];
+        let Some(end) = rest.find("</tr>") else {
+            continue; // 行没闭合：不猜，宁可报「找不到哈希」
+        };
+        let window = &rest[..end];
+        let chars: Vec<char> = window.chars().collect();
+        let mut i = 0usize;
+        while i < chars.len() {
+            if !chars[i].is_ascii_hexdigit() {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < chars.len() && chars[i].is_ascii_hexdigit() {
+                i += 1;
+            }
+            if i - start == 64 {
+                return Some(chars[start..i].iter().collect::<String>().to_ascii_lowercase());
+            }
+        }
+        // 这一行里没有 64 位串（说明这个文件名出现在没有哈希的行里）：继续看它的下一次出现
+    }
+    None
+}
+
+/// 运行官方安装程序并等待退出，返回退出码。
+///
+/// 开关都取自 python.org 的公开文档：
+///   - `/passive`             —— 画出进度窗口、不需要逐页点击（「安装页要显示安装进程」那一条）；
+///   - `InstallAllUsers=0`    —— 装给当前用户，**不弹 UAC**（提权会让后台任务被弹窗卡住，
+///                               而且首装向导的「默认用户场景」根本不需要管理员）；
+///   - `PrependPath=1`        —— 把安装目录写进用户 PATH，装完在任何终端都能敲 python / pip；
+///   - `Include_test=0`       —— 不装测试套件（体积大且用不上）；
+///   - `TargetDir=<目录>`     —— 只在用户填了「安装位置」时传，留空就完全交给官方默认。
+///
+/// 注意与 msiexec 的区别：这里的值是**单个 argv 令牌**（`Command::arg` 直接给
+/// `TargetDir=C:\...`），Python 安装程序按标准 argv 规则解析，带空格的路径由 Rust
+/// 自动加引号包裹整个令牌即可还原 —— 不需要也不能用 msiexec 那套 `raw_arg` 拼法。
+fn run_python_installer(installer: &Path, install_dir: Option<&str>) -> Result<i32, String> {
+    let mut cmd = Command::new(installer);
+    cmd.arg("/passive")
+        .args(["InstallAllUsers=0", "PrependPath=1", "Include_test=0"]);
+    if let Some(d) = install_dir {
+        cmd.arg(format!("TargetDir={}", d));
+    }
+    apply_no_window(&mut cmd); // 只是不创建控制台窗口；安装程序本身是 GUI 程序
+    let mut child = cmd.spawn().map_err(|e| {
+        i18n::fmt(
+            "setup_py_launch_fail",
+            &[&e.to_string(), &detect::PYTHON_DOWNLOAD_PAGE.to_string()],
+        )
+    })?;
+
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => return Ok(st.code().unwrap_or(-1)),
+            Ok(None) => {
+                if started.elapsed() >= Duration::from_secs(30 * 60) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(i18n::t("setup_py_install_timeout").to_string());
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(e) => return Err(i18n::fmt("setup_wait_exit_fail", &[&e.to_string()])),
+        }
+    }
 }
 
 // ---------- 官方安装包的完整性校验（MEDIUM-2 修复） ----------
@@ -3057,14 +4072,15 @@ fn random_temp_suffix(counter: u32) -> String {
     format!("{:016x}", x)
 }
 
-/// 建一个一次性随机私有目录存放下载物。
+/// 建一个一次性随机私有目录存放下载物（`tag` 只进目录名，用来让日志一眼看出是谁的：
+/// `dsh-node-setup-*` / `dsh-py-setup-*`）。
 /// 原来直接写 `%TEMP%\node-v<版本>-x64.msi`：文件名完全可预测，同用户进程可以
 /// 抢先把该名字做成符号链接（curl 的 CREATE_ALWAYS 会顺着链接覆盖任意可写文件），
 /// 或抢先落一个自己的 MSI。随机目录 + create_dir 排他创建能同时挡住这两种。
-fn create_private_temp_dir() -> Result<PathBuf, String> {
+fn create_private_temp_dir(tag: &str) -> Result<PathBuf, String> {
     let base = std::env::temp_dir();
     for attempt in 0u32..5 {
-        let dir = base.join(format!("dsh-node-setup-{}", random_temp_suffix(attempt)));
+        let dir = base.join(format!("dsh-{}-setup-{}", tag, random_temp_suffix(attempt)));
         match std::fs::create_dir(&dir) {
             Ok(()) => return Ok(dir),
             // 撞名（几乎不可能）就换个随机值重试；目录已存在说明有人在那儿放了东西，不复用
@@ -3086,8 +4102,8 @@ fn fetch_expected_sha256(dir: &Path, version: &str, msi_name: &str) -> Result<St
     let dest = dir.join("SHASUMS256.txt");
 
     let mut curl_err = String::new();
-    let downloaded = try_download_curl(&url, &dest, &mut curl_err, None)
-        || try_download_powershell(&url, &dest).is_ok();
+    let downloaded = try_download_curl(&url, &dest, &mut curl_err, None, &page)
+        || try_download_powershell(&url, &dest, &page).is_ok();
     if !downloaded {
         let detail = if curl_err.trim().is_empty() {
             i18n::t("setup_no_dl_tool").to_string()
@@ -3137,9 +4153,10 @@ fn resolve_latest_lts_version(dir: &Path, last_err: &mut String) -> Option<Strin
     let dest = dir.join("SHASUMS256-latest.txt");
 
     let mut curl_err = String::new();
+    let page = detect::NODE_DOWNLOAD_PAGE;
     let downloaded =
-        try_download_curl(&url, &dest, &mut curl_err, None)
-            || try_download_powershell(&url, &dest).is_ok();
+        try_download_curl(&url, &dest, &mut curl_err, None, page)
+            || try_download_powershell(&url, &dest, page).is_ok();
     if !downloaded {
         *last_err = if curl_err.trim().is_empty() {
             i18n::t("setup_no_dl_tool").to_string()
@@ -3197,7 +4214,7 @@ fn install_dir_token(dir: &str) -> String {
 /// 引导安装 Node.js 的入口：下载物一律放进一次性随机私有目录，返回前整目录删除
 /// （校验失败、安装失败、超时、用户取消等任何提前 return 的路径都不会留下安装包）。
 fn install_node_blocking(app: &AppHandle, install_dir: Option<&str>) -> Result<String, String> {
-    let dir = create_private_temp_dir()?;
+    let dir = create_private_temp_dir("node")?;
     let result = install_node_verified(&dir, app, install_dir);
     let _ = std::fs::remove_dir_all(&dir);
     result
@@ -3256,14 +4273,14 @@ fn install_node_verified(
     // 方式一：curl.exe（Windows 10 1803+ 自带）；失败则回退 PowerShell Invoke-WebRequest
     // curl 下载时实时回报进度（MB / 百分比）；PS 回退路径拿不到流式落盘，只有提示行
     let mut last_err = i18n::t("setup_no_dl_tool").to_string();
-    let via_curl = try_download_curl(&url, &dest, &mut last_err, Some(app));
+    let via_curl = try_download_curl(&url, &dest, &mut last_err, Some(app), &page);
     if !via_curl {
         setup_progress(
             app,
             "download",
             &i18n::fmt("setup_curl_fallback", &[&last_err]),
         );
-        try_download_powershell(&url, &dest)?;
+        try_download_powershell(&url, &dest, &page)?;
     }
 
     // 体积只是一道粗筛（防下载被截断），真正的完整性判断在下面这次 SHA-256 比对。
@@ -3482,6 +4499,19 @@ fn is_node_dist_url(url: &str) -> bool {
     url.starts_with("https://nodejs.org/dist/")
 }
 
+/// Python 那一侧的来源守卫：只放行我们**主动**取的三类地址 —— 下载页（解析最新稳定版）、
+/// 发布页（取该安装包的 SHA-256）、`/ftp/python/<版本>/<安装包>` 本身。
+/// 与 nodejs.org/dist 同一尺度：前缀固定，版本号由 `is_safe_python_version` 白名单拼出。
+fn is_python_download_url(url: &str) -> bool {
+    url.starts_with("https://www.python.org/downloads/")
+        || url.starts_with("https://www.python.org/ftp/python/")
+}
+
+/// 两个下载函数共用的来源守卫：Node 与 Python 各自的白名单前缀。
+fn is_allowed_download_url(url: &str) -> bool {
+    is_node_dist_url(url) || is_python_download_url(url)
+}
+
 /// PowerShell 单引号字符串里，字面单引号要写成两个（`''`）。
 ///
 /// 这**不是**注入防线（脚本已整体 base64 化，命令行上没有待解释的字符了），
@@ -3511,9 +4541,12 @@ fn try_download_curl(
     dest: &Path,
     last_err: &mut String,
     app: Option<&AppHandle>,
+    // 超时/失败文案里给用户看的「去哪儿手动下载」（Node → nodejs.org，Python → python.org）。
+    // 两个下载来源共用本函数，所以这个页面只能由调用方给出，不能在这里写死。
+    page: &str,
 ) -> bool {
     // 来源守卫放最前面：不认识的地址，连探大小都不做
-    if !is_node_dist_url(url) {
+    if !is_allowed_download_url(url) {
         *last_err = i18n::fmt("setup_dl_bad_url", &[&url]);
         return false;
     }
@@ -3589,10 +4622,8 @@ fn try_download_curl(
                 if started.elapsed() >= Duration::from_secs(15 * 60) {
                     let _ = child.kill();
                     let _ = child.wait();
-                    *last_err = i18n::fmt(
-                        "setup_dl_timeout",
-                        &[&"900".to_string(), &detect::NODE_DOWNLOAD_PAGE.to_string()],
-                    );
+                    *last_err =
+                        i18n::fmt("setup_dl_timeout", &[&"900".to_string(), &page.to_string()]);
                     return false;
                 }
                 std::thread::sleep(Duration::from_millis(200));
@@ -3613,16 +4644,18 @@ fn try_download_curl(
 /// 路径是随机十六进制目录，所以不可注入，但安全性完全依赖上游白名单，属于「靠巧合」。
 /// 改成编码命令后，命令行上只剩一个不透明的 base64 串，引号 / `$` / `;` 的语义全部消失：
 /// 即便将来 URL 来源放宽（比如改成从 HTML 解析版本号），也不会变成命令注入。
-fn try_download_powershell(url: &str, dest: &Path) -> Result<(), String> {
+fn try_download_powershell(url: &str, dest: &Path, page: &str) -> Result<(), String> {
     // 与 curl 路径同一道来源守卫 —— 不能只有 curl 那条路受保护（M-4 第 3 点）
-    if !is_node_dist_url(url) {
+    if !is_allowed_download_url(url) {
         return Err(i18n::fmt("setup_dl_bad_url", &[&url]));
     }
     // 契约（M-4 第 2 点）：能走到这里的地址必须是「常量前缀 + 白名单版本号」拼出来的。
     // 写成断言是为了让将来改 URL 来源的人在 `cargo test` 里就撞上，而不是在用户机上。
     debug_assert!(
         url.starts_with("https://nodejs.org/dist/v")
-            || url.starts_with("https://nodejs.org/dist/latest-v"),
+            || url.starts_with("https://nodejs.org/dist/latest-v")
+            || url.starts_with("https://www.python.org/downloads/")
+            || url.starts_with("https://www.python.org/ftp/python/"),
         "PowerShell 下载路径收到了非预期的 URL 形状：{url}"
     );
 
@@ -3662,14 +4695,11 @@ fn try_download_powershell(url: &str, dest: &Path) -> Result<(), String> {
                 &[
                     &hint.to_string(),
                     &o.chars().take(300).collect::<String>(),
-                    &detect::NODE_DOWNLOAD_PAGE.to_string(),
+                    &page.to_string(),
                 ],
             ))
         }
-        Err(e) => Err(i18n::fmt(
-            "setup_dl_timeout",
-            &[&e, &detect::NODE_DOWNLOAD_PAGE.to_string()],
-        )),
+        Err(e) => Err(i18n::fmt("setup_dl_timeout", &[&e, &page.to_string()])),
     }
 }
 
@@ -4301,6 +5331,113 @@ mod tests {
         );
         assert!(u.contains(".x/"), "滚动目录必须带 .x：{u}");
         assert!(is_node_dist_url(&u));
+    }
+
+    // ---------- 首选项「Python 环境」块：解析与守卫的纯函数 ----------
+
+    /// 下载页版本解析：只认 `Download Python X.Y.Z`（恰好三段）。
+    /// 预发布（`3.15.0rc1`）与残缺值（`3.15 pre`）一律拒绝 —— 拼出的 URL 必然 404，
+    /// 宁可走固定回退版本，也不要让安装在下载这一步才失败。
+    #[test]
+    fn downloads_page_version_parser_is_picky() {
+        assert_eq!(
+            find_python_version_in_downloads_page(r#"<a href="/downloads/">Download Python 3.14.7</a>"#)
+                .as_deref(),
+            Some("3.14.7")
+        );
+        assert_eq!(
+            find_python_version_in_downloads_page("Download Python 3.15.0rc1"),
+            None
+        );
+        assert_eq!(find_python_version_in_downloads_page("Download Python 3.15 pre"), None);
+        // 第一条匹配不合格时要继续往后找下一条，而不是就此放弃
+        assert_eq!(
+            find_python_version_in_downloads_page(
+                "Download Python 3.15 pre … Download Python 3.14.7"
+            )
+            .as_deref(),
+            Some("3.14.7")
+        );
+        assert_eq!(find_python_version_in_downloads_page("nothing here"), None);
+        assert_eq!(find_python_version_in_downloads_page(""), None);
+    }
+
+    /// 发布页哈希抽取：只在**文件自己那一行**里找恰好 64 位的十六进制串。
+    /// 找不到就返回 None（调用方中止安装），绝不能把隔壁文件的哈希算到自己头上 ——
+    /// 那会让校验必然失败、或者更糟：让用户以为文件被篡改。
+    #[test]
+    fn release_page_sha256_comes_from_the_files_own_row() {
+        let f = "python-3.14.7-amd64.exe";
+        let h = "a".repeat(64);
+        let other = "b".repeat(64);
+        let html = format!(
+            "<tr><td><a href=\"/ftp/python/3.14.7/{f}\">{f}</a></td><td>Windows</td><td>{h}</td></tr>\
+             <tr><td>python-3.14.7-arm64.exe</td><td>{other}</td></tr>",
+        );
+        assert_eq!(extract_sha256_for_file(&html, f).as_deref(), Some(h.as_str()));
+
+        // 自己那行没有哈希 → None（隔壁那行的 64 位 hex 不算数）
+        let html = format!("<tr><td>{f}</td><td>no hash here</td></tr><tr><td>{other}</td></tr>");
+        assert_eq!(extract_sha256_for_file(&html, f), None);
+
+        // 不是 64 位就不是 SHA-256：63 位、65 位都要拒绝
+        let short = "c".repeat(63);
+        let html = format!("<tr><td>{f}</td><td>{short}</td></tr>");
+        assert_eq!(extract_sha256_for_file(&html, f), None);
+        let long = "d".repeat(65);
+        let html = format!("<tr><td>{f}</td><td>{long}</td></tr>");
+        assert_eq!(extract_sha256_for_file(&html, f), None);
+
+        // 文件根本不在页面上 → None
+        assert_eq!(extract_sha256_for_file("<tr><td>other.exe</td></tr>", f), None);
+        assert_eq!(extract_sha256_for_file("", f), None);
+    }
+
+    /// Python 这一侧的下载来源守卫（与 nodejs.org/dist 同一尺度）。
+    #[test]
+    fn python_url_guard_allows_only_python_org() {
+        assert!(is_python_download_url(
+            "https://www.python.org/ftp/python/3.14.7/python-3.14.7-amd64.exe"
+        ));
+        assert!(is_python_download_url("https://www.python.org/downloads/"));
+        assert!(is_python_download_url(
+            "https://www.python.org/downloads/release/python-3147/"
+        ));
+        // 协议降级 / 前缀伪装 / 少个 www 都不放行（构造路径只会产出规范写法）
+        assert!(!is_python_download_url("http://www.python.org/ftp/python/x"));
+        assert!(!is_python_download_url(
+            "https://www.python.org.evil.example/ftp/python/x"
+        ));
+        assert!(!is_python_download_url("https://python.org/ftp/python/x"));
+        assert!(!is_python_download_url(""));
+        // 两个守卫互不放行对方的地址；is_allowed_download_url 是并集
+        assert!(!is_python_download_url("https://nodejs.org/dist/v22.23.2/SHASUMS256.txt"));
+        assert!(!is_node_dist_url("https://www.python.org/downloads/"));
+        assert!(is_allowed_download_url("https://nodejs.org/dist/v22.23.2/SHASUMS256.txt"));
+        assert!(is_allowed_download_url(
+            "https://www.python.org/ftp/python/3.14.7/python-3.14.7-amd64.exe"
+        ));
+        assert!(!is_allowed_download_url("https://evil.example/python-3.14.7-amd64.exe"));
+    }
+
+    /// 安装包 / 发布页地址都由**同一处**版本号推导，且必须落在守卫白名单里。
+    #[test]
+    fn python_urls_are_built_from_one_source() {
+        let file = detect::python_installer_file_name_for("3.14.7");
+        assert!(file.starts_with("python-3.14.7"), "{file}");
+        assert!(file.ends_with(".exe"), "{file}");
+
+        let url = detect::python_installer_url_for("3.14.7");
+        assert!(url.starts_with("https://www.python.org/ftp/python/3.14.7/python-3.14.7"));
+        assert!(url.ends_with(".exe"), "{url}");
+        assert!(is_python_download_url(&url));
+
+        // 发布页路径里的版本号是「去掉点」的 python-3147 形式
+        assert_eq!(
+            detect::python_release_page_url_for("3.14.7"),
+            "https://www.python.org/downloads/release/python-3147/"
+        );
+        assert!(is_python_download_url(&detect::python_release_page_url_for("3.14.7")));
     }
 
     /// `INSTALLDIR` 令牌必须是「引号包住值」，**不能**是「整段加引号」。

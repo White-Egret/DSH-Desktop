@@ -23,6 +23,22 @@ pub struct Config {
     /// DSH 家目录：DSH 摆放配置文件的地方（通过 DSH_HOME 环境变量传给 DSH）
     /// 启动进程的工作目录自动取其上一级目录；DSH 的工作区在网页内随意指定
     pub dsh_home_dir: String,
+    /// 首选项「把家目录写入用户环境变量 DSH_HOME」（默认 false = 不写）。
+    /// 开启时由 `apply_dsh_home_env`（保存后单独调用）把 `dsh_home_dir` 写进
+    /// `HKCU\Environment\DSH_HOME`（REG_SZ），这样**用户另外打开的终端**里的 `dsh`
+    /// 也用同一个家目录；关闭时按归属规则删值 —— 只删指向本程序配置过的家目录的值，
+    /// 用户自己 setx 的别的值原样保留（决策内核见 detect::plan_home_env）。
+    /// 关键边界：它**不影响本程序自己** —— 日常启动（process.rs）与安全模式（safe.rs）
+    /// 都用 `cmd.env("DSH_HOME", …)` 显式覆盖继承值，安全家目录还另由 USERPROFILE 推导。
+    pub export_home_env: bool,
+    /// 「把 pnpm 的源对齐到 npm」**之前** pnpm 的源（恢复按钮要靠它原路退回）。
+    /// 空串 = 没有记录（从未对齐过、或已恢复）。
+    ///
+    /// 只经 `write_config_key` 单键写入（对齐时写、恢复成功后清空），因为它对应的是
+    /// 一个动作而不是偏好；但 `save_config` 是整份结构体落盘，所以前端也把这个字段
+    /// 原样带回（同 `node_min_ack` 的处理），否则一次「保存首选项」就会把它抹成空串、
+    /// 恢复按钮随之消失。
+    pub pnpm_registry_prev: String,
     /// DSH Web 服务端口（默认 3080，可在设置页修改，1~65535）
     pub port: u16,
     /// 附加启动参数（空格分隔，追加在 `dsh web --port <port> --no-open` 之后）
@@ -84,6 +100,11 @@ impl Default for Config {
             npm_cache_dir: String::new(),
             dsh_path: String::new(),
             dsh_home_dir: default_dsh_home_dir(),
+            // 默认**不写**用户环境变量：写注册表是外部副作用（还要广播 WM_SETTINGCHANGE），
+            // 只在用户于首选项里显式打开后才做；老配置没有这个键时按 false 加载
+            export_home_env: false,
+            // 还没有「对齐前的 pnpm 源」可记
+            pnpm_registry_prev: String::new(),
             port: 3080,
             extra_args: String::new(),
             package_name: "@deepseek-ai/dsh".to_string(),
@@ -348,6 +369,20 @@ const NPM_DIR_ERR: DirErrKeys = DirErrKeys {
     is_file: "err_prefix_is_file",
 };
 
+/// Python 安装目录也用同一把尺子：标准库、`Lib\site-packages\…` 在它下面还要建好几层。
+const PYTHON_INSTALL_DIR_MAX_CHARS: usize = 200;
+
+/// 文案键按「哪一次安装」分开：`chars` / `drive` / `is_file` 三条与具体软件无关
+/// （只用 {0}），直接复用 Node 那套；`too_long` / `system` 的正文里点名了 Node.js，
+/// 必须给 Python 自己的两条，否则报错会把人指去 nodejs.org。
+const PYTHON_DIR_ERR: DirErrKeys = DirErrKeys {
+    chars: "err_node_dir_chars",
+    too_long: "err_py_dir_too_long",
+    drive: "err_node_dir_drive",
+    system: "err_py_dir_system",
+    is_file: "err_node_dir_is_file",
+};
+
 /// 「某个目录马上要被安装器写入」的共用校验，返回规范化后的路径（调用方已挡掉空串）。
 ///
 /// 为什么抽出来共用：Node 的安装目录（`INSTALLDIR` 交给提权的 MSI）与 DSH 的安装位置
@@ -462,6 +497,47 @@ pub fn validate_node_install_dir(raw: &str) -> Result<Option<String>, String> {
     )?))
 }
 
+/// 校验「引导安装 Python 的自定义安装目录」，返回规范化后的路径。
+///
+/// 与 Node 的安装目录（`validate_node_install_dir`）同一套规则：这个字符串最终会以
+/// `TargetDir=<路径>` 的形式交给**官方 Python 安装程序**，放任 `C:\Windows\System32`
+/// 就等于把 python.exe 与标准库往系统目录里塞。差别只在报错文案里提到的名字
+/// （`lbl_python_install_dir`）与「Python 会往其下再建几层」这句解释。
+///
+/// `raw` 为空 = 用户没填 = 用 Python 官方默认目录，返回 `Ok(None)`（这不是错误，
+/// 也正是「绝大多数人不动这一格」的那条路径）。
+///
+/// 比 Node 那条**多禁一整棵 `Program Files` 子树**（根目录本身 `validate_install_dir_common`
+/// 已经禁了，这里连子目录一起禁）：本程序给 Python 传的是 `InstallAllUsers=0`——
+/// 装给当前用户、**刻意不提权**（提权会把后台任务卡在 UAC 弹窗上）。这个权限下安装器
+/// 根本写不进 `Program Files\...`，而报错会发生在几秒钟的下载与校验**之后**，
+/// 且症状是「安装程序退出码 5 / 没落进你填的目录」——不看日志根本猜不到是权限。
+/// 提前在这一步拦掉，比事后给一句指错原因的失败消息强。
+pub fn validate_python_install_dir(raw: &str) -> Result<Option<String>, String> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let field = i18n::t("lbl_python_install_dir");
+    let norm =
+        validate_install_dir_common(field, raw, PYTHON_INSTALL_DIR_MAX_CHARS, &PYTHON_DIR_ERR)?;
+    let lower = norm.to_ascii_lowercase();
+    for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(root) = env_lower(var) {
+            if is_under(&lower, &root) {
+                return Err(i18n::fmt("err_py_dir_system", &[&norm]));
+            }
+        }
+    }
+    // 环境变量异常时的兜底（与 validate_install_dir_common 里那两行同一思路）
+    for root in ["c:\\program files", "c:\\program files (x86)"] {
+        if is_under(&lower, root) {
+            return Err(i18n::fmt("err_py_dir_system", &[&norm]));
+        }
+    }
+    Ok(Some(norm))
+}
+
+
 /// 校验「DSH 的安装位置」= npm 的**全局目录**（最终以 `--prefix <目录>` 交给 npm），
 /// 返回规范化后的路径。
 ///
@@ -542,6 +618,33 @@ pub fn validate_npm_cache_dir(raw: &str) -> Result<Option<String>, String> {
         }
     }
     Ok(Some(norm))
+}
+
+/// 校验一个**源地址**（registry URL），返回规范化（trim）后的值。
+///
+/// 拒绝的都是「写进去与读出来不一致」或「会被截断」的形态：
+///   - 非 http/https 开头：pnpm 会把任意字符串当源存起来，之后每一次安装都失败，
+///     而且是在**用户点过按钮之后**的很久才暴露；
+///   - 空格 / `#` / `;`：pnpm 的配置落盘在 ini 风格的 `auth.ini` 里，`#` 与 `;` 是
+///     注释起点（与 npm 的 `~/.npmrc` 同一个坑，见 `validate_npm_cache_dir`），
+///     空格则会让整行变成半个键 —— 这两种都会导致「写的值 ≠ 读回的值」。
+///
+/// 注意这里**不校验尾斜杠**：npm / pnpm 对带不带尾斜杠的源都认，而且目标值来自它们
+/// 自己的 `config get`，属于它们自己写出的形态，我们只做护栏、不改写。
+pub fn validate_registry_url(raw: &str) -> Result<String, String> {
+    let v = raw.trim();
+    if v.is_empty() {
+        return Err(i18n::t("err_reg_url_empty").to_string());
+    }
+    if !v.starts_with("http://") && !v.starts_with("https://") {
+        return Err(i18n::fmt("err_reg_url", &[&v]));
+    }
+    for c in v.chars() {
+        if c.is_whitespace() || c == '#' || c == ';' {
+            return Err(i18n::fmt("err_reg_url_char", &[&v, &c]));
+        }
+    }
+    Ok(v.to_string())
 }
 
 /// 这一行是不是 npm 配置里的 `cache` 键（行首 `#` / `;` 是注释，与 npm 的 ini 解析器一致）。
@@ -806,7 +909,10 @@ pub fn read_dsh_theme(home_dir: &str) -> Option<String> {
 
 /// 用自动检测结果补全缺失/失效的路径。
 /// 仅在内存中生效，不回写配置文件——用户手动保存过的有效路径永远优先。
-fn autofill_from_detection(cfg: &mut Config) {
+///
+/// `pub(crate)`：除加载外，`save_config` 也要用它（首选项不再提供这两个路径的输入框，
+/// 前端可能带回空值 —— 保存前按本机环境补一次，与加载时的行为一致）。
+pub(crate) fn autofill_from_detection(cfg: &mut Config) {
     let detected = detect::detect_all(false);
     let npm_missing = cfg.npm_path.trim().is_empty() || !PathBuf::from(&cfg.npm_path).is_file();
     if npm_missing {
@@ -1138,6 +1244,15 @@ pub fn remember_node_min_ack(app: &AppHandle, min_version: &str) -> Result<(), S
 /// 只该动这一个键（首选项「保存」那条路仍走 save_config 整体提交）。
 pub fn set_toolbar_mode(app: &AppHandle, mode: &str) -> Result<(), String> {
     write_config_key(app, "toolbar_mode", mode)
+}
+
+/// 记下「把 pnpm 的源对齐到 npm」**之前** pnpm 的源，供恢复按钮原路退回；
+/// 传空串 = 清除（恢复成功后调用，让恢复按钮消失）。
+///
+/// 单键写入而不是整份 save_config：这是「一个动作只该改一个键」的典型
+/// （对齐时写、恢复时清），走读取-修改-写回才不会顺手覆盖别的设置。
+pub fn set_pnpm_registry_prev(app: &AppHandle, value: &str) -> Result<(), String> {
+    write_config_key(app, "pnpm_registry_prev", value)
 }
 
 // ---------- 界面语言 sidecar（首次运行向导专用） ----------
@@ -1613,6 +1728,30 @@ mod tests {
         assert_eq!(edit_npmrc_cache("", None), "");
     }
 
+    /// 源地址校验：护栏只拦「写进去与读出来不一致」的形态（非 http(s)、空白、
+    /// 以及 ini 的注释起点 `#` / `;` —— pnpm 的落盘文件 auth.ini 同样按 ini 解析）。
+    #[test]
+    fn validate_registry_url_accepts_http_and_rejects_truncating_shapes() {
+        assert_eq!(
+            validate_registry_url(" https://registry.npmjs.org/ ").unwrap(),
+            "https://registry.npmjs.org/"
+        );
+        // 尾斜杠原样保留：那是 npm/pnpm 自己写出来的形态，我们不改写
+        assert_eq!(
+            validate_registry_url("http://mirrors.tencent.com/npm/").unwrap(),
+            "http://mirrors.tencent.com/npm/"
+        );
+        // 空串 / 非 http(s) 开头：之后每一次安装都会失败，必须当场拦下
+        assert!(validate_registry_url("").is_err());
+        assert!(validate_registry_url("   ").is_err());
+        assert!(validate_registry_url("registry.npmjs.org").is_err());
+        assert!(validate_registry_url("ftp://x/").is_err());
+        // 空白、#、; 会变成「写的值 ≠ 读回的值」（ini 注释起点 / 断行）
+        assert!(validate_registry_url("https://a b/").is_err());
+        assert!(validate_registry_url("https://a#b/").is_err());
+        assert!(validate_registry_url("https://a;b/").is_err());
+    }
+
     /// 「是不是同一个目录」的判定（Windows 语义）：大小写与结尾分隔符差异都算同一个；
     /// 空串一律不算（别把「没设置」误判成「已经是这个」）。
     #[test]
@@ -1622,5 +1761,50 @@ mod tests {
         assert!(!same_dir(r"D:\DSH", r"D:\DSH2"));
         assert!(!same_dir("", r"D:\DSH"));
         assert!(!same_dir(r"D:\DSH", ""));
+    }
+
+    /// Python 的安装位置比 Node 那条**多禁一整棵 `Program Files` 子树**：本程序给
+    /// 官方安装程序传的是 `InstallAllUsers=0`（装给当前用户、刻意不提权），那个权限
+    /// 根本写不进 Program Files —— 必须在**校验这一步**拦下，否则下载与哈希全过之后
+    /// 才在安装器那里失败，报出来的只是一句「退出码 5」，看不出真正原因。
+    /// 留空仍然是「用 Python 官方默认目录」= Ok(None)，不是错误。
+    #[cfg(windows)]
+    #[test]
+    fn python_install_dir_rejects_program_files_but_keeps_custom_dirs() {
+        assert!(
+            validate_python_install_dir("").unwrap().is_none(),
+            "留空 = 官方默认目录，必须是 Ok(None)"
+        );
+        // env 可能带结尾分隔符，先按 path_shape 的口径去掉；空值也当成「没设置」
+        // 免得把后面几个断言的输入变成空串（空串在 validate 里是「用官方默认」）
+        let pf = std::env::var("ProgramFiles")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| r"C:\Program Files".to_string());
+        let pf = pf
+            .trim_end_matches(|c| c == '\\' || c == '/')
+            .to_string();
+        assert!(
+            validate_python_install_dir(&format!(r"{}\Python314", pf)).is_err(),
+            "{pf}\\Python314 必须被拒（per-user 安装写不进去）"
+        );
+        // Program Files 根目录本身（common 那条已经拦，这里确认没被绕过）
+        assert!(validate_python_install_dir(&pf).is_err());
+        // x86 那棵同样禁（没有该环境变量的机器上，common/兜底字面量会接手）
+        if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
+            assert!(
+                validate_python_install_dir(&format!(r"{}\Python314", pf86)).is_err(),
+                "{pf86}\\Python314 必须被拒"
+            );
+        }
+        // 自定义位置照常放行 —— 拦的只是 Program Files，不是「不能改位置」
+        let letter = ('C'..='Z')
+            .find(|c| Path::new(&format!("{}:\\", c)).exists())
+            .expect("至少有一个盘符存在");
+        let ok = format!(r"{}:\DSH-PythonDirTest", letter);
+        assert!(
+            validate_python_install_dir(&ok).is_ok(),
+            "非 Program Files 的自定义目录应当放行: {ok}"
+        );
     }
 }

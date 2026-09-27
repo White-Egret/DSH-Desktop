@@ -39,9 +39,9 @@ pub fn t(key: &str) -> &'static str {
         "log_node_version_unknown" => if en { "[launcher] Warning: cannot read the Node.js version string ({0}); skipping the minimum-version check ({1}+ recommended). DSH itself will report any runtime problem." } else { "[launcher] 警告：读不到 Node.js 版本号（{0}），已跳过最低版本检查（建议 {1} 及以上）。若版本确实过低，将由 DSH 自己报运行错误。" },
         "log_node_min_notice_remembered" => if en { "[launcher] Node.js {0} is below {1}; the user chose to keep it (the start check no longer blocks until the next app update)." } else { "[launcher] Node.js {0} 低于 {1}，用户选择保留该版本继续（启动检查已不再拦截，直至下次程序更新）。" },
         "log_node_check_restored" => if en { "[launcher] \"Keep the outdated Node.js\" cleared: a Node.js below the minimum will block the launch again." } else { "[launcher] 已取消「保留过低版本」：Node.js 版本低于下限时将再次拦截启动。" },
-        "err_dsh_missing" => if en { "DSH not found: {0}.\nInstall it globally first: npm install -g {1}\nor pick the dsh path in Preferences." } else { "未找到 DSH：{0}。\n请先全局安装：npm install -g {1}\n或在「首选项」中手动选择 dsh 路径。" },
-        "err_dsh_missing_auto" => if en { "DSH not found (auto-detection failed).\nInstall it globally first: npm install -g {0}\nor pick the dsh path in Preferences." } else { "未找到 DSH（自动检测失败）。\n请先全局安装：npm install -g {0}\n或在「首选项」中手动选择 dsh 路径。" },
-        "log_npm_missing_hint" => if en { "[launcher] Note: npm.cmd not found; \"Update DSH / check latest version\" is unavailable (launching still works). Configure it in Preferences." } else { "[launcher] 提示：未找到 npm.cmd，「更新 DSH / 查询最新版本」不可用，但不影响启动。可在「首选项」中配置。" },
+        "err_dsh_missing" => if en { "DSH not found: {0}.\nInstall it globally first: npm install -g {1}\n(The first-run wizard can do it in one click; restart this app afterwards.)" } else { "未找到 DSH：{0}。\n请先全局安装：npm install -g {1}\n（首装向导可一键安装，装好后重启本程序。）" },
+        "err_dsh_missing_auto" => if en { "DSH not found (auto-detection failed).\nInstall it globally first: npm install -g {0}\n(The first-run wizard can do it in one click; restart this app afterwards.)" } else { "未找到 DSH（自动检测失败）。\n请先全局安装：npm install -g {0}\n（首装向导可一键安装，装好后重启本程序。）" },
+        "log_npm_missing_hint" => if en { "[launcher] Note: npm.cmd not found; \"Update DSH / check latest version\" is unavailable (launching still works). Install Node.js to enable it — the first-run wizard can do it in one click." } else { "[launcher] 提示：未找到 npm.cmd，「更新 DSH / 查询最新版本」不可用，但不影响启动。安装 Node.js 后即可用（首装向导可一键安装）。" },
         "err_cwd_invalid" => if en { "Invalid configured path: the process working directory does not exist ({0}, derived from home dir {1}). Check the DSH home dir in Preferences." } else { "配置路径无效：启动进程工作目录不存在（{0}，由家目录 {1} 推导）。请在「首选项」中检查 DSH 家目录。" },
         "err_port_busy" => if en { "Port {0} is occupied by another process (possibly an already-running DSH, or another program). This app will not force-kill unknown processes." } else { "端口 {0} 已被其他进程占用（可能是已在运行的 DSH，也可能是其他程序）。本程序不会强制结束未知进程。" },
         "err_spawn_fail" => if en { "Failed to start DSH: {0} (path: {1}). Check that the path is valid and executable." } else { "启动 DSH 失败: {0}（路径: {1}）。请检查路径是否有效、程序是否有执行权限。" },
@@ -125,7 +125,7 @@ pub fn t(key: &str) -> &'static str {
         "err_ver_parse" => if en { "Cannot parse the \"npm view {0} dist-tags\" output:\n{1}" } else { "无法解析 \"npm view {0} dist-tags\" 的输出：\n{1}" },
         "err_view_fail" => if en { "npm view failed: {0}" } else { "npm view 失败: {0}" },
         "err_no_npm_view" => if en { "npm.cmd not found ({0}); cannot query the latest version" } else { "找不到 npm.cmd（{0}），无法查询最新版本" },
-        "err_no_npm_detect" => if en { "Cannot start npm: {0}. Set the npm path in Preferences first." } else { "无法启动 npm: {0}，请先在首选项中配置 npm 路径" },
+        "err_no_npm_detect" => if en { "Cannot start npm: {0}. npm is auto-detected now — install Node.js first (the first-run wizard can do it in one click), then restart this app." } else { "无法启动 npm: {0}。npm 现在由环境自动检测：请先安装 Node.js（首装向导可一键安装），装好后重启本程序" },
         "log_pkg_none" => if en { "No dsh-related package found among the global npm packages.\n\nFull output:\n{0}" } else { "未在 npm 全局包中发现 dsh 相关包。\n\n完整输出:\n{0}" },
         "log_pkg_found" => if en { "Detected global packages:\n{0}\n\nFull output:\n{1}" } else { "检测到全局包:\n{0}\n\n完整输出:\n{1}" },
         "err_pkg_list_fail" => if en { "npm list failed:\n{0}" } else { "npm list 执行失败:\n{0}" },
@@ -135,7 +135,7 @@ pub fn t(key: &str) -> &'static str {
         // 版本频道只允许 latest / next（白名单见 update_dsh）：走到这里说明调用方被改坏了
         "err_update_bad_tag" => if en { "Refusing to run the update: the version channel must be either \"latest\" or \"next\"." } else { "已拒绝执行更新：版本频道只能是 latest 或 next。" },
         "log_update_backup_remind" => if en { "[update] Reminder: whether you upgrade or roll back, back up the DSH home directory {0} first — settings, credentials and session data live there and another version may rewrite their format." } else { "[update] 提醒：无论升级还是退回旧版本，请先备份 DSH 家目录 {0}（配置、密钥与会话数据都在这里，另一个版本可能改写其格式）。" },
-        "err_no_npm_update" => if en { "Cannot start npm: {0}. Fix the npm program path in Preferences." } else { "找不到 npm: {0}，请在「首选项」中修改 npm 程序路径" },
+        "err_no_npm_update" => if en { "Cannot start npm: {0}. npm is auto-detected now — install Node.js first (the first-run wizard can do it in one click), then restart this app." } else { "找不到 npm: {0}。npm 现在由环境自动检测：请先安装 Node.js（首装向导可一键安装），装好后重启本程序" },
         "log_update_cmd" => if en { "[update] Running: \"{0}\" {1} (process cwd: {2} — unrelated to DSH workspaces, PID: {3})" } else { "[update] 执行: \"{0}\" {1}（进程工作目录: {2}，PID: {3}；DSH 工作区与此目录无关）" },
         "err_npm_spawn" => if en { "npm failed to start: {0}" } else { "npm 启动失败: {0}" },
         "err_npm_wait" => if en { "Failed to wait for npm to exit: {0}" } else { "等待 npm 退出失败: {0}" },
@@ -178,19 +178,21 @@ pub fn t(key: &str) -> &'static str {
         "setup_lts_fallback" => if en { "[launcher] Cannot resolve the newest LTS ({0}); using the pinned v{1} instead." } else { "[launcher] 未能解析最新 LTS（{0}），改用固定版本 v{1}。" },
         "setup_node_no_msi_entry" => if en { "no -x64.msi entry found in the official SHASUMS256.txt" } else { "官方 SHASUMS256.txt 中未找到 -x64.msi 条目" },
         "setup_path_refreshed" => if en { "[launcher] Node.js has updated the system PATH; this app refreshed its own PATH ({0} new dir(s)) so npm installs can find node." } else { "[launcher] Node.js 已写入系统 PATH，本进程 PATH 同步刷新（新增 {0} 个目录），后续 npm 安装可以找到 node。" },
-        "setup_dl_progress" => if en { "Downloading the Node.js installer… {0}% ({1} / {2} MB)" } else { "正在下载 Node.js 安装包… {0}%（{1} / {2} MB）" },
-        "setup_dl_progress_unknown" => if en { "Downloading the Node.js installer… {0} MB so far" } else { "正在下载 Node.js 安装包… 已下载 {0} MB" },
+        // 进度行由两个下载来源共用（Node / Python），所以**不点名是哪个安装包** ——
+        // 谁在下载由前一行的「开始下载 …」说清楚，这里只报百分比与体积。
+        "setup_dl_progress" => if en { "Downloading the installer… {0}% ({1} / {2} MB)" } else { "正在下载安装包… {0}%（{1} / {2} MB）" },
+        "setup_dl_progress_unknown" => if en { "Downloading the installer… {0} MB so far" } else { "正在下载安装包… 已下载 {0} MB" },
         "setup_npm_progress" => if en { "Downloading and installing DSH via npm… {0} package file(s) fetched ({1} s)" } else { "正在通过 npm 下载并安装 DSH… 已获取 {0} 个包文件（用时 {1} 秒）" },
         "err_lang_persist_fail" => if en { "[launcher] Failed to persist the language choice: {0}" } else { "[launcher] 语言选择保存失败: {0}" },
         "setup_curl_fallback" => if en { "curl download unavailable ({0}); falling back to PowerShell..." } else { "curl 下载不可用（{0}），改用 PowerShell…" },
         "setup_no_dl_tool" => if en { "No usable download tool found" } else { "未找到可用的下载工具" },
-        "setup_dl_bad_url" => if en { "Refusing to download from an unexpected address: {0} (only https://nodejs.org/dist/ is allowed)." } else { "拒绝从非预期地址下载：{0}（只允许 https://nodejs.org/dist/）。" },
+        "setup_dl_bad_url" => if en { "Refusing to download from an unexpected address: {0} (only https://nodejs.org/dist/ and https://www.python.org/ are allowed)." } else { "拒绝从非预期地址下载：{0}（只允许 https://nodejs.org/dist/ 与 https://www.python.org/）。" },
         "setup_no_curl" => if en { "curl.exe not found" } else { "未找到 curl.exe" },
         "setup_curl_fail" => if en { "curl failed: {0}" } else { "curl 执行失败: {0}" },
         "setup_net_denied" => if en { "Cannot reach the network or access was denied" } else { "无法连接网络或访问被拒绝" },
         "setup_ps_fail" => if en { "PowerShell download failed" } else { "PowerShell 下载失败" },
-        "setup_ps_dl_fail" => if en { "{0}: {1}. Check your network and retry, or download Node.js manually from {2}." } else { "{0}：{1}。请检查网络连接后重试，或到 {2} 手动下载安装 Node.js。" },
-        "setup_dl_timeout" => if en { "Download timed out or failed ({0}). Check your network, or download Node.js manually from {1}." } else { "下载超时或失败（{0}）。请检查网络连接，或到 {1} 手动下载安装 Node.js。" },
+        "setup_ps_dl_fail" => if en { "{0}: {1}. Check your network and retry, or download it manually from {2}." } else { "{0}：{1}。请检查网络连接后重试，或到 {2} 手动下载安装。" },
+        "setup_dl_timeout" => if en { "Download timed out or failed ({0}). Check your network, or download the installer manually from {1}." } else { "下载超时或失败（{0}）。请检查网络连接，或到 {1} 手动下载安装。" },
         "setup_dl_incomplete" => if en { "Download failed: the file is incomplete ({0} bytes). Check your network and retry, or download manually from {1}." } else { "下载失败：文件不完整（{0} 字节）。请检查网络后重试，或到 {1} 手动下载安装。" },
         "setup_dl_missing" => if en { "Download failed: the file was not saved to {0}. Check your network connection and retry, or download manually from {1}." } else { "下载失败：文件未能保存到 {0}。请检查网络连接后重试，或到 {1} 手动下载安装。" },
         "setup_install_launch" => if en { "Download finished. Launching the official installer — please confirm the UAC prompt and wait until it completes..." } else { "下载完成，正在启动官方安装程序。请在弹出的安装窗口 / UAC 提示中确认并等待完成……" },
@@ -253,9 +255,41 @@ pub fn t(key: &str) -> &'static str {
         "cache_npmrc_unchanged" => if en { "npm already uses {0}; its config was left untouched." } else { "npm 配置里已经是 {0}，未做改动。" },
         "cache_npmrc_unchanged_none" => if en { "npm's config has no cache setting; nothing to change." } else { "npm 配置里没有设置缓存位置，无需改动。" },
 
+        // ---------- 首选项：把家目录写入用户环境变量 DSH_HOME ----------
+        // 这条只影响「用户另外打开的终端」：本程序启动 DSH（含安全模式）时会显式
+        // 注入 DSH_HOME 覆盖继承值，所以文案里必须说清新终端才生效、以及关闭后会回到哪。
+        "home_env_written" => if en { "DSH_HOME={0} written to your user environment: a terminal opened from now on uses this home (already-open terminals must be reopened)." } else { "已把 DSH_HOME={0} 写入你的用户环境变量：之后新开的终端里的 dsh 用这个家目录（已开着的终端需新开）。" },
+        "home_env_removed" => if en { "Removed DSH_HOME ({0}) from your user environment: a terminal opened from now on falls back to the default home ~/.dsh." } else { "已从用户环境变量里删除 DSH_HOME（原值 {0}）：之后新开的终端里的 dsh 回到默认家目录 ~/.dsh。" },
+        "home_env_unchanged" => if en { "Your user environment already has DSH_HOME={0}; nothing was changed." } else { "你的用户环境变量里已经是 DSH_HOME={0}，未做改动。" },
+        "home_env_unset" => if en { "Your user environment has no DSH_HOME; nothing to change." } else { "你的用户环境变量里没有 DSH_HOME，无需改动。" },
+        "home_env_kept" => if en { "Your user environment already has DSH_HOME={0}, and it does not point at a home this app has configured — it was left untouched (delete it yourself if it is stale)." } else { "你的用户环境变量里已有 DSH_HOME={0}，但它不指向本程序配置过的家目录，已原样保留（若确认过期可自行删除）。" },
+        "err_home_env_write" => if en { "Cannot write the user environment variable DSH_HOME: {0}" } else { "无法写入用户环境变量 DSH_HOME：{0}" },
+        "err_home_env_delete" => if en { "Cannot delete the user environment variable DSH_HOME: {0}" } else { "无法删除用户环境变量 DSH_HOME：{0}" },
+
+        // ---------- 首选项：包源（registry）对齐 —— 程序只提示，点按钮才改 ----------
+        // 状态行必须带上**比较用的目录**：registry 的答案随 cwd 变（项目级 .npmrc），
+        // 不写清楚"在哪儿不一致"，用户没法判断该不该动。
+        "reg_line_ok" => if en { "Package sources match (checked in {1}): npm and pnpm both use {0}." } else { "包源一致（在 {1} 比对）：npm 与 pnpm 都是 {0}。" },
+        "reg_line_diff" => if en { "Package sources differ (checked in {2}): npm uses {0}, pnpm uses {1}." } else { "包源不一致（在 {2} 比对）：npm 用 {0}，pnpm 用 {1}。" },
+        "reg_line_pnpm_unknown" => if en { "npm uses {0} (checked in {1}), but pnpm's source could not be read." } else { "npm 在 {1} 用 {0}，但读不到 pnpm 的源。" },
+        "reg_line_npm_unknown" => if en { "npm's source could not be read in {0}, so there is nothing to align pnpm to." } else { "读不到 {0} 下 npm 的源，没有可对齐的目标。" },
+        "reg_line_pnpm_missing" => if en { "pnpm not found — install it (first-run wizard) before aligning sources; DSH installs plugins through it." } else { "未找到 pnpm —— DSH 装插件要用它，先在首装向导里装上，才能对齐源。" },
+        "reg_aligned" => if en { "Set pnpm's source to {1} (was {0}). Future installs record {1} as the source in lock files; already-generated lock files are NOT rewritten." } else { "已把 pnpm 的源从 {0} 改为 {1}。今后安装会在锁文件里记录 {1}；已生成的 package-lock.json / pnpm-lock.yaml 不会被改写（要换源需重新生成）。" },
+        "reg_restored" => if en { "Restored pnpm's source to {0}." } else { "已把 pnpm 的源恢复为 {0}。" },
+        "reg_unchanged" => if en { "pnpm already uses {0}; nothing was changed." } else { "pnpm 已经在用 {0}，未做改动。" },
+        "reg_prev_lost" => if en { "(Could not record the previous value {0}: the restore button will be unavailable.)" } else { "（未能记录原值 {0}：本次的「恢复」按钮将不可用。）" },
+        "err_reg_npm_read" => if en { "Cannot read npm's source in {0}. Nothing was changed." } else { "读不到 {0} 下 npm 生效的源，本次没有做任何改动。" },
+        "err_reg_pnpm_missing" => if en { "pnpm not found, so its source cannot be aligned." } else { "未找到 pnpm，无法对齐它的源。" },
+        "err_reg_apply" => if en { "pnpm rejected the new source: {0}" } else { "pnpm 拒绝写入新源：{0}" },
+        "err_reg_verify" => if en { "Verification after writing failed: expected {0}, pnpm still reports {1} (something else is overriding it, such as a project .npmrc or the npm_config_registry variable)." } else { "写入后核对不符：期望 {0}，pnpm 实际仍报 {1}（有别的东西在压过它，例如项目级 .npmrc 或 npm_config_registry 环境变量）。" },
+        "err_reg_prev_none" => if en { "No recorded original source to restore (only a value recorded by \"Align\" can be restored)." } else { "没有记录过 pnpm 的原源，无法恢复（只有点过「对齐」才会有可恢复的记录）。" },
+        "err_reg_url" => if en { "\"{0}\" is not a usable source address (must start with http:// or https://)." } else { "「{0}」不是可用的源地址（必须以 http:// 或 https:// 开头）。" },
+        "err_reg_url_empty" => if en { "The source address is empty." } else { "源地址为空。" },
+        "err_reg_url_char" => if en { "\"{0}\" cannot be used: it contains \"{1}\". pnpm stores this value in an ini-style file where \"#\" and \";\" start a comment, and whitespace breaks the line — either way the value read back would differ from what was written." } else { "「{0}」不能用：其中含字符「{1}」。pnpm 把这个值存在 ini 风格的文件里，「#」「;」是注释起点、空白会断行 —— 两种都会导致**读回来的值与写进去的不一样**。" },
+
         // ---------- 首次运行引导：DSH ----------
         "err_task_busy" => if en { "An install task is already running" } else { "已有安装任务正在进行" },
-        "setup_npm_missing" => if en { "npm.cmd not found ({0}). Install Node.js (which includes npm) first, or set the npm path in Preferences." } else { "未找到 npm.cmd（{0}）。请先安装 Node.js（含 npm），或在「首选项」中配置 npm 路径。" },
+        "setup_npm_missing" => if en { "npm.cmd not found ({0}). Install Node.js (which includes npm) first — the first-run wizard can do it in one click." } else { "未找到 npm.cmd（{0}）。请先安装 Node.js（含 npm）—— 首装向导可一键安装。" },
         // setup_dsh_executing 的模板在下面「自定义安装位置」一节（命令行回显改成整串参数）
         "setup_npm_spawn_fail" => if en { "npm failed to start: {0} (wrong path or missing permission?)" } else { "npm 启动失败: {0}（路径错误或权限不足？）" },
         "setup_npm_timeout" => if en { "npm install timed out (15 minutes) and was aborted. Check your network and retry, or run the install command manually." } else { "npm 安装超时（15 分钟），已中止。请检查网络后重试，或手动执行安装命令。" },
@@ -283,9 +317,51 @@ pub fn t(key: &str) -> &'static str {
         "setup_pnpm_verifying" => if en { "npm has exited; re-detecting pnpm..." } else { "npm 已退出，正在重新检测 pnpm…" },
         "setup_pnpm_detected" => if en { "Detected pnpm: {0}" } else { "检测到 pnpm：{0}" },
         "setup_pnpm_notfound" => if en { "npm reported success but pnpm was not found. Click \"Re-check\", or restart this app." } else { "npm 报告成功但未找到 pnpm。可点击「重新检测」，或重启程序后再试。" },
+        "setup_pnpm_too_old_after" => if en { "pnpm was installed ({0}), but it is still below the required {1}: the npm registry (or its mirror/cache) served an old version. Run `npm install -g pnpm@latest` yourself, or point npm at the official registry and retry." } else { "pnpm 已装上（{0}），但仍低于本程序要求的 {1} —— npm 源（或其镜像 / 离线缓存）给的是旧版。可自行执行 `npm install -g pnpm@latest`，或把 npm 指向官方源后重试。" },
         "setup_pnpm_auto_ok" => if en { "pnpm was installed right after Node.js: {0} (use it later to install DSH plugins)." } else { "已在装好 Node.js 后自动安装 pnpm：{0}（之后可用它安装 DSH 插件）。" },
         "setup_pnpm_auto_fail" => if en { "Node.js is installed, but the automatic pnpm install failed: {0}. You can retry it from the pnpm step in this wizard." } else { "Node.js 已装好，但自动安装 pnpm 失败：{0}。可在本向导的「缺少 pnpm」一步重试。" },
         "setup_pnpm_result_line" => if en { "[setup] Guided pnpm installation {0}: {1}" } else { "[setup] pnpm 引导安装{0}：{1}" },
+
+        // ---------- 首选项「Python 环境」块：状态检测 + 基本安装 / 数据分析扩展包 ----------
+        // lbl_python_install_dir 同样被当作 path_shape() 的 field 参数拼进 err_path_* 文案
+        // （「Python 安装位置：不能是驱动器根目录。」），所以它必须是个人能读懂的名字。
+        "lbl_python_install_dir" => if en { "Python install location" } else { "Python 安装位置" },
+        "err_py_dir_too_long" => if en { "The install location is too long ({0} characters, limit {1}): the Python standard library and site-packages create several more levels underneath it, which would run into the Windows path limit and fail halfway through." } else { "安装位置过长（{0} 字符，上限 {1}）：Python 标准库与 site-packages 会在其下再建好几层，会撞上 Windows 路径长度限制，导致安装到一半失败。" },
+        "err_py_dir_system" => if en { "{0}: Python cannot be installed into a system location (Windows / ProgramData) or anywhere under Program Files — this app installs Python for the current user WITHOUT elevation, so the installer could not write there. Choose another folder (e.g. D:\\Python314)." } else { "{0}：不能把 Python 装进系统位置（Windows / ProgramData），也不能装到 Program Files 及其子目录 —— 本程序是「装给当前用户、不弹 UAC」的，那个权限写不进去。请改选别的目录（例如 D:\\Python314）。" },
+        // —— 基本安装：本体 ——
+        "setup_py_detect" => if en { "Checking the Python environment on this machine..." } else { "正在检查本机 Python 环境…" },
+        "setup_py_skip" => if en { "Python {0} is already installed ({1}); keeping it and skipping the installer." } else { "本机已有 Python {0}（{1}），跳过本体安装。" },
+        "setup_py_resolved" => if en { "[setup] Newest stable Python on python.org: {0}" } else { "[setup] python.org 当前最新稳定版 Python：{0}" },
+        "setup_py_resolve_fallback" => if en { "[setup] Cannot resolve the newest Python version ({0}); using the pinned {1} instead." } else { "[setup] 未能解析最新 Python 版本（{0}），改用固定版本 {1}。" },
+        "setup_py_no_version_entry" => if en { "no \"Download Python X.Y.Z\" entry found on the download page (page layout may have changed)" } else { "下载页上未找到「Download Python X.Y.Z」（页面可能已改版）" },
+        // —— 基本安装：下载与校验（与 Node 那条路同一条纪律：拿不到哈希就不装） ——
+        "setup_py_hash_dl_fail" => if en { "Cannot download the official release page to read the SHA-256 ({0}: {1}). Refusing to install an unverified file — check your network and retry." } else { "无法下载官方发布页以获取 SHA-256（{0}：{1}）。为避免安装未经验证的文件已中止 —— 请检查网络后重试。" },
+        "setup_py_hash_missing" => if en { "The official release page has no SHA-256 for {0} ({1}). Refusing to install an unverified file; if you want this version, download it manually from python.org." } else { "官方发布页上找不到 {0} 的 SHA-256（{1}）。为避免安装未经验证的文件已中止；如确需该版本，请到 python.org 手动下载安装。" },
+        "setup_py_bad_version" => if en { "Refusing to install: the resolved Python version \"{0}\" is not a plain numeric version string." } else { "拒绝安装：解析出的 Python 版本号「{0}」不是合法的纯数字版本串。" },
+        "setup_py_hash_mismatch" => if en { "SHA-256 mismatch for {0}! Official page: {1} Downloaded: {2} The file was deleted and installation aborted — the download may have been tampered with (proxy/network interference). Retry, or install manually from python.org." } else { "{0} 的 SHA-256 与官方发布页不一致！官方记录：{1} 实际下载：{2} 已删除该文件并中止安装 —— 下载可能被篡改（代理/网络劫持）。可稍后重试，或到 python.org 手动安装。" },
+        "setup_py_dl_start" => if en { "Downloading the official Python v{0} installer: {1}" } else { "开始下载官方 Python v{0} 安装包：{1}" },
+        // —— 基本安装：跑官方安装程序 ——
+        // 「安装的页面要显示安装进程」→ /passive 画出进度窗口，这条文案要提前说清是谁弹的窗口
+        "setup_py_launch" => if en { "Download finished. Launching the official Python installer — its window shows the progress; wait until it completes..." } else { "下载完成，正在启动官方 Python 安装程序 —— 安装窗口会显示进度，请等待其完成…" },
+        "setup_py_launch_fail" => if en { "Cannot launch the Python installer: {0}. Install manually from {1}, then click \"Re-check\"." } else { "无法启动 Python 安装程序：{0}。可到 {1} 手动安装后点击「重新检测」。" },
+        "setup_py_install_timeout" => if en { "Timed out waiting for the Python installer (30 minutes); giving up. Install manually from https://www.python.org/downloads/." } else { "等待 Python 安装程序完成超时（30 分钟），已中止等待。可到 https://www.python.org/downloads/ 手动安装。" },
+        // —— 基本安装：装后核对（安装程序返回 0 ≠ 装到了指定位置） ——
+        "setup_py_verifying" => if en { "The installer has exited; re-detecting Python..." } else { "安装程序已退出，正在重新检测 Python…" },
+        "setup_py_path_refreshed" => if en { "[launcher] Python has updated the system PATH; this app refreshed its own PATH ({0} new dir(s)) so `python -m pip` resolves the interpreter just installed." } else { "[launcher] Python 已写入系统 PATH，本进程 PATH 同步刷新（新增 {0} 个目录），后续 `python -m pip` 才找得到刚装的解释器。" },
+        "setup_py_detected" => if en { "Detected Python: {0} {1}" } else { "检测到 Python：{0} {1}" },
+        "setup_py_not_detected" => if en { "The installer exited (code {0}) but python.exe was not detected. PATH may only refresh after a restart — click \"Re-check\", or install manually from {1}." } else { "安装程序已退出（退出码 {0}），但未检测到 python.exe。PATH 可能要重新打开程序才生效；可点击「重新检测」，或到 {1} 手动安装。" },
+        "setup_py_dir_mismatch" => if en { "The Python installer reported success but did not put python.exe into the chosen location {0}. Actually detected: {1}. The official installer ignored the custom location — clear it to use the default, then retry." } else { "Python 安装程序报告成功，但没有把 python.exe 放进指定目录 {0}。实际检测到：{1}。官方安装程序未采纳自定义位置 —— 可清空安装位置改用默认后重试。" },
+        "setup_py_cancelled" => if en { "Installation was cancelled (exit code 1602). Try once more, or install manually from python.org." } else { "安装被取消（退出码 1602）。可再点一次「基本安装」，或到 python.org 手动安装。" },
+        "setup_py_bad_cmdline" => if en { "The Python installer rejected the command line (exit code 1639). Clear the install location to use the official default, then retry. (Nothing was installed.)" } else { "Python 安装程序拒绝了这条命令行（退出码 1639）。可清空安装位置改用官方默认目录后重试。（本次没有安装任何东西。）" },
+        "setup_py_fail_code" => if en { "The Python installer failed (exit code {0}). Common causes: the installer is still running, insufficient permission, low disk space. Retry, or install manually from python.org." } else { "Python 安装失败（退出码 {0}）。常见原因：安装程序仍在运行、权限不足、磁盘空间不够。可重试，或到 python.org 手动安装。" },
+        // —— pip（输出逐行进 python-log，失败时用户能看见最后一屏） ——
+        "setup_py_missing" => if en { "Python is not available yet — run \"Basic install\" in Preferences first." } else { "还没有可用的 Python —— 请先在首选项里点击「基本安装」。" },
+        "setup_py_pip_start" => if en { "Installing Python packages: {0}" } else { "正在安装 Python 包：{0}" },
+        "setup_py_pip_ok" => if en { "Python packages installed: {0}" } else { "Python 包安装完成：{0}" },
+        "setup_py_pip_fail" => if en { "pip failed for: {0} — see the output above for the reason (usually no network, or this Python is too old for that package version)." } else { "pip 安装失败：{0} —— 具体原因见上方输出（通常是无网络，或这个 Python 版本过老装不了该包的新版本）。" },
+        "setup_py_result_line" => if en { "[setup] Python setup {0}: {1}" } else { "[setup] Python 环境{0}：{1}" },
+        // 安装线程 panic 时的兜底文案：不发这一条，前端的两颗按钮会永远停在「安装中」
+        "setup_py_panicked" => if en { "The install task hit an internal error (panic) and was aborted; the busy state has been released so you can retry. Details are in desktop.log." } else { "安装任务内部出错（panic），已中止并释放「安装中」状态，可重试。详情见 desktop.log。" },
 
         // ---------- 安全模式（独立纯净家目录 %USERPROFILE%\.dsh-safe，端口 3081） ----------
         // 门禁 / 预检

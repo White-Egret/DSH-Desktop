@@ -4,6 +4,8 @@
 //! - 检测结果按进程缓存（避免 config::load 高频调用时反复 spawn `where`）；
 //!   安装类操作（setup 向导装完 Node/DSH 后）用 `invalidate_cache()` 强制刷新。
 //! - 只做"发现"，绝不修改用户配置；用户在设置里手动填写的有效路径优先。
+//!   （两处例外，都是**由用户在设置里明确触发**的写入，且都不动 DSH 自己的配置：
+//!   自定义安装位置写用户 PATH；「写入用户环境变量 DSH_HOME」写 `HKCU\Environment`。）
 //! - 不下载、不内置任何运行时，只探测本机已有的安装。
 
 use serde::Serialize;
@@ -62,26 +64,35 @@ fn scan() -> EnvPaths {
     }
 }
 
-/// `where <name>`：返回第一个确实存在的路径。
-pub(crate) fn where_lookup(name: &str) -> Option<PathBuf> {
+/// `where <name>`：返回**全部**确实存在的路径（按 PATH 顺序，只留真文件）。
+///
+/// 为什么不能只取第一个：`%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe` 那个
+/// 执行别名几乎总排在 PATH 最前，而它**确实是一个文件** —— 首个命中就被它占住时，
+/// 排在后面的真实解释器会被整个丢掉，只剩注册表扫描与写死的目录兜底
+/// （D 盘便携版、公司下发的自定义目录就会被误报成「未检测到」）。
+pub(crate) fn where_all(name: &str) -> Vec<PathBuf> {
     let mut cmd = Command::new("where");
     cmd.arg(name);
     apply_no_window(&mut cmd);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    let out = cmd.output().ok()?;
+    let Ok(out) = cmd.output() else {
+        return Vec::new();
+    };
     if !out.status.success() {
-        return None;
+        return Vec::new();
     }
     let text = decode_console_output(&out.stdout);
-    for line in text.lines() {
-        let p = PathBuf::from(line.trim());
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
+    text.lines()
+        .map(|l| PathBuf::from(l.trim()))
+        .filter(|p| p.is_file())
+        .collect()
+}
+
+/// `where <name>`：第一个确实存在的路径（= `where_all` 的首个命中）。
+pub(crate) fn where_lookup(name: &str) -> Option<PathBuf> {
+    where_all(name).into_iter().next()
 }
 
 fn env_path(var: &str) -> Option<PathBuf> {
@@ -129,6 +140,12 @@ fn find_in_dirs(dirs: &[PathBuf], file: &str) -> Option<PathBuf> {
     dirs.iter()
         .map(|d| d.join(file))
         .find(|p| p.is_file())
+}
+
+/// 同 `find_in_dirs`，但返回**全部**命中的路径。同一份 PATH 里两处都有 python 时
+/// （Program Files 与便携版并存），只取第一个会让另一个连 `--version` 验证的机会都没有。
+fn find_all_in_dirs(dirs: &[PathBuf], file: &str) -> Vec<PathBuf> {
+    dirs.iter().map(|d| d.join(file)).filter(|p| p.is_file()).collect()
 }
 
 /// 定位 npm.cmd（npm 与 node 通常同目录）
@@ -330,6 +347,208 @@ pub fn quick_version(exe: &Path, timeout_secs: u64) -> Option<String> {
     }
 }
 
+// ---------- Python 检测（首选项「Python 环境」块 + 安装后核对） ----------
+
+/// 最低可用的 Python：3.8（再老的解释器装不上今天这批办公 / 数据分析包）。
+/// 「系统已装 Python 就跳过本体安装」只对**够新**的安装成立 —— 装着 Python 2.7 的机器
+/// 必须继续往下装，否则后面每一条 pip install 都会在用户看不懂的地方失败。
+pub const PYTHON_MIN_VERSION: &str = "3.8.0";
+
+/// 引导安装回退用的固定版本：python.org 下载页解析失败（离线、改版、被墙）时用它。
+/// 与 `NODE_LTS_VERSION` 同一角色 —— 探测失败不该让安装整体卡住。
+pub const PYTHON_FALLBACK_VERSION: &str = "3.14.7";
+
+/// 官方下载页：既是「最新稳定版」版本号的来源，也是解析失败时的手动安装入口。
+pub const PYTHON_DOWNLOAD_PAGE: &str = "https://www.python.org/downloads/";
+
+/// 版本号白名单（与 `is_safe_node_version` 同尺度）：至少两段、每段非空纯数字。
+/// 版本号会被拼进下载 URL、发布页 URL 与落盘文件名，必须挡住 `..`、空段与任何路径片段。
+pub fn is_safe_python_version(v: &str) -> bool {
+    let mut parts = 0usize;
+    for p in v.split('.') {
+        if p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        parts += 1;
+    }
+    parts >= 2
+}
+
+/// 版本串是否 ≥ `PYTHON_MIN_VERSION`（解析不出来 → false，判「不够用」）。
+pub fn python_version_usable(version: &str) -> bool {
+    let (Some(v), Some(min)) = (
+        parse_version_numbers(version),
+        parse_version_numbers(PYTHON_MIN_VERSION),
+    ) else {
+        return false;
+    };
+    cmp_versions(&v, &min) != std::cmp::Ordering::Less
+}
+
+/// 从 `--version` 的输出（`Python 3.14.7`、`Python 3.14.7+ heads/...`、或直接 `3.14.7`）
+/// 里取出 `X.Y.Z`。取不出（空输出、Python 2 的报错、执行别名那类「什么都不说」）
+/// 一律返回 None —— 调用方据此判「没有可用的 Python」，而不是猜一个版本。
+pub fn parse_python_version(out: &str) -> Option<String> {
+    let first = out.lines().map(str::trim).find(|l| !l.is_empty())?;
+    // 大小写不敏感地剥掉 `Python ` 前缀；剥不掉也无妨，下面按「开头那段数字+点」取值
+    let head = match first.get(..6) {
+        Some(p) if p.eq_ignore_ascii_case("Python") => first[6..].trim(),
+        _ => first,
+    };
+    let token = head.split_whitespace().next().unwrap_or("");
+    // 只取开头那段「数字 + 点」：`3.14.7+`、`3.14.7 (tags/…)`、`3.15.0rc1` 分别取到
+    // 3.14.7 / 3.14.7 / 3.15.0 —— 后缀里的构建信息对「这个解释器能不能用」毫无意义
+    let end = token
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(token.len());
+    let v = token[..end].trim_end_matches('.');
+    if v.matches('.').count() < 2 {
+        return None;
+    }
+    if !v.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return None;
+    }
+    Some(v.to_string())
+}
+
+/// 一个可用的 Python 解释器。`prefix` 是紧跟在程序名之后的固定参数：
+/// 直接找到 `python.exe` 时为空；只剩 `py.exe` 启动器时是 `["-3"]`（明确要 3.x）。
+#[derive(Debug, Clone)]
+pub struct PythonExe {
+    pub program: PathBuf,
+    pub prefix: Vec<String>,
+}
+
+impl PythonExe {
+    /// 拼出完整参数表：`<prefix...> <rest...>`
+    pub fn full_args(&self, rest: &[&str]) -> Vec<String> {
+        let mut v = self.prefix.clone();
+        v.extend(rest.iter().map(|s| (*s).to_string()));
+        v
+    }
+
+    /// 跑一次 `--version` 拿版本号；读不出返回 None。
+    pub fn version(&self) -> Option<String> {
+        let args = self.full_args(&["--version"]);
+        let out = run_capture_timeout(&self.program.to_string_lossy(), &args, 10)?;
+        parse_python_version(&out)
+    }
+}
+
+/// Microsoft Store 的执行别名（`%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe`）
+/// **文件确实存在**，但点开会去应用商店；它的 `--version` 也读不出正经输出。
+/// 这里既按路径显式排除，也要求文件不是 0 字节，两道一起挡。
+fn usable_python_file(p: &Path) -> bool {
+    if !p.is_file() {
+        return false;
+    }
+    let s = p.to_string_lossy().to_lowercase();
+    if s.contains("\\windowsapps\\") {
+        return false;
+    }
+    std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)
+}
+
+/// 常见安装根目录下的 Python 目录（`%LocalAppData%\Programs\Python\Python3xx`、
+/// `%ProgramFiles%\Python3xx`…），按「路径长的优先、再按字典序」排：
+/// 同一个根下公共前缀等长，路径长 = 目录名长，`Python314` 因此排在 `Python39` 前
+/// （纯字典序会把 3.10+ 排到 3.9 后面）。
+fn python_dirs_under(root: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = Vec::new();
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return v;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.to_ascii_lowercase().starts_with("python") {
+            v.push(p);
+        }
+    }
+    v.sort_by(|a, b| {
+        let ka = a.to_string_lossy().to_lowercase();
+        let kb = b.to_string_lossy().to_lowercase();
+        kb.len().cmp(&ka.len()).then(kb.cmp(&ka))
+    });
+    v
+}
+
+/// 定位一个**可用**的 Python（≥ 3.8）。查找顺序与 find_node_exe 同一套理由：
+///   1. `where python.exe` / `python3.exe`（= 本进程环境的 PATH，与用户终端一致）；
+///   2. 注册表 PATH 里的目录 —— Python 安装器刚写完 PATH 时，本进程环境还是旧快照；
+///   3. 常见安装根目录（上一步的 2 还没覆盖到的自定义 / 未写 PATH 的安装）；
+///   4. 最后才是 `py.exe` 启动器（`py -3`）。
+///
+/// 每个候选都要**真跑一次 `--version` 并核对 ≥ 3.8** 才算数 —— 这一步同时挡掉三类
+/// 「文件在但用不了」：Store 执行别名、Python 2、半残安装。所以这里会有 1~N 次
+/// 子进程调用，最坏情况（每步都失败）也就几秒，而它只在打开首选项 / 装完之后跑。
+pub fn find_python() -> Option<PythonExe> {
+    // 第 1 步收**全部**命中而不是第一个：PATH 里的 WindowsApps 执行别名是个真文件，
+    // 取首个命中会把排在它后面的真实解释器整个丢掉（见 where_all 的注释）。
+    let mut direct: Vec<PathBuf> = Vec::new();
+    for name in ["python.exe", "python3.exe"] {
+        for p in where_all(name) {
+            if !direct.contains(&p) {
+                direct.push(p);
+            }
+        }
+    }
+    for name in ["python.exe", "python3.exe"] {
+        for p in find_all_in_dirs(&registry_path_dirs(), name) {
+            if !direct.contains(&p) {
+                direct.push(p);
+            }
+        }
+    }
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(la) = env_path("LOCALAPPDATA") {
+        roots.push(la.join("Programs").join("Python"));
+    }
+    for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(base) = env_path(var) {
+            roots.push(base);
+        }
+    }
+    for root in &roots {
+        for dir in python_dirs_under(root) {
+            if let Some(p) = python_exe_in_dir(&dir) {
+                direct.push(p);
+            }
+        }
+    }
+
+    let mut candidates: Vec<PythonExe> = Vec::new();
+    for p in direct {
+        if usable_python_file(&p) {
+            candidates.push(PythonExe { program: p, prefix: Vec::new() });
+        }
+    }
+    if let Some(p) = where_lookup("py.exe") {
+        if usable_python_file(&p) {
+            candidates.push(PythonExe { program: p, prefix: vec!["-3".to_string()] });
+        }
+    }
+
+    for cand in candidates {
+        if let Some(v) = cand.version() {
+            if python_version_usable(&v) {
+                return Some(cand);
+            }
+        }
+    }
+    None
+}
+
+/// 在**指定目录**里找 python.exe（装后核对专用：不靠 PATH 认自己刚装的东西，
+/// 与 dsh_cmd_in_dir 同一条理由）。
+pub fn python_exe_in_dir(dir: &Path) -> Option<PathBuf> {
+    let p = dir.join("python.exe");
+    if p.is_file() { Some(p) } else { None }
+}
+
 // ---------- 官方 Node.js LTS 安装引导常量（不内置，仅引导在线下载官方安装包） ----------
 
 /// 引导安装跟随的 Node.js **LTS 线**（主版本号）。补丁版本在下载前从官方 dist
@@ -378,6 +597,13 @@ pub fn node_shasums_url_for(version: &str) -> String {
 pub const NODE_MIN_VERSION: &str = "22.19.0";
 /// 上面那个常量的展示形态（带 v，用于界面文案）
 pub const NODE_MIN_VERSION_LABEL: &str = "v22.19.0";
+
+/// pnpm 的最低版本（用户拍板：**pnpm 必须 ≥ 10，低了就必须更新** —— DSH 装插件要走 pnpm，
+/// 旧版在新版 lockfile / 协议上会出问题）。比较用 `10.0.0`，展示用下面的 LABEL
+/// （界面说「≥ v10」比「≥ v10.0.0」更贴合需求原话）。
+pub const PNPM_MIN_VERSION: &str = "10.0.0";
+/// 上面那个常量的展示形态（用于界面文案）
+pub const PNPM_MIN_VERSION_LABEL: &str = "v10";
 
 /// 把 `node --version` / `npm` 输出的版本串解析成可比较的数字序列。
 ///
@@ -432,6 +658,15 @@ pub fn node_version_at_least_min(version: &str) -> Option<bool> {
     Some(cmp_versions(&v, &min) != std::cmp::Ordering::Less)
 }
 
+/// 版本串是否 ≥ `PNPM_MIN_VERSION`。与 `node_version_at_least_min` 同一条纪律：
+/// 解析不出来返回 None —— 由调用方判「未知」，**读不出版本不等于「版本过低」**，
+/// 后者要拦下用户点「完成」，把读不出当成过低会把人堵死在一个修不了的状态里。
+pub fn pnpm_version_at_least_min(version: &str) -> Option<bool> {
+    let v = parse_version_numbers(version)?;
+    let min = parse_version_numbers(PNPM_MIN_VERSION)?;
+    Some(cmp_versions(&v, &min) != std::cmp::Ordering::Less)
+}
+
 /// 版本号白名单：形如 `24.20.0`（至少两段、每段非空纯数字）。
 /// 版本号会被拼进下载 URL、清单匹配名和落盘文件名，必须挡住 `..`、空段与任何路径片段。
 pub fn is_safe_node_version(v: &str) -> bool {
@@ -483,6 +718,54 @@ pub fn node_msi_url_for(version: &str) -> String {
 
 pub fn node_msi_url() -> String {
     node_msi_url_for(&current_node_version())
+}
+
+// ---------- Python 官方安装包的地址（与 node_msi_url_for 同一角色：一处来源，处处同源） ----------
+
+/// 官方安装包的架构后缀。python.org 对 Windows 只发三种 exe：
+/// `-amd64`（x64）、`-arm64`、以及**不带后缀**的 x86。按机器（不是按本进程）判断：
+/// 32 位进程跑在 64 位 Windows 上时 `PROCESSOR_ARCHITECTURE` 是 `x86`，
+/// 真实架构只写在 `PROCESSOR_ARCHITEW6432` 里 —— 只看前者会把一台 x64 机器
+/// 判成要装 32 位 Python。两者都认不出来时给空串 = x86 那个无后缀文件名
+/// （宁可装 32 位也不拼出一个不存在的地址）。
+fn python_installer_arch() -> &'static str {
+    let arch = std::env::var("PROCESSOR_ARCHITEW6432")
+        .or_else(|_| std::env::var("PROCESSOR_ARCHITECTURE"))
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    match arch.as_str() {
+        "AMD64" => "amd64",
+        "ARM64" => "arm64",
+        _ => "",
+    }
+}
+
+/// 某个版本的官方安装包文件名（如 `python-3.14.7-amd64.exe`）。
+pub fn python_installer_file_name_for(version: &str) -> String {
+    let arch = python_installer_arch();
+    if arch.is_empty() {
+        format!("python-{}.exe", version)
+    } else {
+        format!("python-{}-{}.exe", version, arch)
+    }
+}
+
+/// 安装包直链（`https://www.python.org/ftp/python/<版本>/<文件名>`）
+pub fn python_installer_url_for(version: &str) -> String {
+    format!(
+        "https://www.python.org/ftp/python/{}/{}",
+        version,
+        python_installer_file_name_for(version)
+    )
+}
+
+/// 该版本的官方发布页 —— 页面表格里挂着每个文件的 SHA-256（取哈希用）。
+/// 路径里的版本号是**去掉点**的 `python-3147` 形式，与 python.org 的链接一致。
+pub fn python_release_page_url_for(version: &str) -> String {
+    format!(
+        "https://www.python.org/downloads/release/python-{}/",
+        version.replace('.', "")
+    )
 }
 
 /// 官方 Node.js MSI 在本机的**默认安装目录**（`%ProgramFiles%\nodejs`）。
@@ -614,12 +897,69 @@ pub fn npm_effective_cache_dir() -> String {
         .unwrap_or_default()
 }
 
+/// `npm/pnpm config get registry` 输出的取值规则（纯函数，便于离线单测）：
+/// 取**最后一行**以 `http://` 或 `https://` 开头的内容 —— 值总是打在最后，
+/// 而告警/错误行（`npm warn …`、`Error: × …`）永远不会长这样，所以认不出就返回 None。
+fn pick_registry_line(out: &str) -> Option<String> {
+    out.lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| l.starts_with("http://") || l.starts_with("https://"))
+        .map(str::to_string)
+}
+
+/// 在 `cwd` 下**npm 实际会用**的源（含项目级 `.npmrc` 与环境变量的覆盖）。
+/// 读不到返回 None —— 调用方据此报错，不能猜一个默认值当"目标"写进 pnpm。
+pub fn npm_effective_registry(cwd: &str) -> Option<String> {
+    let npm = find_npm_cmd()?;
+    let npm_s = npm.to_string_lossy().to_string();
+    let args = [
+        "config".to_string(),
+        "get".to_string(),
+        "registry".to_string(),
+    ];
+    let out = run_capture_timeout_in(&npm_s, &args, 15, cwd)?;
+    pick_registry_line(&out)
+}
+
+/// 在 `cwd` 下 **pnpm 实际会用**的源。与 [`npm_effective_registry`] 同一个 cwd 才可比：
+/// 项目级 `.npmrc` 对两者同样生效，所以「读出来不一致」只可能来自 pnpm 自己那份配置
+/// （或它的内置默认）—— 也正是「对齐」按钮要动的那一处。
+pub fn pnpm_effective_registry(cwd: &str) -> Option<String> {
+    let pnpm = find_pnpm_cmd()?;
+    let pnpm_s = pnpm.to_string_lossy().to_string();
+    let args = [
+        "config".to_string(),
+        "get".to_string(),
+        "registry".to_string(),
+    ];
+    let out = run_capture_timeout_in(&pnpm_s, &args, 15, cwd)?;
+    pick_registry_line(&out)
+}
+
 /// 带超时地跑一个小命令并合并捕获 stdout + stderr（非零退出或拿不到输出返回 None）。
 ///
 /// 与 process.rs 的 `run_cmd_capture` 同款，但那边要求 cwd、且不对外；这里只有
 /// 「读一行 npm 配置」这种最小需求，所以留一个更小的本地版本，避免为它放宽那边的可见性。
 fn run_capture_timeout(program: &str, args: &[String], timeout_secs: u64) -> Option<String> {
+    run_capture_timeout_in(program, args, timeout_secs, "")
+}
+
+/// 同上，但**指定工作目录**。
+///
+/// 存在的理由是 registry：`npm/pnpm config get registry` 的答案随 cwd 变（项目级
+/// `.npmrc` 只对它所在的那条目录链生效），而我们要比的正是「两个工具在**同一个**
+/// 目录下各自会用哪个源」—— 用本进程自己的 cwd 去问，比出来的不是 DSH 工作目录的现实。
+fn run_capture_timeout_in(
+    program: &str,
+    args: &[String],
+    timeout_secs: u64,
+    cwd: &str,
+) -> Option<String> {
     let mut cmd = command_for(program, args).ok()?;
+    if !cwd.is_empty() {
+        cmd.current_dir(cwd);
+    }
     apply_no_window(&mut cmd);
     // 子进程 PATH 显式补全（可能刚装完 Node，本进程环境还是旧快照）
     cmd.env("PATH", child_path_for(&[program]));
@@ -816,10 +1156,10 @@ fn expand_percent(s: &str) -> String {
     out
 }
 
-/// 读某个注册表键下的 `Path` 值（失败返回空）。
-fn registry_path_raw(key: &str) -> Option<String> {
+/// 读某个注册表键下指定值名的数据（值不存在 / 读不到一律 None）。
+fn registry_value_raw(key: &str, name: &str) -> Option<String> {
     let mut cmd = Command::new("reg");
-    cmd.arg("query").arg(key).arg("/v").arg("Path");
+    cmd.arg("query").arg(key).arg("/v").arg(name);
     apply_no_window(&mut cmd);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -828,7 +1168,12 @@ fn registry_path_raw(key: &str) -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    parse_reg_value(&decode_console_output(&out.stdout), "Path")
+    parse_reg_value(&decode_console_output(&out.stdout), name)
+}
+
+/// 读某个注册表键下的 `Path` 值（失败返回空）。
+fn registry_path_raw(key: &str) -> Option<String> {
+    registry_value_raw(key, "Path")
 }
 
 /// 注册表里的 PATH 目录（Machine 在前、User 在后），带缓存。
@@ -1003,9 +1348,151 @@ fn write_user_path(value: &str) -> Result<(), String> {
 
 /// 广播 `WM_SETTINGCHANGE`（Windows 专有）。失败无所谓：用户重新登录后一样生效，
 /// 所以这里不返回错误、也不阻断安装结果。
-fn broadcast_env_change() {
+pub(crate) fn broadcast_env_change() {
     #[cfg(windows)]
     crate::process::win::broadcast_environment_change();
+}
+
+// ---------- 把「DSH 家目录」写进**用户**环境变量 DSH_HOME ----------
+//
+// 为什么提供它：本程序启动 DSH 时是**显式注入** DSH_HOME 的（process.rs 的日常启动、
+// safe.rs 的安全模式启动都用 `cmd.env("DSH_HOME", …)` 覆盖继承值），所以这里写不写都
+// **不改变本程序自己的行为** —— 受影响的只有「用户另外打开的终端」。不写的话
+// `%DSH_HOME%` 在那个终端里根本未定义（cmd 会把 `%DSH_HOME%` 原样回显出来），
+// 于是那里敲的 `dsh` 沿「显式配置 > $DSH_HOME > ~/.dsh」回退到**另一个家目录**：
+// 设置、凭据、会话与本程序用的那份各存一份、互不相通，而且没有任何提示。
+//
+// 只写 `HKCU\Environment`（当前用户），不碰系统环境：不需要管理员、影响面最小，
+// 与上面写用户 PATH 同一套手法 —— 写完广播 WM_SETTINGCHANGE，用户**新开**的终端
+// 才拿得到；已经开着的终端要新开（或重新登录）才生效。
+
+/// 用户环境变量里的 DSH_HOME 值名（读 / 写 / 删共用，免得三处拼写漂移）。
+pub const HOME_ENV_NAME: &str = "DSH_HOME";
+
+/// 读 `HKCU\Environment` 下某个值的**持久值**（未展开 `%VAR%`；REG_SZ 与
+/// REG_EXPAND_SZ 都能读到）。没有这个值或读不到一律 `None` —— 调用方据此区分
+/// 「没设置」与「设置成了别的值」，这两种在提示里必须分开说。
+pub fn user_env_raw(name: &str) -> Option<String> {
+    registry_value_raw(USER_PATH_KEY, name)
+}
+
+/// 写 `HKCU\Environment` 的一个值。类型固定 **REG_SZ**：写进去的是家目录的**字面**
+/// 路径，新终端里的 `dsh` 就该拿到这个字面量（REG_SZ 不会把 `%…%` 展开成别的东西）。
+/// 这与上面用户 PATH 必须用 REG_EXPAND_SZ 正好相反 —— 那里存的本来就是引用形式，
+/// 展开才对；这里存的是一个已经由 validate_home_dir 规范化过的绝对路径。
+pub fn set_user_env_value(name: &str, value: &str) -> Result<(), String> {
+    let mut cmd = Command::new("reg");
+    cmd.arg("add")
+        .arg(USER_PATH_KEY)
+        .arg("/v")
+        .arg(name)
+        .arg("/t")
+        .arg("REG_SZ")
+        .arg("/d")
+        .arg(value)
+        .arg("/f");
+    apply_no_window(&mut cmd);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let out = cmd
+        .output()
+        .map_err(|e| format!("reg add: {}", e))?;
+    if !out.status.success() {
+        let msg = decode_console_output(&out.stderr);
+        let msg = msg.trim();
+        return Err(if msg.is_empty() {
+            format!("reg add 退出码 {:?}", out.status.code())
+        } else {
+            msg.to_string()
+        });
+    }
+    Ok(())
+}
+
+/// 删除 `HKCU\Environment` 里的一个值。值不存在时 `reg delete` 同样会失败 —— 调用方
+/// 先用 [`plan_home_env`] 判断过「确实有值且归我们管」，所以这里的失败都是真失败
+/// （策略锁注册表、权限不足），必须如实报出来而不是假装已经关掉了开关。
+pub fn delete_user_env_value(name: &str) -> Result<(), String> {
+    let mut cmd = Command::new("reg");
+    cmd.arg("delete")
+        .arg(USER_PATH_KEY)
+        .arg("/v")
+        .arg(name)
+        .arg("/f");
+    apply_no_window(&mut cmd);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let out = cmd
+        .output()
+        .map_err(|e| format!("reg delete: {}", e))?;
+    if !out.status.success() {
+        let msg = decode_console_output(&out.stderr);
+        let msg = msg.trim();
+        return Err(if msg.is_empty() {
+            format!("reg delete 退出码 {:?}", out.status.code())
+        } else {
+            msg.to_string()
+        });
+    }
+    Ok(())
+}
+
+/// [`apply_dsh_home_env`]（process.rs）的动作计划 —— 纯函数，单独单测。
+/// 判错的两种代价分别是「终端继续用错家目录」与「删掉用户自己设的值」，都得钉住。
+pub enum HomeEnvAction {
+    /// 已经是想要的状态，一个字节都不动
+    Unchanged,
+    /// 把这个值写进注册表
+    Write(String),
+    /// 删掉注册表里这个值（携带将被删除的当前值，用于提示「原值是什么」）
+    Remove(String),
+    /// 关闭开关时发现已有值、但它不指向本程序配置过的任何家目录：原样保留并说明
+    KeepForeign(String),
+}
+
+/// `apply_dsh_home_env` 的决策内核：
+/// - `desired` = 开关打开时要写入的家目录（`None` = 关闭开关）；
+/// - `current` = 注册表现值（`None` = 这个值不存在）；
+/// - `owned`   = 「可以由本程序删掉」的家目录集合（当前配置的家目录 + 本次保存
+///   **之前**的家目录 —— 后者用来认领「同一时刻既改家目录又关开关」时留下的旧值）。
+///
+/// 归属规则是这里唯一要紧的判断：**只删指向本程序配置过的家目录的值**。
+/// 用户可能自己 `setx DSH_HOME` 指向别的地方，关掉开关不该顺手把它删掉 ——
+/// 那个值不是我们写进去的。
+pub fn plan_home_env(
+    desired: Option<&str>,
+    current: Option<&str>,
+    owned: &[String],
+) -> HomeEnvAction {
+    let cur = current.map(str::trim).filter(|s| !s.is_empty());
+    match desired {
+        Some(d) => {
+            let want = home_key(d);
+            match cur {
+                // 已经是它：大小写 / 结尾分隔符的差异不算「变了」，别白广播一次
+                Some(c) if home_key(c) == want => HomeEnvAction::Unchanged,
+                _ => HomeEnvAction::Write(d.to_string()),
+            }
+        }
+        None => match cur {
+            None => HomeEnvAction::Unchanged,
+            Some(c) => {
+                if owned.iter().any(|o| home_key(o) == home_key(c)) {
+                    HomeEnvAction::Remove(c.to_string())
+                } else {
+                    HomeEnvAction::KeepForeign(c.to_string())
+                }
+            }
+        },
+    }
+}
+
+/// 家目录比较键：去首尾空白 + 去尾部分隔符 + 小写（Windows 路径大小写不敏感）。
+/// 复用 PATH 那边的 `dir_key`，免得两处对「是不是同一个目录」的标准不一致。
+fn home_key(s: &str) -> String {
+    dir_key(Path::new(s))
 }
 
 // ---------- Tauri 命令层使用的数据结构 ----------
@@ -1023,9 +1510,18 @@ pub struct EnvDetection {
     pub npm_found: bool,
     pub npm_path: String,
     /// pnpm 是否可用（首装向导据此在「Node 已就绪」时提示/代装 pnpm ——
-    /// 它是之后安装 DSH 插件要用的包管理器，缺失不阻断 DSH 启动）
+    /// 它是之后安装 DSH 插件要用的包管理器）
     pub pnpm_found: bool,
     pub pnpm_path: String,
+    /// pnpm 版本（`pnpm --version` 读到才有值）。
+    /// 本程序对 pnpm 有**硬下限**：必须 ≥ PNPM_MIN_VERSION（用户拍板），低于它就要更新。
+    pub pnpm_version: Option<String>,
+    /// pnpm 版本相对下限的状态："supported"（≥ 下限）/ "old"（低于下限，必须更新 ——
+    /// 前端据此把「完成」按钮拦住）/ "unknown"（没装，或版本串读不到/解析不了；
+    /// 读不出**不判**「过低」，只做警示）。
+    pub pnpm_min_state: String,
+    /// pnpm 最低版本（展示用，如 `v10`），文案里的阈值不写死在前端
+    pub pnpm_min_version: String,
     pub dsh_found: bool,
     pub dsh_path: String,
     /// 引导安装将下载的官方 Node.js LTS MSI 地址（展示用）
@@ -1068,6 +1564,12 @@ pub fn full_detect() -> EnvDetection {
         Some(false) => "old",
         None => "unknown",
     };
+    let pnpm_version = paths.pnpm.as_deref().and_then(|p| quick_version(p, 10));
+    let pnpm_min_state = match pnpm_version.as_deref().and_then(pnpm_version_at_least_min) {
+        Some(true) => "supported",
+        Some(false) => "old",
+        None => "unknown",
+    };
     EnvDetection {
         node_found: paths.node.is_some(),
         node_path: opt_to_string(&paths.node),
@@ -1078,6 +1580,9 @@ pub fn full_detect() -> EnvDetection {
         npm_path: opt_to_string(&paths.npm),
         pnpm_found: paths.pnpm.is_some(),
         pnpm_path: opt_to_string(&paths.pnpm),
+        pnpm_version,
+        pnpm_min_state: pnpm_min_state.to_string(),
+        pnpm_min_version: PNPM_MIN_VERSION_LABEL.to_string(),
         dsh_found: paths.dsh.is_some(),
         dsh_path: opt_to_string(&paths.dsh),
         node_msi_url: node_msi_url(),
@@ -1113,6 +1618,50 @@ mod tests {
         assert_eq!(parse_version_numbers("v"), None);
         assert_eq!(parse_version_numbers("node: not found"), None);
         assert_eq!(parse_version_numbers("v1.x.0"), None);
+    }
+
+    #[test]
+    fn parses_python_version_and_its_floor() {
+        // `python --version` 的三种常见形态
+        assert_eq!(parse_python_version("Python 3.14.7").as_deref(), Some("3.14.7"));
+        assert_eq!(parse_python_version("Python 3.14.7+ heads/main").as_deref(), Some("3.14.7"));
+        assert_eq!(parse_python_version("3.14.7\n").as_deref(), Some("3.14.7"));
+        // 读不出版本 = 没有可用的 Python（Store 执行别名、Python 2 的报错都在这里被挡掉）
+        assert_eq!(parse_python_version(""), None);
+        assert_eq!(parse_python_version("python is not recognized"), None);
+        assert_eq!(parse_python_version("Python 2.7.18"), Some("2.7.18".to_string()));
+        // 但「读得出来」不等于「够用」：版本下限是独立判断
+        assert!(python_version_usable("3.8.0"));
+        assert!(python_version_usable("3.14.7"));
+        assert!(python_version_usable("3.14"));
+        assert!(!python_version_usable("2.7.18"));
+        assert!(!python_version_usable("3.7.9"));
+        assert!(!python_version_usable("junk"));
+        // 版本号会拼进 URL，白名单必须挡住路径片段与空段
+        assert!(is_safe_python_version("3.14.7"));
+        assert!(!is_safe_python_version("3.14.7/../../x"));
+        assert!(!is_safe_python_version("3..7"));
+        assert!(!is_safe_python_version("3.14.7 "));
+        assert!(!is_safe_python_version(""));
+    }
+
+    /// pnpm 的硬下限（用户拍板：**pnpm 必须 ≥ 10，低了就必须更新**），与 Node 下限
+    /// 同一套解析/比较，只是阈值不同。
+    /// 关键在最后几条：「读不出版本」必须返回 None 而不是 false —— 前端拿 false 会把
+    /// 「完成」按钮锁死，那台机器上 pnpm 可能明明是够用的，却修不掉、也走不出向导。
+    #[test]
+    fn pnpm_floor_is_v10_and_unknown_is_not_too_old() {
+        assert_eq!(parse_version_numbers(PNPM_MIN_VERSION).unwrap(), vec![10, 0, 0]);
+        assert_eq!(PNPM_MIN_VERSION_LABEL, "v10");
+        for old in ["9.12.3", "9.0.0", "8.15.4", "1.0.0"] {
+            assert_eq!(pnpm_version_at_least_min(old), Some(false), "{old} 应低于下限");
+        }
+        for ok in ["10.0.0", "10.5.1", "11.0.0", "v10.1.2", "10"] {
+            assert_eq!(pnpm_version_at_least_min(ok), Some(true), "{ok} 应满足下限");
+        }
+        for junk in ["", "junk", "pnpm: command not found"] {
+            assert_eq!(pnpm_version_at_least_min(junk), None, "{junk} 应判未知而非过低");
+        }
     }
 
     #[test]
@@ -1261,5 +1810,86 @@ mod tests {
             let with_ref = format!(r"{}\AppData\Roaming\npm;%USERPROFILE%\npm", prof);
             assert!(user_path_with_dir(&with_ref, Path::new(&format!(r"{}\npm", prof))).is_none());
         }
+    }
+
+    /// `config get registry` 输出的取值：只认最后一行 http(s) 地址，
+    /// 告警 / 错误行一律不作数（认不出返回 None，绝不拿告警当源）。
+    #[test]
+    fn pick_registry_line_takes_last_http_line_only() {
+        assert_eq!(
+            pick_registry_line("https://registry.npmjs.org/\n"),
+            Some("https://registry.npmjs.org/".to_string())
+        );
+        // 值在最后、告警在前：取值
+        assert_eq!(
+            pick_registry_line("npm warn old\nhttps://a/\n"),
+            Some("https://a/".to_string())
+        );
+        // 错误输出里没有地址 → None（调用方据此报"读不到"，而不是猜一个源）
+        assert_eq!(pick_registry_line("Error: × boom\n"), None);
+        assert_eq!(pick_registry_line(""), None);
+        // 非 http 形态（比如打印了相对路径/键名）不作数
+        assert_eq!(pick_registry_line("registry=https://a/\n"), None);
+    }
+
+    /// 用户环境变量 DSH_HOME 的写 / 删决策（plan_home_env 纯函数内核）。
+    /// 判错的两种代价分别是「终端继续用错家目录」与「删掉用户自己 setx 的值」，
+    /// 所以每条分支都单独钉住 —— 这段跑在 CI 上（开发机没有 Rust 工具链）。
+    #[test]
+    fn plan_home_env_writes_removes_and_protects_foreign_values() {
+        // ---------- 开关打开（desired = Some） ----------
+        // 值不同 → 写
+        assert!(matches!(
+            plan_home_env(Some(r"D:\DSH\AppData"), Some(r"C:\Users\me\.dsh"), &[]),
+            HomeEnvAction::Write(v) if v == r"D:\DSH\AppData"
+        ));
+        // 原来没有这个值 → 写
+        assert!(matches!(
+            plan_home_env(Some(r"D:\DSH\AppData"), None, &[]),
+            HomeEnvAction::Write(_)
+        ));
+        // 已经是它（大小写 / 结尾反斜杠差异）→ 不动，别白广播一次 WM_SETTINGCHANGE
+        assert!(matches!(
+            plan_home_env(Some(r"D:\DSH\AppData"), Some(r"d:\dsh\appdata\"), &[]),
+            HomeEnvAction::Unchanged
+        ));
+        // 空白值等同于「没设置」，不能被当成「已经是它」而漏写
+        assert!(matches!(
+            plan_home_env(Some(r"D:\DSH\AppData"), Some("   "), &[]),
+            HomeEnvAction::Write(_)
+        ));
+
+        // ---------- 关闭开关（desired = None） ----------
+        let configured = vec![r"D:\DSH\AppData".to_string()];
+        // 没有这个值 → 什么都不做
+        assert!(matches!(
+            plan_home_env(None, None, &configured),
+            HomeEnvAction::Unchanged
+        ));
+        // 指向当前配置的家目录 → 删，并带回将被删掉的原值
+        assert!(matches!(
+            plan_home_env(None, Some(r"D:\DSH\AppData\"), &configured),
+            HomeEnvAction::Remove(v) if v == r"D:\DSH\AppData\"
+        ));
+        // 指向**本次保存之前**的家目录 → 也要删：
+        // 「同一时刻既改家目录又关开关」时，注册表里躺着的是旧值，只比对新值会漏清
+        let before_and_now = vec![
+            r"D:\DSH\NewHome".to_string(),
+            r"D:\DSH\AppData".to_string(),
+        ];
+        assert!(matches!(
+            plan_home_env(None, Some(r"D:\DSH\AppData"), &before_and_now),
+            HomeEnvAction::Remove(_)
+        ));
+        // 指向别处（用户自己 setx 的）→ 原样保留：那不是我们写进去的东西
+        assert!(matches!(
+            plan_home_env(None, Some(r"C:\elsewhere\.dsh"), &configured),
+            HomeEnvAction::KeepForeign(v) if v == r"C:\elsewhere\.dsh"
+        ));
+        // ownedList 为空（无从认领）时更要保留，绝不能无条件删
+        assert!(matches!(
+            plan_home_env(None, Some(r"D:\DSH\AppData"), &[]),
+            HomeEnvAction::KeepForeign(_)
+        ));
     }
 }

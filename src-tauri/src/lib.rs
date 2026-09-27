@@ -55,6 +55,14 @@ pub fn run(launched_by_autostart: bool) {
             // 首选项「npm 缓存位置」：同步进 npm 自己的 ~/.npmrc（最小行编辑）+ 读回实际生效值
             process::apply_npm_cache,
             process::npm_cache_info,
+            // 首选项「把家目录写入用户环境变量 DSH_HOME」：只影响用户另外打开的终端
+            //（本程序启动 DSH 时显式注入，覆盖继承值），写/删 HKCU\Environment + 读回现值
+            process::apply_dsh_home_env,
+            process::dsh_home_env_info,
+            // 首选项「包源 registry 对齐」：读是零风险的（info 自动刷），写要用户点按钮
+            process::registry_align_info,
+            process::registry_align_apply,
+            process::registry_restore,
             process::get_status,
             process::start_dsh,
             process::stop_dsh,
@@ -85,6 +93,10 @@ pub fn run(launched_by_autostart: bool) {
             process::setup_install_dsh,
             // 向导「缺少 pnpm」一步：`npm install -g pnpm`（Node 自动安装成功后也会自动补装）
             process::setup_install_pnpm,
+            // 首选项「Python 环境」块：只读状态 + 基本安装 + 数据分析扩展包
+            process::python_status,
+            process::setup_install_python,
+            process::setup_install_python_extra,
             process::finish_setup,
             process::set_language,
             // 首次运行向导的「Node 版本过低」告警：保留旧版本并继续（只写 node_min_ack 一个键）

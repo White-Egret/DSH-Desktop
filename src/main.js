@@ -719,6 +719,8 @@ async function init() {
   });
   await listen('setup-status', (e) => onSetupStatus(e.payload));
   await listen('setup-result', (e) => onSetupResult(e.payload));
+  // 首选项「Python 安装」的逐行输出（pip 的实时输出；由后端 spawn_log_reader 转发）
+  await listen('python-log', (e) => appendPythonLog(e.payload.line));
   // 安全模式：进入/退出/闪退（safe-mode-change）与修复验证结果（safe-verify）
   await listen('safe-mode-change', (e) => onSafeModeChange(e.payload));
   await listen('safe-verify', (e) => onSafeVerify(e.payload));
@@ -876,15 +878,21 @@ function applyLanguage(lang) {
   // （凭据借用说明是进入时由 Rust 生成的，语言切换后要到下次进入才更新）
   renderSafeButton();
   if (safeMode && !$('safe-modal').classList.contains('hidden')) fillSafeModal(safeReport);
+  // 首选项里的 Python 状态行是动态文案（版本号 + 路径 + 包状态），切语言后按新词典重绘
+  if (!$('settings-modal').classList.contains('hidden')) refreshPythonStatus();
+  // 「用户环境变量 DSH_HOME」那行小字同样没挂 data-i18n（值是问后端拿的），切语言后重绘
+  if (!$('settings-modal').classList.contains('hidden')) refreshHomeEnvInfo();
+  // 包源 registry 那行由后端按语言拼好，切语言后同样要重绘
+  if (!$('settings-modal').classList.contains('hidden')) refreshRegistryInfo();
 }
 
 // ---------- 设置 ----------
 
 function openSettings() {
   if (!config) return;
-  $('set-npm-path').value = config.npm_path;
+  // npm / dsh 的程序路径不再有输入框（用户不该改动它们，见 index.html 的说明）：
+  // 保存时原样带回内存里那份（后端加载时已自动检测/回填），不做任何界面读写。
   $('set-npm-cache').value = config.npm_cache_dir || '';
-  $('set-dsh-path').value = config.dsh_path;
   $('set-home-dir').value = config.dsh_home_dir;
   $('set-port').value = config.port;
   $('set-timeout').value = config.health_timeout_secs;
@@ -901,10 +909,15 @@ function openSettings() {
   const sv = Number(config.safe_verify_secs);
   $('set-safe-verify').value = Number.isFinite(sv) ? sv : 80;
   $('set-config-path').textContent = config.config_path;
-  markFlag('npm-exists-flag', config.npm_exists);
-  markFlag('dsh-exists-flag', config.dsh_exists);
   markFlag('home-exists-flag', config.home_exists);
+  // 「写入用户环境变量 DSH_HOME」开关 + 它下面那行小字（新终端会拿到的持久值）
+  $('set-export-home-env').checked = config.export_home_env === true;
+  refreshHomeEnvInfo();
   refreshNpmCacheInfo();
+  // 包源 registry 那行状态（+ 两个按钮的可见性）：读是零风险的，每次打开都重问一次
+  refreshRegistryInfo();
+  // Python 块：每次打开都重新问一次后端（安装在后台跑，界面上的状态不能是旧的）
+  refreshPythonStatus();
   showModal('settings-modal');
 }
 
@@ -937,6 +950,180 @@ function markFlag(id, ok) {
   el.className = 'flag ' + (ok ? 'ok' : 'bad');
 }
 
+/// 首选项里「用户环境变量 DSH_HOME」那行小字：显示**新终端**会拿到的持久值。
+/// 读注册表（dsh_home_env_info）而不是本进程环境 —— 进程环境是启动时的快照，而且本程序
+/// 启动 DSH 时还会显式覆盖它；用户关心的是「我自己开的终端里会是什么」。
+async function refreshHomeEnvInfo() {
+  const el = $('home-env-now');
+  if (!el) return;
+  try {
+    const v = ((await invoke('dsh_home_env_info')) || '').trim();
+    el.textContent = v ? t('home_env_now', v) : t('home_env_now_unset');
+  } catch (e) {
+    // 问不到（注册表被策略锁定等）就不显示：它是提示，不该挡住设置页
+    el.textContent = '';
+  }
+}
+
+/// 首选项里「包源 registry」那行状态：npm 与 pnpm 在 **DSH 工作目录**下各自生效的源。
+/// 整行文案由后端按当前语言拼好（同一句话不在两处各维护一份），这里只负责渲染，
+/// 外加两个按钮 —— 按钮文案要带目标 URL / 原值，所以用返回的字段自己拼。
+///
+/// 为什么是按钮而不是开关：改 registry = 改**今后所有安装流量**的去向，属于供应链敏感
+/// 操作，而且不是需要持续维护的状态（每次保存都重写会跟用户手动改的值打架）。
+/// 所以读（零风险）自动刷，写只在点击时发生。
+async function refreshRegistryInfo() {
+  const line = $('registry-line');
+  const alignBtn = $('btn-registry-align');
+  const restoreBtn = $('btn-registry-restore');
+  if (!line || !alignBtn || !restoreBtn) return;
+  try {
+    const info = await invoke('registry_align_info');
+    const target = (info.target || '').trim();
+    const prev = (info.prev || '').trim();
+    line.textContent = info.line || '';
+    // 三个条件任一不满足都不显示对齐按钮：没有 pnpm / 已经一致 / 读不到目标
+    const showAlign = !!info.pnpm_exists && !info.aligned && !!target;
+    alignBtn.classList.toggle('hidden', !showAlign);
+    if (showAlign) alignBtn.textContent = t('btn_align_registry', target);
+    restoreBtn.classList.toggle('hidden', !prev);
+    if (prev) restoreBtn.textContent = t('btn_restore_registry', prev);
+  } catch (e) {
+    // 问不到（npm / pnpm 缺失等）就整块收起：它是提示，不该挡住设置页
+    line.textContent = '';
+    alignBtn.classList.add('hidden');
+    restoreBtn.classList.add('hidden');
+  }
+}
+
+// ---------- 首选项：Python 建议安装块 ----------
+//
+// 与首装向导共用后端的 setup-status / setup-result 事件（文案由 Rust 端按当前语言生成），
+// 靠 target = "python" 加这里自己的 busy 标志分流 —— 向导不在这块页面上时，进度不会被
+// 拽进向导的进度区，反之亦然。安装跑在后端线程里：用户关掉首选项也没关系，事件照常
+// 到达并更新这里的状态，重开首选项会再拉一次 python_status。
+//
+const pythonTask = { active: false };
+
+/// 问后端「本机有没有 Python / 什么版本 / 推荐的包装了没」并画状态行。
+async function refreshPythonStatus() {
+  const el = $('python-status');
+  if (!el) return;
+  // 安装进行中不去打扰后端（它正忙着），状态行由进度区负责
+  if (!pythonTask.active) el.textContent = t('py_checking');
+  try {
+    renderPythonStatus(await invoke('python_status'));
+  } catch (e) {
+    // 问不到就如实说一句：状态行只是提示，不该挡住整个设置页。
+    // 同时把「安装位置」放开 —— 那一格只在「没装 Python」时露出，而探测失败的机器
+    // 十有八九正是没装的那一台；跟着状态一起藏起来，用户就没法预填安装目录了。
+    el.textContent = t('toast_py_status_fail', e);
+    const dirRow = $('python-dir-row');
+    if (dirRow) dirRow.classList.remove('hidden');
+  }
+}
+
+function renderPythonStatus(s) {
+  const el = $('python-status');
+  if (!el || !s) return;
+  if (!s.found) {
+    el.textContent = t('py_missing');
+  } else {
+    const ver = s.version ? s.version : t('py_ver_unknown');
+    const pkgs = (s.basic_ok && s.extra_ok) ? 'py_pkgs_all'
+      : s.basic_ok ? 'py_pkgs_basic_only'
+      : s.extra_ok ? 'py_pkgs_extra_only'
+      : 'py_pkgs_none';
+    // 用中性的「 · 」连接，中英文都不别扭
+    el.textContent = t('py_found', ver, s.path || '?') + ' · ' + t(pkgs);
+  }
+  // 安装位置只在「还没装 Python 本体」时才有意义：装好后藏起来，免得有人以为能改
+  const dirRow = $('python-dir-row');
+  if (dirRow) dirRow.classList.toggle('hidden', !!s.found);
+}
+
+function setPythonProgress(show, text) {
+  const el = $('python-progress');
+  if (!el) return;
+  el.classList.toggle('hidden', !show);
+  if (text) $('python-progress-text').textContent = text;
+}
+
+/// 进度圈只在任务真正跑着的时候转：结果落地后消息要留着读，圈得收起来。
+function setPythonSpinner(show) {
+  const sp = document.querySelector('#python-progress .spinner');
+  if (sp) sp.classList.toggle('hidden', !show);
+}
+
+/// 安装过程的逐行输出（pip 的实时输出走 python-log 事件）。行数封顶：
+/// 这块面板是模态框里的一小条，放任增长只会把状态行顶出视野。
+function appendPythonLog(line) {
+  const pre = $('python-log');
+  if (!pre) return;
+  pre.classList.remove('hidden');
+  pre.textContent += (pre.textContent ? '\n' : '') + line;
+  const lines = pre.textContent.split('\n');
+  if (lines.length > 300) pre.textContent = lines.slice(-300).join('\n');
+  pre.scrollTop = pre.scrollHeight;
+}
+
+function renderPythonButtons() {
+  ['btn-python-basic', 'btn-python-extra'].forEach((id) => {
+    const b = $(id);
+    if (b) b.disabled = pythonTask.active;
+  });
+}
+
+/// 两个安装按钮共用的入口：起后端任务，进度与结果由事件驱动。
+async function runPythonInstall(set) {
+  if (pythonTask.active) {
+    toast(t('py_busy'), true);
+    return;
+  }
+  // 基本安装可能连 Python 本体一起装，**开始之前**就把目录交给用户改：
+  // 留空 = Python 官方默认位置，填了（或「浏览」选了）后端会先校验再交给安装程序。
+  const dirEl = $('set-python-dir');
+  const dir = dirEl ? dirEl.value.trim() : '';
+  pythonTask.active = true;
+  renderPythonButtons();
+  $('python-log').textContent = '';
+  $('python-log').classList.add('hidden');
+  setPythonProgress(true, t('py_progress_start'));
+  // 转圈要跟着任务走：结果回来时上面的 onPythonResult 会把它收起来，
+  // 否则一条早就结束的「成功」消息旁边还在转圈，看着像卡住了
+  setPythonSpinner(true);
+  try {
+    if (set === 'basic') {
+      await invoke('setup_install_python', { dir: dir || null });
+    } else {
+      await invoke('setup_install_python_extra');
+    }
+    // 后续由 setup-status / setup-result（target = "python"）事件接手
+  } catch (e) {
+    // 起不来（比如向导的安装任务占着 busy）：当场把界面复位。
+    // 报错文案留在进度区里读，不要把整块藏起来 —— 藏了就只剩一个一闪而过的 toast
+    pythonTask.active = false;
+    renderPythonButtons();
+    setPythonSpinner(false);
+    setPythonProgress(true, String(e));
+    appendPythonLog(String(e));
+    toast(String(e), true);
+  }
+}
+
+function onPythonResult(p) {
+  pythonTask.active = false;
+  renderPythonButtons();
+  // 结果文案留在进度区（成功与失败都要能读到：toast 只闪几秒）
+  const msg = p.message || (p.success ? t('toast_py_ok') : t('toast_py_fail'));
+  setPythonProgress(true, msg);
+  setPythonSpinner(false);
+  appendPythonLog(msg);
+  toast(msg, !p.success);
+  // 装完 Python 本体 / 装完包之后，状态行与「安装位置」的显隐都要跟着变
+  refreshPythonStatus();
+}
+
 async function saveSettings() {
   // 端口校验：必须是 1~65535 的数字（要求一.5）
   const port = parseInt($('set-port').value, 10);
@@ -948,11 +1135,16 @@ async function saveSettings() {
   const appearance = ['light', 'dark', 'system'].includes($('set-appearance').value)
     ? $('set-appearance').value : 'system';
   const cfg = {
-    npm_path: $('set-npm-path').value.trim(),
+    // npm / dsh 的程序路径没有输入框了（见 index.html 的说明）：原样带回内存里那份，
+    // 既不清空也不重新检测 —— 后端保存时只做校验，用户手改过的有效值不会被覆盖。
+    // 万一内存里是空的（新装机器还没检测到 npm / DSH），后端会先自动检测再保存。
+    npm_path: (config && config.npm_path) || '',
     // npm 缓存位置（空 = 删除 npm 配置里的 cache 行，回到 npm 默认位置）
     npm_cache_dir: $('set-npm-cache').value.trim(),
-    dsh_path: $('set-dsh-path').value.trim(),
+    dsh_path: (config && config.dsh_path) || '',
     dsh_home_dir: $('set-home-dir').value.trim(),
+    // 把家目录写入用户环境变量 DSH_HOME（真正的写/删在保存之后由 apply_dsh_home_env 落地）
+    export_home_env: $('set-export-home-env').checked === true,
     port,
     close_action: $('set-close-action').value === 'quit' ? 'quit' : 'tray',
     language: $('set-language').value === 'en' ? 'en' : 'zh',
@@ -975,9 +1167,15 @@ async function saveSettings() {
     // 「Node 版本过低」的确认记忆不是设置页字段：原样带上内存里的值，
     // 后端在保存时也会再兜一层（缺字段时沿用磁盘上的值）
     node_min_ack: (config && config.node_min_ack) || '',
+    // pnpm 源「对齐前的原值」同样不是设置页字段：它是恢复按钮的原料，**必须原样带回** ——
+    // 漏带一次，serde(default) 会把它写成空串，恢复按钮就永久消失了
+    pnpm_registry_prev: (config && config.pnpm_registry_prev) || '',
     // 更新命令不再有可配置参数：固定 install -g <包名>@<频道>，
     // 频道由「更新 DSH」弹窗里的 latest / next 单选决定（见 renderUpdateModal）
   };
+  // 本次保存**之前**的家目录：关闭「写入 DSH_HOME」时，后端要靠它认领上一次写进去的值
+  //（必须在 config 被 save_config 的返回值覆盖之前记下来）
+  const prevHome = (config && config.dsh_home_dir) || '';
   const langChanged = cfg.language !== I18N.lang;
   const appearanceChanged = appearance !== (config && config.appearance);
   try {
@@ -990,8 +1188,6 @@ async function saveSettings() {
       // 先切语言再刷新弹窗内文案（词典 + 静态标签）
       applyLanguage(cfg.language);
     }
-    markFlag('npm-exists-flag', config.npm_exists);
-    markFlag('dsh-exists-flag', config.dsh_exists);
     markFlag('home-exists-flag', config.home_exists);
     $('set-config-path').textContent = config.config_path;
     $('port-val').textContent = config.port;
@@ -1007,6 +1203,23 @@ async function saveSettings() {
     } catch (e) {
       toast(t('toast_npm_cache_fail', e), true);
       appendLog('launcher', t('toast_npm_cache_fail', e));
+    }
+    // 「把家目录写入用户环境变量 DSH_HOME」与 npm 缓存同款：保存之后单独做、单独报结果。
+    // 影响面只有**用户另外打开的终端** —— 本程序启动 DSH（日常与安全模式）时都会显式
+    // 注入 DSH_HOME 覆盖继承值，所以这里写不写都不改变本程序自己的行为。
+    try {
+      const envRep = await invoke('apply_dsh_home_env', {
+        dir: cfg.export_home_env ? cfg.dsh_home_dir : null,
+        prev: prevHome || null,
+      });
+      // 每次都进日志（「没动」也是个结论）；只有真改了注册表才弹 toast ——
+      // toast 是单元素的，每次都弹会把上面那条 npm 缓存提示盖掉
+      appendLog('launcher', '[launcher] ' + envRep.message);
+      if (envRep.changed) toast(envRep.message);
+      refreshHomeEnvInfo();
+    } catch (e) {
+      toast(t('toast_home_env_fail', e), true);
+      appendLog('launcher', t('toast_home_env_fail', e));
     }
     // 工具栏模式即时生效（保存后的 config 里已带归一化后的值）
     applyToolbarMode();
@@ -1391,6 +1604,47 @@ function nodeVersionPair(det) {
   return [current, min];
 }
 
+// ---------- pnpm 版本下限判定（与 detect.rs 的 PNPM_MIN_VERSION 同源） ----------
+// 本程序对 pnpm 有**硬要求**：必须 ≥ 下限，缺失或低于下限都要先装上 / 更新掉
+// （用户 2026 本轮拍板：pnpm 必须 ≥ 10，低了就必须更新 —— 这也推翻了早先
+// 「pnpm 缺失不阻断完成」的决定）。阈值仍只写在 Rust 常量里，前端只负责取用与展示。
+
+/// 从检测结果取出 pnpm 的「版本状态」字段（supported / old / unknown），取不到返回 ''。
+function pnpmMinState(det) {
+  if (!det) return '';
+  const s = det.pnpm_min_state;
+  return (typeof s === 'string') ? s : '';
+}
+
+/// pnpm 是否确实低于下限：只有后端明确说 "old" 才算。
+/// **读不出版本不算** —— 拦截「完成」要的是「证明它不达标」，读不出证明不了，
+/// 拿 unknown 当过低会把一台 pnpm 其实够用的机器堵死在向导里。
+function pnpmIsTooOld(det) {
+  return pnpmMinState(det) === 'old';
+}
+
+/// pnpm 是否达标：**在场，且没被明确判定为过旧**。
+/// 读不出版本（unknown）按 Node 同款处理 —— 状态行给个「? 版本未知」的警示，
+/// 但**不拦「完成」**：拦下要的是「证明它不达标」，读不出证明不了；而且这台机器
+/// 上点「更新」也未必能让版本号变得可读，拦了就是一个修不了的死胡同。
+function pnpmOk(det) {
+  if (!det || !det.pnpm_found) return false;
+  return pnpmMinState(det) !== 'old';
+}
+
+/// pnpm 是否正拦着「进入主界面」：node+npm 都在场（= 这一步可操作）而 pnpm 未达标。
+/// 与 renderWiz 的禁用逻辑、wizFinish 的收口逻辑共用一个判定，免得三处走样。
+function pnpmBlocksFinish(det) {
+  return !!det && !!det.node_found && !!det.npm_found && !pnpmOk(det);
+}
+
+/// 告警文案里的两个版本号：当前版本、最低版本（最低版本来自后端，缺省回落常量）。
+function pnpmVersionPair(det) {
+  const current = (det && det.pnpm_version ? String(det.pnpm_version) : '').trim() || '?';
+  const min = (det && det.pnpm_min_version ? String(det.pnpm_min_version).trim() : '') || 'v10';
+  return [current, min];
+}
+
 /// 版本号的括号包裹：中文用全角括号，英文用半角（两处都靠它，避免中英混排）。
 function verTag(v) {
   if (!v) return '';
@@ -1448,20 +1702,53 @@ function renderWiz() {
   }
   setWizFlag('wiz-npm-flag', 'wiz-npm-path', d.npm_found, d.npm_path);
   setWizFlag('wiz-dsh-flag', 'wiz-dsh-path', d.dsh_found, d.dsh_path);
-  // pnpm：Node 就绪后才谈得上装它（缺 Node 时先装 Node，装完后端会自动补 pnpm）
-  setWizFlag('wiz-pnpm-flag', 'wiz-pnpm-path', !!d.pnpm_found, d.pnpm_path);
+  // pnpm 一行：与 Node 同款三态 —— 过旧时状态列直接说清楚（「已安装」会掩盖
+  // 「装了但版本不够」这个必须处理的事实），路径列改放「当前 → 最低要求」
+  if (d.pnpm_found) {
+    const pv = (d.pnpm_version || '').trim();
+    if (pnpmIsTooOld(d)) {
+      setWizFlag('wiz-pnpm-flag', 'wiz-pnpm-path', false, '');
+      $('wiz-pnpm-flag').textContent = t('wiz_pnpm_flag_old');
+      $('wiz-pnpm-flag').className = 'flag warn';
+      const [pcur, pmin] = pnpmVersionPair(d);
+      $('wiz-pnpm-path').textContent = pcur + ' → ' + pmin + '+';
+    } else if (pnpmMinState(d) === 'unknown') {
+      // 版本读不出：警示但不算过低（见 pnpmIsTooOld 的注释）
+      setWizFlag('wiz-pnpm-flag', 'wiz-pnpm-path', false, '');
+      $('wiz-pnpm-flag').textContent = t('wiz_pnpm_flag_unknown');
+      $('wiz-pnpm-flag').className = 'flag warn';
+      $('wiz-pnpm-path').textContent = d.pnpm_path + verTag(pv);
+    } else {
+      setWizFlag('wiz-pnpm-flag', 'wiz-pnpm-path', true, d.pnpm_path + verTag(pv));
+    }
+  } else {
+    setWizFlag('wiz-pnpm-flag', 'wiz-pnpm-path', false, '');
+  }
 
-  const allOK = d.node_found && d.npm_found && d.dsh_found;
+  // 「全部就绪」现在**包含 pnpm 达标**：缺 pnpm 或 pnpm 低于下限都不算就绪
+  // （用户 2026 本轮拍板：pnpm 必须 ≥ 10，低了就必须更新）
+  const allOK = d.node_found && d.npm_found && d.dsh_found && pnpmOk(d);
 
   // Node 步骤：缺 node/npm 时显示
   $('wiz-step-node').classList.toggle('hidden', wiz.busy || d.node_found);
   // DSH 步骤：node+npm 就绪但缺 DSH 时显示
   $('wiz-step-dsh').classList.toggle('hidden', wiz.busy || !d.node_found || !d.npm_found || d.dsh_found);
-  // pnpm 步骤：node+npm 就绪、但 pnpm 缺失时显示（只提示、不阻断 —— pnpm 不影响 DSH 启动，
-  // 所以「完成」按钮在 pnpm 缺失时依然按 node/npm/dsh 三项判定是否「全部就绪」）。
+  // pnpm 步骤：node+npm 就绪、而 pnpm **缺失或低于下限**时显示（过旧也要走这一步更新）。
   // 要求 npm 在场：pnpm 只能由 `npm install -g pnpm` 装，npm 缺失时给出按钮必然失败。
-  $('wiz-step-pnpm').classList.toggle('hidden',
-    wiz.busy || !d.node_found || !d.npm_found || !!d.pnpm_found);
+  const pnpmStepShown = !wiz.busy && d.node_found && d.npm_found && !pnpmOk(d);
+  $('wiz-step-pnpm').classList.toggle('hidden', !pnpmStepShown);
+  if (pnpmStepShown) {
+    // 缺失 vs 过旧：标题、正文、按钮各自换一套文案（过旧要给当前/最低版本号）
+    const pnpmOld = pnpmIsTooOld(d);
+    const [pcur, pmin] = pnpmVersionPair(d);
+    $('wiz-pnpm-step-title').textContent = t(pnpmOld ? 'wiz_step_pnpm_title_old' : 'wiz_step_pnpm_title');
+    $('wiz-pnpm-body-text').innerHTML = pnpmOld
+      ? t('wiz_step_pnpm_body_old_html', escapeHtml(pcur), escapeHtml(pmin))
+      : t('wiz_step_pnpm_body_text');
+    $('wiz-pnpm-body-note').textContent = t(pnpmOld ? 'wiz_step_pnpm_body_old_note' : 'wiz_step_pnpm_body_note');
+    $('wiz-btn-install-pnpm').textContent = t(pnpmOld ? 'wiz_btn_update_pnpm' : 'wiz_btn_install_pnpm');
+    $('wiz-pnpm-cmd').textContent = pnpmInstallCommand(d.npm_path);
+  }
 
   // Node 版本过低告警：node 在、但版本低于下限（用户已确认继续时不弹；版本读不出时
   // 只显示警示、不显示一键升级以外的引导——它可能其实是够的）
@@ -1485,11 +1772,24 @@ function renderWiz() {
   const pnpmCmdEl = $('wiz-pnpm-cmd');
   if (pnpmCmdEl) pnpmCmdEl.textContent = pnpmInstallCommand(d.npm_path);
 
-  // 完成按钮：全部就绪 → 直接进入；有缺失 → 等同「跳过」
+  // 完成按钮：全部就绪 → 直接进入；有缺失 → 等同「跳过」；
+  // 但 **pnpm 缺失或低于下限时直接拦住**（用户 2026 本轮拍板：pnpm 必须 ≥ 10，
+  // 低了就必须更新 —— 推翻早先「pnpm 缺失不阻断完成」的决定）。
+  // 只在「这一步确实可操作」时拦：node/npm 不全时 pnpm 根本装不上，硬拦会把向导
+  // 走死（那种机器本来就得先走「安装 Node」那一步）。
+  const pnpmBlocking = pnpmBlocksFinish(d);
   const finishBtn = $('wiz-btn-finish');
-  finishBtn.disabled = false;
-  finishBtn.textContent = allOK ? t('wiz_all_ready') : t('wiz_skip_go');
+  finishBtn.disabled = pnpmBlocking;
+  finishBtn.textContent = allOK ? t('wiz_all_ready')
+    : (pnpmBlocking ? t('wiz_pnpm_required') : t('wiz_skip_go'));
   finishBtn.classList.remove('hidden');
+  // 旁边那句默认提示也跟着换：说清「为什么现在点不了」，否则一枚禁用按钮看着像 bug
+  const skipNote = $('wiz-skip-note');
+  if (skipNote) {
+    skipNote.textContent = pnpmBlocking
+      ? t('wiz_pnpm_block_note', pnpmVersionPair(d)[1])
+      : t('wiz_skip_note');
+  }
 
   // 安装进行中禁用相关按钮
   ['wiz-btn-install-node', 'wiz-btn-recheck', 'wiz-btn-skip-node', 'wiz-btn-upgrade-node',
@@ -1506,6 +1806,14 @@ function setWizProgress(show, text) {
 }
 
 function onSetupStatus(p) {
+  // 首选项的 Python 安装任务在跑时，进度归它（两者共用后端的 setup_busy，
+  // 同一时刻只会有一个，所以这里可以直接让 Python 优先）
+  if (pythonTask.active) {
+    if (p.phase === 'download' || p.phase === 'install' || p.phase === 'verify') {
+      setPythonProgress(true, p.message);
+    }
+    return;
+  }
   if (!wiz.active) return;
   if (p.phase === 'download' || p.phase === 'install' || p.phase === 'verify') {
     setWizProgress(true, p.message); // 文案由 Rust 端按当前语言生成
@@ -1514,6 +1822,12 @@ function onSetupStatus(p) {
 }
 
 function onSetupResult(p) {
+  // 首选项里发起的 Python 安装（基本安装 / 数据分析扩展包）：进度区在设置页里，
+  // 与向导无关 —— 不碰 wiz.busy，也不触发向导的「重新检测」
+  if (p.target && p.target.indexOf('python') === 0) {
+    onPythonResult(p);
+    return;
+  }
   // 引导安装的入口只剩首次运行向导的「Node 版本过低」告警面板（首选项里的那处已移除），
   // 所以这里必然处于向导里；仍然不 return，避免事件早到时留下转不完的「处理中…」面板。
   wiz.busy = false;
@@ -1528,6 +1842,11 @@ function onSetupResult(p) {
     setWizProgress(false);
     $('wiz-log').classList.remove('hidden');
     toast(p.message || t('wiz_node_start_fail'), true);
+    // pnpm 这条失败里有一类是「装上了，但版本仍不达标」（镜像/缓存给回旧版）：
+    // 不重新检测的话，状态行会一直停在安装前的快照（写着「未找到 pnpm」，toast 却
+    // 说装上了）——安全上无所谓（旧快照照样拦着「完成」），但用户得自己点
+    // 「重新检测」才能看清真相，这里替他查一次。
+    if (p.target === 'pnpm') setTimeout(() => wizDetect(), 600);
   }
 }
 
@@ -1564,6 +1883,16 @@ async function runNodeLtsInstall() {
 }
 
 function wizFinish() {
+  // 「完成」的**唯一收口**：完成按钮只是一枚 UI，Node / DSH 两步的「跳过，仍要进入」
+  // 也调这里 —— 不在这儿挡一次，上面那枚禁用按钮形同虚设
+  // （用户 2026 本轮拍板：pnpm 必须 ≥ 10，低了就必须更新）。
+  const d = wiz.detection;
+  if (pnpmBlocksFinish(d)) {
+    toast(t('wiz_pnpm_block_note', pnpmVersionPair(d)[1]), true);
+    // 把 pnpm 那一步顶到眼前：只弹一条 toast 的话，用户不知道该去点哪里
+    renderWiz();
+    return;
+  }
   invoke('finish_setup')
     .then(async (report) => {
       config = report;
@@ -1665,10 +1994,7 @@ function bindUI() {
     try {
       const d = await invoke('detect_environment');
       lastEnvDetection = d; // 向导的「将执行以下命令」预览用它兜底
-      if (d.npm_path) $('set-npm-path').value = d.npm_path;
-      if (d.dsh_path) $('set-dsh-path').value = d.dsh_path;
-      markFlag('npm-exists-flag', d.npm_found);
-      markFlag('dsh-exists-flag', d.dsh_found);
+      // npm / dsh 程序路径没有输入框了：检测结果只用于日志与向导预览，不再回填界面
       appendLog('launcher', t('log_detect_done',
         d.node_path || t('wiz_notfound'),
         d.node_version ? '(' + d.node_version + ')' : '',
@@ -1678,7 +2004,13 @@ function bindUI() {
       if (nodeIsTooOld(d)) {
         appendLog('launcher', t('wiz_node_old_log', d.node_version || '?', d.node_min_version || 'v22.19.0'));
       }
-      toast(d.node_found && d.npm_found && d.dsh_found ? t('toast_detect_full') : t('toast_detect_missing'));
+      // pnpm 同理：低于下限要更新（首装向导会把「完成」拦住，这里先把话说到位）
+      if (pnpmIsTooOld(d)) {
+        const [pcur, pmin] = pnpmVersionPair(d);
+        appendLog('launcher', t('wiz_pnpm_old_log', pcur, pmin));
+      }
+      toast(d.node_found && d.npm_found && d.dsh_found && pnpmOk(d)
+        ? t('toast_detect_full') : t('toast_detect_missing'));
     } catch (e) {
       toast(t('toast_detect_fail', e), true);
     }
@@ -1696,6 +2028,10 @@ function bindUI() {
     }
   };
 
+  // ---- 首选项：Python 建议安装块（状态行由 openSettings 拉取，这里只管两个按钮）----
+  $('btn-python-basic').onclick = () => runPythonInstall('basic');
+  $('btn-python-extra').onclick = () => runPythonInstall('extra');
+
   // 检测全局包名
   $('btn-detect-package').onclick = async () => {
     try {
@@ -1705,6 +2041,33 @@ function bindUI() {
     } catch (err) {
       appendLog('launcher', t('log_pkg_fail', err));
       toast(t('toast_pkg_fail', err), true);
+    }
+  };
+
+  // ---- 首选项：包源 registry 对齐（读自动刷、写要点按钮）----
+  // 与 npm 缓存 / DSH_HOME 同款分工：后端返回一句已生成好的消息，成功进日志并弹 toast，
+  // 失败单独报；两种结局都重问一次状态行 —— 按钮要不要还在，以刚发生的事实为准。
+  $('btn-registry-align').onclick = async () => {
+    try {
+      const msg = await invoke('registry_align_apply');
+      appendLog('launcher', '[launcher] ' + msg);
+      toast(msg);
+      refreshRegistryInfo();
+    } catch (err) {
+      toast(t('toast_registry_fail', err), true);
+      appendLog('launcher', t('toast_registry_fail', err));
+    }
+  };
+
+  $('btn-registry-restore').onclick = async () => {
+    try {
+      const msg = await invoke('registry_restore');
+      appendLog('launcher', '[launcher] ' + msg);
+      toast(msg);
+      refreshRegistryInfo();
+    } catch (err) {
+      toast(t('toast_registry_fail', err), true);
+      appendLog('launcher', t('toast_registry_fail', err));
     }
   };
 
@@ -1807,11 +2170,11 @@ function bindUI() {
       toast(String(e), true);
     }
   };
-  // ---- 缺少 pnpm：一键安装 / 重新检测 ----
-  // pnpm 是「DSH 装好之后安装插件」用的包管理器，缺失不阻断 DSH 启动，
-  // 所以这里是**建议**而不是必经步骤（点下方「完成」即可跳过）。
-  // 进度与结果由 setup-status / setup-result（target = "pnpm"）事件驱动；
-  // 后端装完会重新检测，成功后 onSetupResult 自动刷新本页状态。
+  // ---- 缺少 pnpm / pnpm 版本过低：一键安装（或更新） / 重新检测 ----
+  // pnpm 是「DSH 装好之后安装插件」用的包管理器，本程序对它有硬要求（≥ v10）：
+  // 缺失或过旧都会拦下「完成」按钮，所以这里从「建议」变成了**必经**的一步
+  // （进度与结果由 setup-status / setup-result（target = "pnpm"）事件驱动；
+  // 后端装完会重新核对版本，成功后 onSetupResult 自动刷新本页状态）。
   $('wiz-btn-install-pnpm').onclick = async () => {
     if (wiz.busy) return;
     wiz.busy = true;

@@ -31,7 +31,7 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 - Version check against both npm dist-tags (`npm view <pkg> dist-tags`); the toolbar flags "update available" when your install trails the newest channel
 - Close-to-tray or quit-on-close behavior (configurable); tray menu with Show Main Window / Start with Windows / Exit; tray restore does show + unminimize + set_focus
 - Start with Windows (official autostart plugin, HKCU registry only, no admin rights); autostart runs silently in tray and delays DSH launch by 12 s to avoid the boot-time IO spike
-- First-run setup wizard: detects Node.js/npm/DSH/pnpm and can guide installation (official nodejs.org LTS installer download or `npm install -g @deepseek-ai/dsh`), with a **choosable Node.js / DSH install location** (e.g. onto another drive) — fully skippable. Once Node.js is found it also checks **pnpm** and offers a one-click install; the guided Node.js install **automatically runs `npm install -g pnpm`** afterwards (so DSH plugins can be installed later)
+- First-run setup wizard: detects Node.js/npm/DSH/pnpm and can guide installation (official nodejs.org LTS installer download or `npm install -g @deepseek-ai/dsh`), with a **choosable Node.js / DSH install location** (e.g. onto another drive); Node / npm / DSH steps are fully skippable. Once Node.js is found it also checks **pnpm — which must be ≥ 10**: a missing or too-old pnpm raises its own step and keeps the wizard's "Done" button disabled until it is installed or updated; the guided Node.js install **automatically runs `npm install -g pnpm`** afterwards (so DSH plugins can be installed later)
 - **Node.js minimum-version guard (22.19.0)**: detects an installed-but-too-old Node.js, warns with the exact versions, offers a one-click upgrade to the official LTS (same verified installer flow), keeps a "download it myself" link and a "keep this version and continue" escape hatch, and refuses to start DSH with a plain-language reason instead of letting it die on an opaque error — see [Node.js version check](#nodejs-version-check)
 - **Bilingual UI (Chinese / English)**: choose a language in Preferences; the whole launcher (toolbar, status, dialogs, logs, tray menu) switches, and DSH's own web UI follows via its `settings.yaml`
 - **Light / Dark / Follow-system appearance**: pick it in Preferences; the launcher (toolbar, dialogs, wizard, native title bar) and the embedded DSH page switch together through `ui-theme.preference` in DSH's `settings.yaml` — open DSH pages follow **live, no DSH restart needed**
@@ -47,7 +47,7 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 | WebView2 Runtime | Usually preinstalled with Edge on Windows 10/11; installers bootstrap it if missing |
 | Node.js | **22.19.0 or newer** (DSH's runtime floor). **Not bundled.** |
 | DSH | Installed globally via npm. **Not bundled.** |
-| pnpm | **Optional**: the wizard checks it once Node.js is found and offers a one-click install (also installed automatically after a guided Node.js install). DSH does not depend on it. |
+| pnpm | **10 or newer** (required by this app). The wizard checks it once Node.js is found; a missing **or too-old** pnpm raises a dedicated step and **blocks "完成 / Done" until it is installed or updated** (also installed automatically after a guided Node.js install). |
 
 ## Prerequisites
 
@@ -60,13 +60,13 @@ You need these before DSH Desktop can start a service (only the first two are re
    npm install -g @deepseek-ai/dsh
    ```
 
-3. **pnpm (optional, not required)** — used later to install DSH plugins:
+3. **pnpm (10 or newer)** — used later to install DSH plugins:
 
    ```bash
    npm install -g pnpm
    ```
 
-   The first-run wizard checks pnpm once Node is found and offers a one-click install; if you let the app install Node.js for you, it runs the command above **automatically** right after the Node install. DSH itself does not depend on pnpm — skipping it changes nothing.
+   The first-run wizard checks pnpm once Node is found: when it is missing **or below version 10**, the wizard shows a dedicated "pnpm is missing" / "pnpm version too old" step with a one-click install or update, and **blocks the "Done" button until pnpm reaches the floor** (this app requires pnpm ≥ 10 — DSH installs its plugins through it). If you let the app install Node.js for you, it runs the command above **automatically** right after the Node install.
 
 Verify manually if you like:
 
@@ -76,7 +76,7 @@ npm --version
 dsh --version
 ```
 
-If anything is missing when the app starts, it shows a clear error (which component was not found, where it looked, and how to fix it) instead of waiting forever. The first-run wizard can also do this for you: it detects the environment (Node.js / npm / DSH / pnpm) and offers to run the official Node.js LTS installer (downloaded from nodejs.org at runtime, never bundled) or to execute `npm install -g @deepseek-ai/dsh` for you. **Once Node.js is detected, pnpm is checked too**: the wizard shows a "pnpm is missing" step with a one-click install, and **choosing the guided Node.js install also installs pnpm automatically afterwards** (`npm install -g pnpm`) so you can install DSH plugins later. Every guided step is skippable ("稍后手动安装" / skip), and every failure mode (no network, download failed, permission denied, user cancelled) is reported explicitly.
+If anything is missing when the app starts, it shows a clear error (which component was not found, where it looked, and how to fix it) instead of waiting forever. The first-run wizard can also do this for you: it detects the environment (Node.js / npm / DSH / pnpm) and offers to run the official Node.js LTS installer (downloaded from nodejs.org at runtime, never bundled) or to execute `npm install -g @deepseek-ai/dsh` for you. **Once Node.js is detected, pnpm is checked too**: the wizard shows a "pnpm is missing" / "pnpm version too old" step with a one-click install or update, and **choosing the guided Node.js install also installs pnpm automatically afterwards** (`npm install -g pnpm`) so you can install DSH plugins later. pnpm has a **hard floor of 10** — while it is missing or below that floor the wizard's "Done" button stays disabled (the other steps remain skippable: "稍后手动安装" / skip), and every failure mode (no network, download failed, permission denied, user cancelled) is reported explicitly.
 
 ### Choosing where Node.js gets installed
 
@@ -190,8 +190,8 @@ Artifacts land in `src-tauri/target/release/bundle/nsis/`, `.../msi/`, and the r
 1. Install/start **DSH Desktop**. Default window is 1376×774.
 2. On first run the setup wizard checks Node.js / npm / DSH / pnpm:
    - Everything installed → click "完成，进入主界面" (done).
-   - Something missing → use the guided buttons or skip and continue to the main UI anyway.
-   - Node.js present but **pnpm** missing → an extra "pnpm is missing" step offers a one-click install (optional; DSH starts fine without it).
+   - Node.js / npm / DSH missing → use the guided buttons, or skip and continue to the main UI anyway (a missing or too-old **pnpm** cannot be skipped — see the next bullet).
+   - Node.js present but **pnpm missing or older than 10** → an extra "pnpm is missing" / "pnpm version too old" step offers a one-click install or update; **"完成" stays disabled until pnpm is at or above v10** (this app requires it — DSH installs plugins through pnpm).
 3. Click **▶ 启动 (Start)** (or let the app auto-start DSH): status shows "starting… waited X s", then the DSH page embeds seamlessly once ready.
 4. Toolbar right side always shows: status dot · current port · version info (with an "update available" badge when a newer `latest` / `next` exists — see [Version check](#version-check-latest-vs-next)).
 5. Closing the window hides to tray by default (configurable); use the tray icon or menu to bring it back; tray menu **退出 (Exit)** truly quits and stops the DSH process tree this app started.
@@ -209,24 +209,35 @@ Example pnpm install:      npm install -g pnpm
 
 Config file: `%APPDATA%\com.dsh.desktop\config.json` (per-user; never written to Program Files or the install directory).
 
-Open **⚙ 首选项 (Preferences)** from the toolbar. All fields support auto-detection: leave them empty/broken and the app finds Node.js, npm, and dsh automatically (`where` lookup + common install directories such as `%ProgramFiles%\nodejs` and `%APPDATA%\npm`). Detected results fill the form automatically.
+Open **⚙ 首选项 (Preferences)** from the toolbar. The paths of the two programs the launcher actually executes (`npm.cmd`, `dsh.cmd`) deliberately have **no editing field**: they are found automatically (`where` lookup + common install directories such as `%ProgramFiles%\nodejs` and `%APPDATA%\npm`) and refilled from detection on every load and save, so a stale or hand-edited value heals itself instead of becoming a permanent "why does nothing start" button. Everything else in the form is validated on save.
 
 | Setting | Default | Notes |
 |---|---|---|
-| npm program path | empty → auto-detected | `npm.cmd` / `npm.exe`; used for update / version queries |
 | npm cache location | empty (npm config untouched) | written into npm's own `~/.npmrc` (the `cache` line), so terminal npm follows it too — see *npm cache location* |
-| dsh path | empty → auto-detected | `dsh.cmd` / `dsh.exe` / `dsh.bat`; used to launch DSH |
 | DSH home dir | `%USERPROFILE%\.dsh` | passed to DSH as `DSH_HOME`; process cwd is its parent; not your workspace |
+| Write the home dir into the user env var `DSH_HOME` | off | when on, the home dir is written to the current user's `HKCU\Environment`, so `dsh` in a terminal **you open yourself** uses the same home; this app (safe mode included) always injects `DSH_HOME` explicitly, so its own behaviour is untouched — see *Write the home dir into `DSH_HOME`* below |
 | Port | `3080` | must be 1–65535; validated on save; takes effect on next DSH start |
 | Ready timeout | `300` seconds | cold start can take minutes; **0 = wait forever** (as long as the process lives) |
 | When clicking X | hide to tray | or "quit program" (stops the DSH process started by this session) |
 | Extra args | empty | appended after `dsh web --port N --no-open`; plain flags only (see below) |
 | Package name | `@deepseek-ai/dsh` | used for the `dist-tags` version query **and** to build the update command |
 | Start with Windows | off | immediate effect, `HKCU\...\Run`, also toggleable from the tray menu |
+| Python environment | off by default | a status line plus **基本安装 / 额外安装** buttons — see [Python environment](#python-environment) |
 | Interface language | `zh` (中文) | `zh` / `en`; switches the whole launcher and syncs DSH's `settings.yaml` — see [Language](#language) |
 | Appearance | `system` (follow system) | `light` / `dark` / `system`; switches the launcher and syncs DSH's `ui-theme.preference` — see [Appearance](#appearance) |
 
 > There is deliberately **no "update args" setting any more**: the update command is always `npm install -g <package name>@<channel>` (plus a `--prefix` derived from where `dsh.cmd` actually lives, when DSH is installed outside npm's default directory — see *Choosing where DSH gets installed*), and the channel (`latest` / `next`) is chosen in the **⤓ 更新 DSH** dialog itself — see [Update DSH](#update-dsh). Extra npm knobs (registry, proxy) belong in an `.npmrc` next to the DSH home dir.
+
+### Python environment
+
+Generating Office files (`.docx` / `.pptx` / `.xlsx`) and doing any real data analysis needs Python on the machine, so Preferences carries a **Python 环境** block right under *Start with Windows*:
+
+- **Status line** — whether a usable Python (≥ 3.8) exists, its version and path, and whether the two recommended package sets are actually importable. The probe is `importlib.util.find_spec`, not `pip list`: a package that is installed but broken counts as missing, and a Python 2 install or Microsoft Store's `python.exe` alias (which exists as a file but opens the Store) counts as "no Python".
+- **基本安装 / Basic install** — if a usable interpreter is already present, the installer is skipped entirely. Otherwise it downloads the newest stable CPython from python.org (version parsed from the download page; if that fails a pinned fallback version is used), reads that release's **SHA-256 from the official release page and verifies it before executing anything** (no hash ⇒ no install, exactly like the Node.js flow), runs the official installer with `/passive InstallAllUsers=0 PrependPath=1 Include_test=0` — per-user, no UAC, self-added to PATH, and its own progress window — then runs `pip install python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile typing_extensions`.
+- **额外安装 / Data-analysis extras** — afterwards, adds `numpy pandas python-dateutil tzdata six`.
+- **安装位置 / Install location** — shown only while there is no Python yet. Empty = the Python official default; fill it in (or *浏览*) to install onto e.g. `D:\Python314`. It is handed to the installer as `TargetDir=…` and **checked afterwards**: an installer that reported success but did not actually put `python.exe` there is reported as an error, not as a success. `Program Files` **including its subfolders is rejected up front** — the install runs for the current user *without* elevation, so it could not write there anyway; an explicit rule beats a bare "exit code 5" that surfaces only after the download and hash check finished.
+
+Live progress is shown in the panel (download percentage, installer exit, `pip`'s own output line by line), it shares the first-run wizard's single-flight lock so the two never run at once, and every step is appended to `desktop.log`.
 
 ### npm cache location
 
@@ -239,6 +250,29 @@ This one setting is different in kind from the rest: **it edits npm's own file.*
 - **Empty = delete the line**, falling back to npm's default location (rather than pinning the default explicitly).
 - **Value rules**: absolute, no `..`, drive must exist, no `< > " | ? *`, not inside `Windows` / `ProgramData`, no `%` or `!` (the value travels through `cmd.exe`), **no `#` or `;`** (npm's ini parser treats them as comment starts — measured: `cache=D:\a#b` reads back as `D:\a`, i.e. silently a different folder), and a **100-character limit**: npm writes content-addressed paths 158 characters deep below the cache root (measured), and beyond the classic 260-character limit Explorer/PowerShell can no longer delete that tree — npm itself still works, but "cannot be cleaned up" is the worse outcome.
 - **The app does not create the folder** — npm does that itself (measured: pointing at a non-existent directory still installs fine).
+
+### Write the home dir into `DSH_HOME` (so terminal `dsh` uses the same home)
+
+**This setting only affects terminals you open yourself — never this app.** Every time this app starts DSH it **injects** `DSH_HOME` explicitly (`cmd.env("DSH_HOME", …)` in the daily start path and in safe mode; the safe home is additionally derived from `%USERPROFILE%`), which overrides any inherited user-level value. Writing the variable therefore changes nothing about what this app does — that is exactly why safe mode is unaffected.
+
+What you get while it stays off: `%DSH_HOME%` is simply **undefined** in your own cmd / PowerShell (`echo %DSH_HOME%` prints the literal `%DSH_HOME%`), so `dsh` run there resolves along "explicit config > `$DSH_HOME` > `~/.dsh`" and lands on the **default home `~/.dsh`**. Settings, credentials and sessions then exist in two places that never meet, with no warning at all (verified locally: `dsh --profile web …` in a terminal wrote `~/.dsh\profiles\web\cordis.yml`).
+
+- **Where it lands**: `DSH_HOME` under `HKCU\Environment` (`REG_SZ`, storing the **literal** path — `%…%` is not expanded). Current user only, system environment untouched, no admin rights; `WM_SETTINGCHANGE` is broadcast afterwards, so **newly opened** terminals pick it up — already-open ones must be reopened (or you log out again). Same technique as writing the user PATH.
+- **Turning it off removes the value, but only ours**: the value is deleted only when it points at a home this app has configured (the current one, or the one from before this save). A `DSH_HOME` you set yourself elsewhere is **left untouched** and reported as such. The ownership decision lives in `detect::plan_home_env`, covered by unit tests that run in CI.
+- **Failures are reported honestly**: if the registry is locked down by policy or the write is denied, you get the real reason instead of a "switch is off" that never happened.
+- **Safe mode is unaffected**: entering safe mode overrides `DSH_HOME` with `%USERPROFILE%\.dsh-safe` (a process-level value always beats the user-level one); to open the safe home in a terminal yourself, `set DSH_HOME=%USERPROFILE%\.dsh-safe`.
+- Preferences shows the **current persisted value** under the switch; when it is unset, it says that `dsh` in a new terminal uses the default home `~/.dsh`.
+
+### Package sources (registry) — shown as a hint, changed only on click
+
+**Why a button rather than a switch**: `registry` decides **where every future install pulls from** — a supply-chain-sensitive setting (point it at the wrong host and your installs go there). It is also not a state that needs re-maintaining: a switch would rewrite it on every save and fight any value you set yourself with `pnpm config set`. So reading (zero risk) happens automatically in Preferences, and **writing requires one click**.
+
+- **What is compared**: npm and pnpm are each asked, **in the same directory**, which source they would actually use; the button appears only when the answers differ. That directory is the DSH working dir (parent of the home dir — exactly where `npm` reads `./.npmrc`), and the status line spells it out: the answer depends on the directory, so "which check" must be visible before you can judge it.
+- **Scope**: **pnpm only**, via `pnpm config set registry <url>`. Verified on a real machine that this **always** writes pnpm's own `%LOCALAPPDATA%\pnpm\config\auth.ini` — even when run inside a directory containing a `package.json`, so it never creates a project `.npmrc`. npm's side is decided by the project `.npmrc` / your `~/.npmrc` and this app does not touch a single byte of it.
+- **Verified after writing**: the effective value is read back and a mismatch is reported as an error — exit code 0 does not mean the effective value changed (a project `.npmrc` or the `npm_config_registry` variable can still override it).
+- **Reversible**: pnpm's previous value is recorded in `config.json` (single-key write, not a full save); **Restore** writes it back and only clears the record after verification. What is restored is the value that was *in effect*; if pnpm had no explicit setting to begin with, restoring materializes it as an explicit line — the effective value is identical either way.
+- **What changes and what does not**: the source recorded in lock files for **future** installs; already-generated `package-lock.json` / `pnpm-lock.yaml` are **not** rewritten (regenerate them to switch). Every registry serves integrity-checked tarballs, so you never get a different package — only different download speed and mirror lag.
+- **`http(s)://` only**: values containing whitespace, `#` or `;` are rejected — `auth.ini` is ini-style, where `#` / `;` start a comment, which would make the value read back differ from the one written (same trap as the `cache` line in `~/.npmrc`).
 
 ### Argument & path policy (enforced on save *and* at every use)
 
@@ -451,13 +485,13 @@ DSH stdout/stderr are never hidden: they stream live to the log dialog and to bo
 
 ## Troubleshooting
 
-- **未找到 Node.js (Node.js not found)** — install Node.js LTS from <https://nodejs.org> and restart this app (the "Auto-detect" button in Preferences only refreshes the npm / dsh paths).
+- **未找到 Node.js (Node.js not found)** — install Node.js LTS from <https://nodejs.org> (or use the first-run wizard's one-click install) and restart this app (the "Auto-detect" button in Preferences only re-runs detection and prints the result to the log).
 - **未找到 npm** — usually fixed by installing Node.js; npm.cmd sits in the same directory as node.exe (e.g. `C:\Program Files\nodejs\npm.cmd`).
-- **未找到 DSH** — run `npm install -g @deepseek-ai/dsh` (see wizard), or point Preferences to the existing `dsh.cmd` (typically `%APPDATA%\npm\dsh.cmd` — or the folder you chose in the wizard if you moved it).
+- **未找到 DSH** — run `npm install -g @deepseek-ai/dsh` (or use the wizard); `dsh.cmd` typically lives in `%APPDATA%\npm\dsh.cmd` (or the folder you chose in the wizard), and its path is auto-detected — no field to fill in.
 - **端口被占用 (Port busy)** — choose Connect to existing service (if it's another DSH instance), change the port in Preferences, or handle the occupying process yourself in Task Manager. This app never kills unknown processes.
 - **DSH 启动超时 (Start timeout)** — cold starts can be slow; raise the timeout in Preferences or set it to `0` (wait indefinitely while the process is alive).
 - **DSH 启动后立即退出 (Exits immediately)** — see the red error line (last stderr) and full log output; common causes: wrong home dir, broken global npm install, port conflicts inside DSH config.
-- **配置路径无效 (Invalid path)** — the error names the exact path; fix it in Preferences (auto-detect usually repairs it).
+- **配置路径无效 (Invalid path)** — the error names the exact path; install locations, the npm cache and the DSH home dir are all editable in Preferences (the npm / dsh *program* paths have no field — they are filled in by auto-detection once Node.js / DSH are installed).
 - **Closed the window but it's still running** — X hides to tray by default; use tray → Exit to quit. Change this in Preferences ("点击窗口 X 时").
 - **Tray icon doesn't reopen the window** — fixed pattern already implemented (show/unminimize/set-focus on main thread + WebView repaint nudge); if you still hit it, report with the desktop.log attached.
 - **Reset the window size/position (or the window ended up off-screen)** — close the app, then delete `%APPDATA%\com.dsh.desktop\.window-state.json`; the next launch is back to 1376×774, centered. Switching monitors normally needs none of this: on restore the plugin only applies coordinates that **intersect an attached monitor**. See [Window layout](#window-layout).

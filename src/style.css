@@ -612,6 +612,52 @@ body.tb-auto .refresh-overlay { top: 0; }
   user-select: text;
 }
 
+/* ---------- 首选项：Python 环境块（紧跟开机自启开关，安装不走「保存」按钮） ---------- */
+.python-block {
+  /* 用一条虚线分隔把它在视觉上从「一行行设置」里分出来：下面是一个自带
+     进度区的按需安装器，不是又一格需要点「保存」的配置 */
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--toolbar-border);
+  gap: 8px;
+}
+.py-head { font-weight: 600; }
+.py-status {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  word-break: break-word;
+}
+/* 「安装位置」一行：只在本机还没有可用 Python 时出现 —— 已经装了就用现有的，
+   不给改（改了也没处可装），所以这一行默认是 hidden */
+.py-dir {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+/* 进度区：与「更新 DSH」的进度面板同构 —— 标题行显示实时进度，下方滚动 pip / 安装器输出 */
+.py-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+}
+.py-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text);
+}
+.py-progress-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
 /* ---------- 日志模态框 ---------- */
 
 .modal-box.log-box {

@@ -1005,6 +1005,11 @@ async function refreshRegistryInfo() {
 //
 const pythonTask = { active: false };
 
+/// 最近一次 `python_status` 的快照，只给按钮高亮用。
+/// 初始按「什么都没装」处理 —— 与 index.html 里两个按钮的初始 class（基本安装 = 蓝、
+/// 数据分析 = 白）一致，这样探测结果没回来之前不会出现高亮来回跳。
+const pythonState = { found: false, basic_ok: false, extra_ok: false };
+
 /// 问后端「本机有没有 Python / 什么版本 / 推荐的包装了没」并画状态行。
 async function refreshPythonStatus() {
   const el = $('python-status');
@@ -1026,6 +1031,11 @@ async function refreshPythonStatus() {
 function renderPythonStatus(s) {
   const el = $('python-status');
   if (!el || !s) return;
+  // 快照存下来给按钮高亮用（没找到 Python 时后端必然把两个 ok 置 false，
+  // 见 process.rs::python_status_blocking 的提前返回）
+  pythonState.found = !!s.found;
+  pythonState.basic_ok = !!s.basic_ok;
+  pythonState.extra_ok = !!s.extra_ok;
   if (!s.found) {
     el.textContent = t('py_missing');
   } else {
@@ -1040,6 +1050,8 @@ function renderPythonStatus(s) {
   // 安装位置只在「还没装 Python 本体」时才有意义：装好后藏起来，免得有人以为能改
   const dirRow = $('python-dir-row');
   if (dirRow) dirRow.classList.toggle('hidden', !!s.found);
+  // 状态行换字的同时把两个按钮的高亮也刷一遍 —— 蓝色必须跟着「哪一步还没做完」走
+  renderPythonButtons();
 }
 
 function setPythonProgress(show, text) {
@@ -1068,6 +1080,19 @@ function appendPythonLog(line) {
 }
 
 function renderPythonButtons() {
+  // 蓝色（primary）= 当前**该做**的那一步，白色 = 已完成、不需要再点：
+  //   基本安装（本体 + 办公文档读写包）没到位 → 基本安装亮蓝，数据分析留白；
+  //   基本安装到位 → 基本安装回白，数据分析亮蓝；
+  //   两组都到位 → 两个都回白，页面上不再有「还欠一步」的暗示。
+  // 数据分析反而先装好的机器也照这条办：欠的是办公包，该亮蓝的仍是基本安装。
+  const basicDone = pythonState.basic_ok;
+  const extraDone = basicDone && pythonState.extra_ok;
+  const setPrimary = (id, on) => {
+    const b = $(id);
+    if (b) b.classList.toggle('primary', !!on);
+  };
+  setPrimary('btn-python-basic', !basicDone);
+  setPrimary('btn-python-extra', basicDone && !extraDone);
   ['btn-python-basic', 'btn-python-extra'].forEach((id) => {
     const b = $(id);
     if (b) b.disabled = pythonTask.active;

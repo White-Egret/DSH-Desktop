@@ -554,11 +554,15 @@ pub fn validate_python_install_dir(raw: &str) -> Result<Option<String>, String> 
 /// 校验「DSH 的安装位置」= npm 的**全局目录**（最终以 `--prefix <目录>` 交给 npm），
 /// 返回规范化后的路径。
 ///
-/// 规则与 Node 的安装目录相同（见 `validate_install_dir_common`），只多一条只有它需要
-/// 的限制：这个值会被我们自己成对加引号后**经 cmd.exe** 交给 `npm.cmd`，而 cmd 在双引号
-/// 内仍会展开 `%VAR%`、开启延迟展开时 `!` 另有含义、`"` 会破坏引号配对 —— 与
-/// `validate_program_path` 同一套理由：**无法可靠转义，只能拒绝**。
-/// （Node 那条走 msiexec 的 raw_arg，不经过 cmd.exe，所以不受这一条约束。）
+/// 规则与 Node 的安装目录相同（见 `validate_install_dir_common`），只多两条只有它需要的
+/// 限制：
+///   - 这个值会被我们自己成对加引号后**经 cmd.exe** 交给 `npm.cmd`，而 cmd 在双引号
+///     内仍会展开 `%VAR%`、开启延迟展开时 `!` 另有含义、`"` 会破坏引号配对 —— 与
+///     `validate_program_path` 同一套理由：**无法可靠转义，只能拒绝**；
+///     （Node 那条走 msiexec 的 raw_arg，不经过 cmd.exe，所以不受这一条约束。）
+///   - 它还会**写进 npm 的 `~/.npmrc`**（`prefix=` 一行，见 `apply_npm_prefix`），
+///     而 npm 的 ini 解析器把 `#` / `;` 当作注释起点 —— 真机实测含它们的路径会被
+///     **静默截断成另一个目录**，那正是「装到 A、卸载去 B」这类事故的温床。
 ///
 /// `raw` 为空 = 不传 `--prefix`（由 npm 自己解析 prefix，行为与今天完全一致）。
 pub fn validate_npm_prefix(raw: &str) -> Result<Option<String>, String> {
@@ -570,6 +574,9 @@ pub fn validate_npm_prefix(raw: &str) -> Result<Option<String>, String> {
     for c in norm.chars() {
         if c == '"' || c == '%' || c == '!' {
             return Err(i18n::fmt("err_prefix_cmd_chars", &[&norm, &c]));
+        }
+        if c == '#' || c == ';' {
+            return Err(i18n::fmt("err_prefix_ini_chars", &[&norm, &c]));
         }
     }
     Ok(Some(norm))
@@ -660,16 +667,29 @@ pub fn validate_registry_url(raw: &str) -> Result<String, String> {
     Ok(v.to_string())
 }
 
-/// 这一行是不是 npm 配置里的 `cache` 键（行首 `#` / `;` 是注释，与 npm 的 ini 解析器一致）。
-fn is_npmrc_cache_line(line: &str) -> bool {
+/// 这一行是不是 npm 配置里的 `key` 键（行首 `#` / `;` 是注释，与 npm 的 ini 解析器一致）。
+///
+/// `cache` 与 `prefix` 两行共用它：两者都是「我们自己写进用户 `~/.npmrc` 的一行」，
+/// 识别规则必须与 npm 的 ini 解析器一致 —— 认错一行，最小行编辑就会把用户的其它配置删掉。
+fn is_npmrc_key_line(line: &str, key: &str) -> bool {
     let t = line.trim();
     if t.is_empty() || t.starts_with('#') || t.starts_with(';') {
         return false;
     }
     match t.split_once('=') {
-        Some((k, _)) => k.trim().eq_ignore_ascii_case("cache"),
+        Some((k, _)) => k.trim().eq_ignore_ascii_case(key),
         None => false,
     }
+}
+
+/// 这一行是不是 npm 配置里的 `cache` 键。
+fn is_npmrc_cache_line(line: &str) -> bool {
+    is_npmrc_key_line(line, "cache")
+}
+
+/// 这一行是不是 npm 配置里的 `prefix` 键（= npm 的全局目录，DSH 就装在那里）。
+fn is_npmrc_prefix_line(line: &str) -> bool {
+    is_npmrc_key_line(line, "prefix")
 }
 
 /// 从 npm 用户配置（`~/.npmrc`）的内容里取出 `cache` 键的值；没有（或值为空）返回 None。
@@ -776,6 +796,136 @@ pub fn apply_npm_cache(desired: Option<&str>) -> Result<NpmCacheOutcome, String>
     Ok(match desired {
         Some(d) => NpmCacheOutcome::Written(d.to_string()),
         None => NpmCacheOutcome::Removed(current.unwrap_or_default()),
+    })
+}
+
+// ---------- npm 全局目录（prefix）与 `~/.npmrc` 的最小行编辑 ----------
+//
+// 为什么 DSH 的「安装位置」也必须落到 npm 自己的配置里：
+//
+// 装 DSH 时命令行上传的 `--prefix <目录>` 是**一次性**的 —— npm 只把它当本次命令的
+// 全局目录，从不写进任何配置。于是机器上出现两个「全局目录」：DSH 实际躺在 `--prefix`
+// 指的那个目录里，而 npm 自己解析出来的仍是默认的 `%APPDATA%\npm`。后果是用户装完之后
+// 「卸载不掉」：`npm uninstall -g @deepseek-ai/dsh` 去默认目录里找，那里根本没有这个包，
+// npm 平静地报一句「up to date」，D:\…\npm 里的 dsh / dsh.cmd / dsh.ps1 与
+// node_modules\@deepseek-ai\dsh 全部留下（真机现场）。用户只能自己发现并
+// `set npm_config_prefix=<目录>` 才能删掉。
+//
+// 所以把用户选的位置**写进 npm 用户级配置**（`~/.npmrc` 的 `prefix=` 一行）：
+// 从此 npm 自己解析出的全局目录就是它，卸载 / 更新 / 全局包列表 / 终端里的 npm
+// 全部指向同一处。与首选项「npm 缓存位置」写 `cache=` 用的是同一套最小行编辑。
+
+/// 从 npm 用户配置（`~/.npmrc`）的内容里取出 `prefix` 键的值；没有（或值为空）返回 None。
+///
+/// 与 `npmrc_cache_value` 同一套取值规则（含「不加引号」的理由）。
+pub fn npmrc_prefix_value(content: &str) -> Option<String> {
+    for line in content.lines() {
+        if !is_npmrc_prefix_line(line) {
+            continue;
+        }
+        let t = line.trim();
+        let v = match t.split_once('=') {
+            Some((_, v)) => v.trim(),
+            None => continue,
+        };
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+/// `~/.npmrc` 的**最小行编辑**：只增删/替换 `prefix` 这一行，其余内容（注释、token、
+/// registry、cache…）逐字保留，并保持原文件的行尾风格与「结尾有没有换行」。
+///
+/// 与 `edit_npmrc_cache` 逐条同款（含「为什么不调 `npm config set prefix`」的理由：
+/// 真机实测 npm 的 ini writer 会把文件里的注释吃掉）。
+pub fn edit_npmrc_prefix(content: &str, desired: Option<&str>) -> String {
+    let eol = if content.contains("\r\n") { "\r\n" } else { "\n" };
+    let had_final_newline = content.ends_with('\n');
+    let mut lines: Vec<String> = Vec::new();
+    for line in content.lines() {
+        if is_npmrc_prefix_line(line) {
+            continue;
+        }
+        lines.push(line.to_string());
+    }
+    if let Some(d) = desired {
+        lines.push(format!("prefix={}", d));
+    }
+    let mut out = lines.join(eol);
+    if !out.is_empty() && had_final_newline {
+        out.push_str(eol);
+    }
+    out
+}
+
+/// 「npm 全局目录」落盘的几种结局（上层据此说清「到底动没动」）。
+/// 与 `NpmCacheOutcome` 同形，理由相同：`Unchanged(None)` 与 `Unchanged(Some(_))`
+/// 是两种不同的现实（「本来就没设置」vs「本来就是它」），提示语不该混为一谈。
+pub enum NpmPrefixOutcome {
+    /// 配置里本来就是它（或本来就没设置、用户也没要求设置）——一个字节都没动
+    Unchanged(Option<String>),
+    /// 已写入 `prefix=<目录>`
+    Written(String),
+    /// 已删掉 `prefix` 行（回到 npm 的默认全局目录），带上被删掉的原值
+    Removed(String),
+}
+
+/// 把「npm 全局目录」应用到 npm 自己的用户配置文件（`~/.npmrc`）。
+///
+/// 调用点是**引导安装 DSH 之前**（见 process.rs::setup_install_dsh）：先在 npm 自己的
+/// 配置里把全局目录定下来，再让 npm 去装 —— 顺序反过来的话，万一写配置失败，用户就得到
+/// 一个「装好了但卸载不掉」的现场（正是这次要修的 bug）。
+///
+/// `desired = None`（清空安装位置）= 删掉 `prefix` 行，npm 回到默认全局目录。
+/// 目录本身**不由我们创建**（与缓存那条同一纪律：那是 npm 的事，调用方另有 create_dir_all）。
+pub fn apply_npm_prefix(desired: Option<&str>) -> Result<NpmPrefixOutcome, String> {
+    let path = match detect::npm_userconfig_path() {
+        Some(p) => p,
+        None => return Err(i18n::t("err_npmrc_nopath_prefix").to_string()),
+    };
+    let exists = path.is_file();
+    // 文件不存在 + 也没有要写的位置：什么都不做，连文件都不建
+    if !exists && desired.is_none() {
+        return Ok(NpmPrefixOutcome::Unchanged(None));
+    }
+    let content = if exists {
+        // 读不成 UTF-8 就如实报错并**什么都不改**：宁可不生效，也不要把用户的
+        // token / registry 配置按错误的编码重写一遍
+        std::fs::read_to_string(&path).map_err(|e| {
+            i18n::fmt(
+                "err_npmrc_read",
+                &[&path.display().to_string(), &e.to_string()],
+            )
+        })?
+    } else {
+        // 家目录可能存在、`~/.npmrc` 还不存在：write_atomic 只在**目标所在目录**里
+        // 建临时文件，目录缺失会失败，所以先把家目录建出来（它本来就该在）。
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        String::new()
+    };
+    let current = npmrc_prefix_value(&content);
+    let unchanged = match (current.as_deref(), desired) {
+        (Some(c), Some(d)) => same_dir(c, d),
+        (None, None) => true,
+        _ => false,
+    };
+    if unchanged {
+        return Ok(NpmPrefixOutcome::Unchanged(current));
+    }
+    let next = edit_npmrc_prefix(&content, desired);
+    write_atomic(&path, next.as_bytes()).map_err(|e| {
+        i18n::fmt(
+            "err_npmrc_write",
+            &[&path.display().to_string(), &e.to_string()],
+        )
+    })?;
+    Ok(match desired {
+        Some(d) => NpmPrefixOutcome::Written(d.to_string()),
+        None => NpmPrefixOutcome::Removed(current.unwrap_or_default()),
     })
 }
 
@@ -1601,6 +1751,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 这个值现在还会**写进 `~/.npmrc`**（`prefix=` 一行），所以 ini 的注释起点
+    /// `#` / `;` 也必须当场拒掉：写进去会被 npm 静默截断成另一个目录，
+    /// 于是「装到 A、卸载去 B」—— 正是本次要修的 bug 的另一种复发方式。
+    #[test]
+    fn npm_prefix_rejects_npmrc_comment_characters() {
+        for bad in [r"D:\a#b", r"D:\a;b"] {
+            assert!(
+                validate_npm_prefix(bad).is_err(),
+                "应当拒绝这个路径: {bad}"
+            );
+        }
+    }
+
     /// 正常路径：真实存在的目录必须通过，并返回规范化结果。
     #[test]
     fn npm_prefix_accepts_real_dir_and_normalizes() {
@@ -1739,6 +1902,61 @@ mod tests {
         let src5 = "registry=https://x/";
         assert_eq!(edit_npmrc_cache(src5, None), src5);
         assert_eq!(edit_npmrc_cache("", None), "");
+    }
+
+    // ---------- npm 全局目录（prefix）与 ~/.npmrc 的最小行编辑 ----------
+
+    /// 读 `prefix` 键：与 `cache` 同一套取值规则（注释不算、大小写与两侧空白都认、
+    /// 空值 = 没设置）。
+    #[test]
+    fn npmrc_prefix_value_reads_only_real_settings() {
+        assert_eq!(npmrc_prefix_value(""), None);
+        assert_eq!(npmrc_prefix_value("registry=https://x/\n"), None);
+        assert_eq!(npmrc_prefix_value("# prefix=D:\\not-real\n"), None);
+        assert_eq!(npmrc_prefix_value("; prefix=D:\\not-real\n"), None);
+        assert_eq!(
+            npmrc_prefix_value("registry=https://x/\nprefix=D:\\DSH\\Program\\npm\n"),
+            Some(r"D:\DSH\Program\npm".to_string())
+        );
+        assert_eq!(
+            npmrc_prefix_value("  PREFIX =  D:\\DSH\\Program\\npm  \n"),
+            Some(r"D:\DSH\Program\npm".to_string())
+        );
+        // 空值 = 没设置（别把它当成「已经是这个位置」而跳过写入）
+        assert_eq!(npmrc_prefix_value("prefix=\n"), None);
+        // 关键：`cache=` 行不能被当成 `prefix=` 行（两行由同一个键匹配函数区分）
+        assert_eq!(npmrc_prefix_value("cache=D:\\npm-cache\n"), None);
+        assert_eq!(npmrc_cache_value("prefix=D:\\npm\n"), None);
+    }
+
+    /// 最小行编辑：只动 `prefix` 那一行，其余**逐字**保留（这是不走
+    /// `npm config set prefix` 的全部理由 —— 真机实测它会把注释吃掉）。
+    #[test]
+    fn edit_npmrc_prefix_touches_only_that_line() {
+        let src = "# 我的注释\r\nregistry=https://x/\ncache=D:\\npm-cache\n";
+        let out = edit_npmrc_prefix(src, Some(r"D:\DSH\Program\npm"));
+        assert!(out.contains("# 我的注释"), "注释必须原样保留");
+        assert!(out.contains("registry=https://x/"));
+        assert!(out.contains("cache=D:\\npm-cache"), "cache 行不能被动到");
+        assert!(out.ends_with("prefix=D:\\DSH\\Program\\npm\r\n"), "新行要跟着原文件的 CRLF: {out:?}");
+        assert_eq!(out.matches("prefix=").count(), 1);
+
+        // 已有 prefix 行：替换（不是重复追加）
+        let out2 = edit_npmrc_prefix("prefix=D:\\old\nregistry=https://x/\n", Some(r"E:\new"));
+        assert_eq!(out2, "registry=https://x/\nprefix=E:\\new\n");
+
+        // 重复的 prefix 行会被收敛成一行（ini 里后者覆盖前者，留着只会让人困惑）
+        let out3 = edit_npmrc_prefix("prefix=A\nprefix=B\n", Some("C"));
+        assert_eq!(out3.matches("prefix=").count(), 1);
+        assert!(out3.contains("prefix=C"));
+
+        // desired = None：删掉该行，其它内容一字不改
+        let out4 = edit_npmrc_prefix("prefix=D:\\old\nregistry=https://x/\n", None);
+        assert_eq!(out4, "registry=https://x/\n");
+        // 原本没有 prefix 行、又不要求设置 → 内容不变（连结尾换行都保持）
+        let src5 = "registry=https://x/";
+        assert_eq!(edit_npmrc_prefix(src5, None), src5);
+        assert_eq!(edit_npmrc_prefix("", None), "");
     }
 
     /// 「家目录是不是默认值」—— 自动写用户环境变量 DSH_HOME 的**唯一判据**（没有开关）。

@@ -79,9 +79,9 @@
     toast_home_env_fail: '已保存设置，但用户环境变量 DSH_HOME 没改成功：{0}',
     // ---- 首选项：搬家警告（只在这一格被改动时才露出；文案里 <code> 是固定标签，无变量插入） ----
     home_move_title: '⚠ 搬完家目录内容后，务必删掉 profiles\\node_modules',
-    note_home_move_html: '<p>家目录里的 <code>profiles\\node_modules</code> 不是普通文件，而是一棵指回安装目录的 <b>Windows 目录联接（junction）</b>。常规拷贝（资源管理器拖拽、xcopy、不带 <code>/SL</code> 的 robocopy）会把它<b>展平成一堆空目录</b>，而 dsh 每次启动都要校验这层安装回退 —— 发现不对就抛错退出，服务整个起不来。</p><p><b>所以：把旧家目录的内容拷到新位置之后，请把 <code>&lt;新家目录&gt;\\profiles\\node_modules</code> 整个删掉，让 dsh 下次启动时自己重建。</b>其它内容（会话、技能、配置、凭据、插件快照等）照拷不误。</p><p>确实要整树原样拷贝，就用 <code>robocopy &lt;旧&gt; &lt;新&gt; /E /SL</code>（<code>/SL</code> = 复制符号链接本身而不是它的内容）。</p>',
+    note_home_move_html: '<p>家目录里的 <code>profiles\\node_modules</code> 不是普通文件，而是一棵指回安装目录的 <b>Windows 目录联接（junction）</b>。常规拷贝（资源管理器拖拽、xcopy、不带 <code>/SL</code> 的 robocopy）会把它<b>展平成一堆空目录</b>，而 DSH 每次启动都要校验这层安装回退 —— 发现不对就抛错退出，服务整个起不来。</p><p><b>所以：把旧家目录的内容拷到新位置之后，请把 <code>&lt;新家目录&gt;\\profiles\\node_modules</code> 整个删掉，让 DSH 下次启动时自己重建。</b>其它内容（会话、技能、配置、凭据、插件快照等）照拷不误。</p><p>确实要整树原样拷贝，就用 <code>robocopy &lt;旧&gt; &lt;新&gt; /E /SL</code>（<code>/SL</code> = 复制符号链接本身而不是它的内容）。</p><p>如果你只是想<b>重建</b>一个新的家目录，那就不必拷贝旧家目录的全部内容 —— 只需拷贝 <code>.credentials.yaml</code>（或再加上 <code>settings.yaml</code>）就可以了，其余的 DSH 会在重启的时候自动生成。</p>',
     // 保存时家目录变了、要点「确认」的那一句（把同一个坑在动手前再说一遍）
-    confirm_home_change: '确认要把家目录改成 {0} 吗？\n\n如果这是「搬家」（把旧家目录的内容拷到新位置），记得拷贝完成后删掉 {1}，让 dsh 下次启动自己重建 —— 直接启动会失败。\n\n继续保存？',
+    confirm_home_change: '确认要把家目录改成 {0} 吗？\n\n如果这是「搬家」（把旧家目录的内容拷到新位置），记得拷贝完成后删掉 {1}，让 DSH 下次启动自己重建 —— 直接启动会失败。\n\n继续保存？',
     // ---- 首选项：包源 registry 对齐（读自动刷、点按钮才写 pnpm） ----
     lbl_registry: '包源 registry（npm / pnpm）',
     btn_align_registry: '把 pnpm 的源对齐到 {0}',
@@ -233,9 +233,9 @@
     wiz_btn_install_dsh: '自动执行安装',
     // 「DSH 安装位置」= npm 的全局目录（--prefix）。预填值由后端问 npm 得到，这里的
     // value/placeholder 只是检测返回前的静态兜底。
-    wiz_dsh_dir_label: '安装位置（已填 npm 默认全局目录，可修改）',
+    wiz_dsh_dir_label: '安装位置（npm 的全局目录，已填 npm 默认值，可修改）',
     wiz_dsh_dir_ph: 'C:\\Users\\<用户名>\\AppData\\Roaming\\npm',
-    wiz_dsh_dir_note: '这是 npm 的全局目录：改成 D:\\dsh 之类即可装到别的盘（清空则用 npm 默认目录）。装到自定义目录后会自动把该目录加入你的用户 PATH（终端里也能直接用 dsh，不改系统 PATH）。',
+    wiz_dsh_dir_note: '这是 npm 的全局目录。装 DSH 前会把它写进你用户级的 ~/.npmrc（prefix= 一行），这样终端里的 npm 与程序用的是同一个全局目录 —— 卸载时不必加任何参数：npm uninstall -g @deepseek-ai/dsh。注意这一行对所有全局包生效（pnpm 等也装到这里）。改成 D:\\dsh 之类即可装到别的盘（清空则用 npm 默认目录）；装到自定义目录后会自动把该目录加入你的用户 PATH（终端里也能直接用 dsh，不改系统 PATH）。',
     wiz_btn_copy_cmd: '复制命令',
     // ---------- 缺少 pnpm（Node 已就绪时提示；一键装完 Node 后端也会自动补装） ----------
     wiz_step_pnpm_title: '缺少 pnpm',
@@ -389,8 +389,8 @@
     // ---- Preferences: move warning (shown only while that field is being edited;
     //      the <code> tags are fixed markup, no values are interpolated) ----
     home_move_title: '⚠ After copying the home dir, delete profiles\\node_modules',
-    note_home_move_html: '<p><code>profiles\\node_modules</code> inside the home dir is not a normal directory — it is a tree of <b>Windows directory junctions</b> pointing back at the install directory. Ordinary copies (Explorer drag-and-drop, xcopy, robocopy without <code>/SL</code>) <b>flatten them into a pile of empty directories</b>, and dsh validates that installation fallback on every start — when it finds the tree damaged it throws and exits, so the service will not come up at all.</p><p><b>So: after you copy the contents of the old home into the new location, delete <code>&lt;new home&gt;\\profiles\\node_modules</code> entirely and let dsh rebuild it on the next start.</b> Everything else (sessions, skills, settings, credentials, plugin snapshots …) can be copied as-is.</p><p>If you really need to copy the whole tree verbatim, use <code>robocopy &lt;old&gt; &lt;new&gt; /E /SL</code> (<code>/SL</code> copies the links themselves instead of what they point at).</p>',
-    confirm_home_change: 'Change the home dir to {0}?\n\nIf this is a move (copying the old home dir contents to the new location), remember to delete {1} after the copy so dsh rebuilds it on the next start — starting with the copied tree fails.\n\nSave anyway?',
+    note_home_move_html: '<p><code>profiles\\node_modules</code> inside the home dir is not a normal directory — it is a tree of <b>Windows directory junctions</b> pointing back at the install directory. Ordinary copies (Explorer drag-and-drop, xcopy, robocopy without <code>/SL</code>) <b>flatten them into a pile of empty directories</b>, and DSH validates that installation fallback on every start — when it finds the tree damaged it throws and exits, so the service will not come up at all.</p><p><b>So: after you copy the contents of the old home into the new location, delete <code>&lt;new home&gt;\\profiles\\node_modules</code> entirely and let DSH rebuild it on the next start.</b> Everything else (sessions, skills, settings, credentials, plugin snapshots …) can be copied as-is.</p><p>If you really need to copy the whole tree verbatim, use <code>robocopy &lt;old&gt; &lt;new&gt; /E /SL</code> (<code>/SL</code> copies the links themselves instead of what they point at).</p><p>If you only want to <b>rebuild a fresh home directory</b>, you do not need to copy the whole old home at all — just copy <code>.credentials.yaml</code> (plus <code>settings.yaml</code> if you want to keep your preferences); DSH generates the rest by itself on the next start.</p>',
+    confirm_home_change: 'Change the home dir to {0}?\n\nIf this is a move (copying the old home dir contents to the new location), remember to delete {1} after the copy so DSH rebuilds it on the next start — starting with the copied tree fails.\n\nSave anyway?',
     // ---- Preferences: package sources (registry) — auto-read, written only on click ----
     lbl_registry: 'Package sources (npm / pnpm)',
     btn_align_registry: "Align pnpm's source to {0}",
@@ -539,9 +539,9 @@
     // "DSH install location" = npm's global directory (--prefix). The pre-filled value comes
     // from the backend (it asks npm); the value/placeholder here is only a static fallback
     // shown before detection returns.
-    wiz_dsh_dir_label: 'Install location (pre-filled with npm default global directory — editable)',
+    wiz_dsh_dir_label: "Install location (npm's global directory — pre-filled with npm's default, editable)",
     wiz_dsh_dir_ph: 'C:\\Users\\<you>\\AppData\\Roaming\\npm',
-    wiz_dsh_dir_note: "This is npm's global directory: change it to e.g. D:\\dsh to install onto another drive (clear it to use npm's default). Installing into a custom folder also adds that folder to your user PATH, so `dsh` works in a terminal (system PATH is untouched).",
+    wiz_dsh_dir_note: "This is npm's global directory. Before installing DSH it is written into your user-level ~/.npmrc (as `prefix=`), so terminal npm and this app use the same global directory — uninstalling then needs no extra flags: npm uninstall -g @deepseek-ai/dsh. Note that this line applies to all global packages (pnpm and others land here too). Change it to e.g. D:\\dsh to install onto another drive (clear it to use npm's default); installing into a custom folder also adds that folder to your user PATH, so `dsh` works in a terminal (system PATH is untouched).",
     wiz_btn_copy_cmd: 'Copy command',
     // ---------- pnpm is missing (shown once Node is ready; the guided Node install also auto-installs it) ----------
     wiz_step_pnpm_title: 'pnpm is missing',

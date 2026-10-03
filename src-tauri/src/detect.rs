@@ -875,6 +875,28 @@ pub fn npm_userconfig_path() -> Option<PathBuf> {
     env_path("USERPROFILE").map(|h| h.join(".npmrc"))
 }
 
+/// 问**裸 npm**（不带 `--prefix`、不带任何环境覆盖）现在会把「全局目录」解析到哪里。
+///
+/// 与 [`default_npm_prefix`] 的区别只在**什么时候问**：那个是给向导预填用的（进程刚起来、
+/// 还没写任何配置），这个是在我们把 `prefix=<目录>` 写进 `~/.npmrc`（config::apply_npm_prefix）
+/// 之后回来核对 —— npm 真的按新配置走了吗？被 `npm_config_prefix` 环境变量或项目级
+/// `.npmrc` 压过时，答案会是别处，而那种情况下用户裸 `npm uninstall -g` 仍然删不掉 DSH，
+/// 必须当场说出来（见 process.rs::setup_install_dsh 装后那段）。
+///
+/// 与 `npm_effective_cache_dir` 一样：显式补 PATH（进程环境可能是装 Node 之前的旧快照），
+/// 问不到（npm 缺失 / 超时 / 输出认不出）返回 None —— 调用方按「核对不了」处理，不猜。
+pub fn effective_npm_prefix() -> Option<String> {
+    let npm = find_npm_cmd()?;
+    let npm_s = npm.to_string_lossy().to_string();
+    let args = [
+        "config".to_string(),
+        "get".to_string(),
+        "prefix".to_string(),
+    ];
+    let out = run_capture_timeout(&npm_s, &args, 10)?;
+    pick_path_line(&out)
+}
+
 /// 本机**实际生效**的 npm 缓存目录（含环境变量 / 项目级 `.npmrc` 的覆盖），
 /// 只用于首选项里那行「当前生效」提示 —— 它和用户填的值不一致时，光看我们的设置页
 /// 是看不出来的。问不到才回落 Windows 的默认位置 `%LOCALAPPDATA%\npm-cache`。

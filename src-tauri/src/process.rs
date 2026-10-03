@@ -2672,6 +2672,26 @@ pub async fn update_dsh(app: AppHandle, tag: String) -> Result<(), String> {
 // 那会在机器上留下第二份 DSH，检测到哪一份就变得看运气）。
     let update_prefix = npm_prefix_from_dsh_path(&cfg);
     let update_cache = npm_cache_for_use(&cfg);
+
+    // 顺手把「DSH 实际所在的目录」记进 npm 自己的配置（`~/.npmrc` 的 `prefix=`）——
+    // 与引导安装那条路（setup_install_dsh）同一个理由，但这里还多一层意义：
+    // **旧版本装好的机器只能靠这条路被治好**。那些机器当初是用一次性 `--prefix` 装的，
+    // 配置里什么都没留下，于是裸 `npm uninstall -g <包名>` 至今卸不掉（会在默认目录里
+    // 找到「没装这个包」而平静退出）。用户升级本程序后，DSH 未必会重新走一遍引导，
+    // 但一定会点「更新 DSH」—— 把修复挂在这条必经之路上。
+    //
+    // 失败不打断更新（放前面、失败只留一行日志）：`--prefix` 仍在，更新本身照样装回原地。
+    if let Some(d) = update_prefix.as_deref() {
+        match config::apply_npm_prefix(Some(d)) {
+            Ok(config::NpmPrefixOutcome::Written(v)) => emit_log(
+                &app,
+                "update",
+                i18n::fmt("update_prefix_npmrc_written", &[&v, &cfg.package_name]),
+            ),
+            _ => {}
+        }
+    }
+
     let args: Vec<String> = dsh_install_args(
         &format!("{}@{}", cfg.package_name, tag),
         update_prefix.as_deref(),
@@ -4995,7 +5015,54 @@ pub async fn setup_install_dsh(app: AppHandle, dir: Option<String>) -> Result<()
         return Err(e);
     }
 
+    // 之后的安装线程用 clone 出来的句柄（日志 / 事件都走它）
     let app2 = app.clone();
+
+    // ---------- 先把这个位置写进 npm 自己的配置（本次修复的核心） ----------
+    //
+    // `--prefix <目录>` 只是**本次命令**的全局目录，npm 从不把它写进任何配置。所以装完之后
+    // 机器上有两个「全局目录」：DSH 实际躺在所选目录里，而 npm 自己解析出来的仍是默认的
+    // %APPDATA%\npm —— 用户裸 `npm uninstall -g @deepseek-ai/dsh` 于是去默认目录里找，
+    // 那里没有这个包，npm 平静地报一句「up to date」，所选目录里的 dsh / dsh.cmd / dsh.ps1
+    // 与 node_modules\@deepseek-ai\dsh 全部留下（真机现场）。
+    //
+    // 修法是让 npm 自己解析出的全局目录**就是**所选目录：把 `prefix=<目录>` 用最小行编辑
+    // 写进用户级 `~/.npmrc`（与首选项「npm 缓存位置」写 `cache=` 同一套机制）。顺序上放在
+    // 执行 npm **之前** —— 万一写不进去，用户不该得到一个「装好了却卸不掉」的现场。
+    //
+    // 顺手把子进程的 npm_config_prefix 也钉成同一个值（见下）：环境变量的优先级高于
+    // 用户级配置，于是即便本机有项目级 .npmrc 之类的覆盖，这次安装也一定落在所选目录里。
+    //
+    // 必须在**写配置之前**问一次「npm 原来的全局目录」：下面决定「要不要把所选目录加进
+    // 用户 PATH」时要用它做比较，而写完配置之后 npm 的答案就是我们刚写进去的那个值
+    // ——拿写完之后的答案去比，等于每次都判「就是默认目录」，反而不会把新目录加进 PATH
+    // （终端里 `dsh` 就找不到了）。
+    let npm_default_prefix = detect::default_npm_prefix();
+    let mut env_prefix: Option<String> = None;
+    let mut prefix_note = String::new();
+    if let Some(d) = prefix.as_deref() {
+        env_prefix = Some(d.to_string());
+        match config::apply_npm_prefix(Some(d)) {
+            Ok(config::NpmPrefixOutcome::Written(v)) => {
+                prefix_note = i18n::fmt("setup_prefix_npmrc_written", &[&v, &cfg.package_name]);
+            }
+            // 已经在配置里了（用户自己配过 / 上一次引导装过）：不必重复说一遍
+            Ok(config::NpmPrefixOutcome::Unchanged(_)) => {}
+            // 这个调用点不会走到：传进去的一定是 Some(目录)，删行那条路径只留给
+            // 将来「清空安装位置」的入口；真走到了也什么提示都不必给（配置已是干净的）。
+            Ok(config::NpmPrefixOutcome::Removed(_)) => {}
+            // 写不进去不是安装失败（本次 `--prefix` 仍然把 DSH 装到所选目录），
+            // 但必须说清后果：裸 `npm uninstall -g` 会找不到它，以及怎么补。
+            Err(e) => {
+                prefix_note = i18n::fmt(
+                    "setup_prefix_npmrc_fail",
+                    &[&d, &e, &cfg.package_name],
+                );
+                logger::append_line(&logger::desktop_log_path(&app2), &prefix_note);
+            }
+        }
+    }
+
     let pkg = cfg.package_name.clone();
     // 同 update_dsh：workspace_cwd 可能因路径策略失败，这里必须复位 updating，
     // 否则「正在更新」状态会永久卡住（后续更新与引导安装全部被 busy 挡住）
@@ -5062,6 +5129,12 @@ pub async fn setup_install_dsh(app: AppHandle, dir: Option<String>) -> Result<()
             // loglevel=http：npm 会把每次 registry 请求打成一行日志，
             // 日志读取线程据此给界面进度（「已下载 N 个包文件」）计数
             cmd.env("npm_config_loglevel", "http");
+            // 全局目录钉死在所选位置：环境变量的优先级高于用户级 `~/.npmrc` 与任何
+            // 项目级 `./.npmrc`，所以即便本机有别的覆盖，这次安装也一定落在用户选的地方
+            // ——「装到哪」不能靠猜，它决定了之后 `npm uninstall -g` 能不能找到这份。
+            if let Some(d) = env_prefix.as_deref() {
+                cmd.env("npm_config_prefix", d);
+            }
             apply_no_window(&mut cmd);
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -5145,12 +5218,36 @@ pub async fn setup_install_dsh(app: AppHandle, dir: Option<String>) -> Result<()
                 }
                 detect::invalidate_cache();
 
+                // 我们刚把 `prefix=<所选目录>` 写进 npm 自己的配置，这里**问回来核对**：
+                // 装的这一份，与裸 `npm uninstall -g <包名>` 将来会去找的那一份，是同一份吗？
+                // 被 npm_config_prefix 环境变量或项目级 `.npmrc` 压过时答案会是别处 ——
+                // 那种情况下用户仍然卸不掉，必须当场说清楚，而不是等他自己发现（这次就是这样）。
+                if let Some(d) = prefix.as_deref() {
+                    if let Some(eff) = detect::effective_npm_prefix() {
+                        if !config::same_dir(&eff, d) {
+                            // 追加而不是直接 push('\n')：prefix_note 可能还是空的
+                            // （比如写 `~/.npmrc` 那一步本身失败了），那样会多出一个空行。
+                            let note =
+                                i18n::fmt("setup_prefix_effective_mismatch", &[&eff, d, &pkg]);
+                            if !prefix_note.is_empty() {
+                                prefix_note.push('\n');
+                            }
+                            prefix_note.push_str(&note);
+                            logger::append_line(&logger::desktop_log_path(&app2), &note);
+                        }
+                    }
+                }
+
                 if prefix.is_some() && landed.is_none() {
                     let env = detect::full_detect();
-                    let msg = i18n::fmt(
+                    let mut msg = i18n::fmt(
                         "setup_dsh_mismatch",
                         &[&prefix.clone().unwrap_or_default(), &env.dsh_path],
                     );
+                    if !prefix_note.is_empty() {
+                        msg.push('\n');
+                        msg.push_str(&prefix_note);
+                    }
                     logger::append_line(&logger::desktop_log_path(&app2), &msg);
                     let _ = app2.emit(
                         "setup-result",
@@ -5159,9 +5256,10 @@ pub async fn setup_install_dsh(app: AppHandle, dir: Option<String>) -> Result<()
                 } else {
                     // 自定义位置 → 写进**用户** PATH（终端里也能直接用 dsh；
                     // 也保证重启本程序后仍检测得到）。默认位置本来就在 PATH 里，不动。
+                    // 比较用的是**改配置之前**问到的 npm 默认目录（见上面 npm_default_prefix）。
                     let mut path_note = String::new();
                     if let Some(d) = prefix.as_deref() {
-                        if !config::same_dir(d, &detect::default_npm_prefix()) {
+                        if !config::same_dir(d, &npm_default_prefix) {
                             match detect::append_to_user_path(Path::new(d)) {
                                 Ok(true) => emit_log(
                                     &app2,
@@ -5200,6 +5298,12 @@ pub async fn setup_install_dsh(app: AppHandle, dir: Option<String>) -> Result<()
                             if !path_note.is_empty() {
                                 msg.push('\n');
                                 msg.push_str(&path_note);
+                            }
+                            // 「已把 npm 的全局目录设为…」/「没能写进去，裸 npm uninstall 找不到它」
+                            // 这类说明要跟着成功提示一起给（只写日志的话用户看不到）。
+                            if !prefix_note.is_empty() {
+                                msg.push('\n');
+                                msg.push_str(&prefix_note);
                             }
                             logger::append_line(
                                 &logger::desktop_log_path(&app2),
@@ -5924,5 +6028,34 @@ mod tests {
             dsh_install_args("@deepseek-ai/dsh", None, Some(r"D:\npm-cache")),
             vec!["install", "-g", "--cache", r"D:\npm-cache", "@deepseek-ai/dsh"]
         );
+    }
+
+    /// 装了要卸得掉：`npm uninstall -g <包名>` 找的是**同一个包名**，所以安装参数表里
+    /// 包名必须是最后一个参数，且永远不在选项之前被别的 token 顶掉 —— 参数表一旦被改成
+    /// `install -g <pkg> --prefix <目录>` 之类，日志里回显的那行命令复制出来就不是
+    /// 「装到所选目录」了（npm 仍接受，但人照着抄会得出错误结论）。
+    ///
+    /// 这条测试守的是**安装与卸载的对称性**：卸载那一侧没有参数表可拼
+    /// （它由 `~/.npmrc` 的 `prefix=` 决定，见 config::apply_npm_prefix），
+    /// 所以「装的是哪个包」必须在这里钉死。
+    #[test]
+    fn dsh_install_args_keep_the_package_name_last_for_symmetry_with_uninstall() {
+        let pkg = "@deepseek-ai/dsh";
+        for (prefix, cache) in [
+            (None, None),
+            (Some(r"D:\dsh-global"), None),
+            (None, Some(r"D:\npm-cache")),
+            (Some(r"D:\dsh-global"), Some(r"D:\npm-cache")),
+        ] {
+            let args = dsh_install_args(pkg, prefix, cache);
+            assert_eq!(
+                args.last().map(String::as_str),
+                Some(pkg),
+                "包名必须是最后一个参数：{args:?}"
+            );
+            // 选项只能出现在 -g 之后、包名之前
+            assert_eq!(args.get(1).map(String::as_str), Some("-g"), "{args:?}");
+            assert_eq!(args.get(0).map(String::as_str), Some("install"), "{args:?}");
+        }
     }
 }

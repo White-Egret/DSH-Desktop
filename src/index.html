@@ -127,7 +127,7 @@
              出现，平时不占地方。 -->
         <div class="home-move-warn hidden" id="home-move-warn">
           <div class="home-move-warn-title" data-i18n="home_move_title">⚠ 搬完家目录内容后，务必删掉 profiles\node_modules</div>
-          <div class="home-move-warn-body" data-i18n-html="note_home_move_html"><p>家目录里的 <code>profiles\node_modules</code> 不是普通文件，而是一棵指回安装目录的 <b>Windows 目录联接（junction）</b>。常规拷贝（资源管理器拖拽、xcopy、不带 <code>/SL</code> 的 robocopy）会把它<b>展平成一堆空目录</b>，而 dsh 每次启动都要校验这层安装回退 —— 发现不对就抛错退出，服务整个起不来。</p><p><b>所以：把旧家目录的内容拷到新位置之后，请把 <code>&lt;新家目录&gt;\profiles\node_modules</code> 整个删掉，让 dsh 下次启动时自己重建。</b>其它内容（会话、技能、配置、凭据、插件快照等）照拷不误。</p><p>确实要整树原样拷贝，就用 <code>robocopy &lt;旧&gt; &lt;新&gt; /E /SL</code>（<code>/SL</code> = 复制符号链接本身而不是它的内容）。</p></div>
+          <div class="home-move-warn-body" data-i18n-html="note_home_move_html"><p>家目录里的 <code>profiles\node_modules</code> 不是普通文件，而是一棵指回安装目录的 <b>Windows 目录联接（junction）</b>。常规拷贝（资源管理器拖拽、xcopy、不带 <code>/SL</code> 的 robocopy）会把它<b>展平成一堆空目录</b>，而 DSH 每次启动都要校验这层安装回退 —— 发现不对就抛错退出，服务整个起不来。</p><p><b>所以：把旧家目录的内容拷到新位置之后，请把 <code>&lt;新家目录&gt;\profiles\node_modules</code> 整个删掉，让 DSH 下次启动时自己重建。</b>其它内容（会话、技能、配置、凭据、插件快照等）照拷不误。</p><p>确实要整树原样拷贝，就用 <code>robocopy &lt;旧&gt; &lt;新&gt; /E /SL</code>（<code>/SL</code> = 复制符号链接本身而不是它的内容）。</p><p>如果你只是想<b>重建</b>一个新的家目录，那就不必拷贝旧家目录的全部内容 —— 只需拷贝 <code>.credentials.yaml</code>（或再加上 <code>settings.yaml</code>）就可以了，其余的 DSH 会在重启的时候自动生成。</p></div>
         </div>
         <div class="row two">
           <label class="field">

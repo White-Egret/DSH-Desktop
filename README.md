@@ -97,15 +97,17 @@ Worth knowing:
 
 The "DSH is missing" step has the same kind of **install location** field, **pre-filled with npm's global directory** (the app asks `npm config get prefix` once and only falls back to `%APPDATA%\npm` if that fails; normally `C:\Users\<you>\AppData\Roaming\npm` — i.e. where DSH already lives on this machine). To install onto another drive, edit it to e.g. `D:\dsh`, or use Browse; clearing it falls back to npm's own default.
 
-The value is handed to npm as `--prefix <dir>`. Note this is **not** a per-machine install like Node.js: it needs no administrator rights (the folder just has to be writable by you). The trade-off is that npm's global directory is shared by *all* global packages — later `npm install -g <something-else>` in a terminal still goes to npm's default directory; the two coexist and do not interfere.
+The value is handed to npm as `--prefix <dir>`, **and it is also written into npm's own user-level config** (`~/.npmrc`, the `prefix=` line) *before* npm runs. That second half is what makes uninstalling work with no extra flags: `--prefix` alone only applies to that one command, so npm would keep resolving its global directory to the default one while DSH actually sits elsewhere — and a plain `npm uninstall -g @deepseek-ai/dsh` would go looking in the default directory, find nothing, and leave `dsh` / `dsh.cmd` / `dsh.ps1` plus `node_modules\@deepseek-ai\dsh` behind. With `prefix=` recorded, npm's own answer and the directory DSH lives in are the same one, and `npm uninstall -g @deepseek-ai/dsh` removes everything. The line is written with the same minimal line edit as the cache setting (your comments, tokens and other keys are preserved byte for byte) and only the `prefix` line is ever touched. The install's own environment additionally pins `npm_config_prefix`, so a project-level `.npmrc` cannot silently send this install somewhere else.
+
+Note this is **not** a per-machine install like Node.js: it needs no administrator rights (the folder just has to be writable by you). The trade-off is that npm's global directory is shared by *all* global packages — once you point it at `D:\dsh`, later `npm install -g <something-else>` in a terminal goes there too. (That is npm's own one-global-directory model, not something this app adds.)
 
 Worth knowing:
 
 - **The folder is added to your user PATH.** After a successful install the app appends it to `HKCU\Environment`'s `Path` (kept as `REG_EXPAND_SZ`, system PATH untouched, no admin rights) so `dsh` also works in a terminal and the app keeps detecting it. When the chosen folder *is* npm's default one, nothing is touched at all. If the write fails (rare — e.g. the registry is locked down by policy) that is reported honestly rather than glossed over; the app itself starts DSH by its full path and is unaffected.
-- **The result is verified.** npm's exit code 0 only means npm *thinks* it succeeded, so after installing the app confirms `dsh.cmd` really is in the directory you asked for; if it is not, it reports the error together with the location it actually detected.
+- **The result is verified.** npm's exit code 0 only means npm *thinks* it succeeded, so after installing the app confirms `dsh.cmd` really is in the directory you asked for; if it is not, it reports the error together with the location it actually detected. It also asks npm which global directory it now resolves to and, if something still overrides the `prefix=` line (the `npm_config_prefix` variable, a project-level `.npmrc`), says so explicitly — that is exactly the case in which a later `npm uninstall -g` would look in the wrong place.
 - **Updates go back to the same place.** "Update DSH" no longer always targets the default directory: it derives the directory from where `dsh.cmd` actually lives and passes that as `--prefix` — otherwise a second copy of DSH would be left behind and "which one is detected" would become a matter of luck.
 - **What you typed is never overwritten.** Same rule as the Node.js field: once you edit it (or pick a folder with Browse), "Re-check" will not put the default back.
-- **The path is validated** — absolute, no `..`, drive must exist, no `< > " | ? *`, not inside `Windows` / `ProgramData`, not the `Program Files` root itself, 200-character limit — and it must not contain `%` or `!`, because the value travels through `cmd.exe` to `npm.cmd`, which expands `%VAR%` even inside double quotes and treats `!` specially once delayed expansion is on. Those cannot be escaped reliably, so they are refused.
+- **The path is validated** — absolute, no `..`, drive must exist, no `< > " | ? *`, not inside `Windows` / `ProgramData`, not the `Program Files` root itself, 200-character limit — and it must not contain `%` or `!`, because the value travels through `cmd.exe` to `npm.cmd`, which expands `%VAR%` even inside double quotes and treats `!` specially once delayed expansion is on. Those cannot be escaped reliably, so they are refused. `#` and `;` are refused too: the path now also goes into `~/.npmrc`, where npm's ini parser treats them as the start of a comment — the path would be silently truncated to a *different* folder.
 - **The folder is created for you.** npm fails a non-existent `--prefix` outright (`ENOENT … lstat`) — unlike the MSI it will not create the prefix itself — so the app creates the directory first and reports a clear error if it cannot.
 
 > **Installer integrity**: before `msiexec` is ever invoked, the downloaded installer is matched against the SHA-256 digest listed in Node.js's official `SHASUMS256.txt` for that exact version, and it lands in a one-shot randomly-named private temp directory that is deleted afterwards (the old predictable `%TEMP%\node-vX.Y.Z-x64.msi` path could be pre-created as a symlink or swapped by another process). If the manifest can't be fetched, has no entry for the file, or the digest differs, the install aborts — there is deliberately **no "install anyway" fallback**; use the manual download link instead.
@@ -235,10 +237,11 @@ Open **⚙ 首选项 (Preferences)** from the toolbar. The paths of the two prog
 
 While the *DSH home dir* field in Preferences is being edited (typed into or picked with 浏览 / Browse), an amber warning appears underneath it, and pressing Save asks once more. The reason: **`profiles\node_modules` is not a normal directory and must not be copied like one.**
 
-- It is not real content but a few hundred **Windows directory junctions pointing back at the install directory**. dsh validates that installation fallback on **every start**; when it finds `@deepseek-ai\dsh` as a real directory that is not a dsh-managed proxy it throws and exits, so **the service never comes up at all** (measured on this machine: Node exit code 1, the port never became ready).
+- It is not real content but a few hundred **Windows directory junctions pointing back at the install directory**. DSH validates that installation fallback on **every start**; when it finds `@deepseek-ai\dsh` as a real directory that is not a DSH-managed proxy it throws and exits, so **the service never comes up at all** (measured on this machine: Node exit code 1, the port never became ready).
 - Ordinary copy tools (Explorer drag-and-drop, `xcopy`, **robocopy without `/SL`**) do not preserve those links and **flatten them into a pile of empty directories** — what lands at the new location looks complete and is guaranteed to fail on start.
-- **The correct move**: after copying the old home dir's contents into the new location, **delete `<new home>\profiles\node_modules` entirely** and let dsh rebuild it on the next start (the rebuild matches the original state: junctions pointing back at the install directory). Everything else (sessions, skills, settings, credentials, plugin snapshots, logs) can be copied as-is.
+- **The correct move**: after copying the old home dir's contents into the new location, **delete `<new home>\profiles\node_modules` entirely** and let DSH rebuild it on the next start (the rebuild matches the original state: junctions pointing back at the install directory). Everything else (sessions, skills, settings, credentials, plugin snapshots, logs) can be copied as-is.
 - To copy the whole tree verbatim after all, use `robocopy <old> <new> /E /SL` (`/SL` copies the links themselves instead of what they point at).
+- **If you only want to rebuild a fresh home directory**, you do not need to copy the whole old home at all — just copy `.credentials.yaml` (plus `settings.yaml` if you want to keep your preferences); DSH generates the rest by itself on the next start.
 - **Back up first**: after the move, keep the old home dir around for a few days and archive it only once daily mode is confirmed healthy.
 
 ### Python environment
@@ -456,6 +459,34 @@ Click **⤓ 更新 DSH (Update)** → the dialog lists **both channels with thei
 - **⚠ Back up the DSH home dir (`%USERPROFILE%\.dsh` by default) before either direction.** The dialog shows your *actual configured* path, and the reminder is repeated in the log when the run starts: a newer version may rewrite the config/session format, and rolling back to an older one can just as well fail to read what the newer one wrote.
 - While installing, the **page shows live progress** — a "package files fetched / elapsed" counter plus scrolling npm output, also mirrored into the log (source tag `update`). Buttons are disabled during the update.
 - Use **检测全局包名** (`npm list -g --depth=0`) to confirm the package name.
+
+## Uninstalling DSH
+
+Plain npm, no extra flags — including when you installed DSH into a folder of your own choosing during the wizard:
+
+```
+npm uninstall -g @deepseek-ai/dsh
+```
+
+This works because the wizard records the chosen folder as npm's global directory (the `prefix=` line in your user-level `~/.npmrc`, see [Choosing where DSH gets installed](#choosing-where-dsh-gets-installed)), so npm looks in the same place DSH was installed into.
+
+If you installed DSH **before** that behaviour existed, npm's answer and DSH's actual folder may still differ. Either point npm at the right folder once and uninstall:
+
+```
+npm config set prefix "D:\your\chosen\npm"   # the folder holding dsh.cmd
+npm uninstall -g @deepseek-ai/dsh
+npm config delete prefix                     # optional: back to npm's default
+```
+
+or pass it for that one command only (this also works from `cmd`/PowerShell without touching your config):
+
+```
+npm uninstall -g --prefix "D:\your\chosen\npm" @deepseek-ai/dsh
+```
+
+**Updating this app and then clicking "Update DSH" once also records it for you** (the update writes the directory `dsh.cmd` actually lives in into `~/.npmrc`), after which the plain command works.
+
+What stays behind after uninstalling DSH is deliberate: the `prefix=` line in `~/.npmrc` (delete it with `npm config delete prefix` if you want global installs back in npm's default folder — note that any *other* globally installed package would then appear "missing" until you reinstall it there), the DSH home dir (`%USERPROFILE%\.dsh`, holding your sessions and credentials), and DSH Desktop itself (remove it from *Apps & features*).
 
 ## Safe Mode
 

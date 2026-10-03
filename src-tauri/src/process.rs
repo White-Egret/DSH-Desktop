@@ -5227,8 +5227,12 @@ pub async fn setup_install_dsh(app: AppHandle, dir: Option<String>) -> Result<()
                         if !config::same_dir(&eff, d) {
                             // 追加而不是直接 push('\n')：prefix_note 可能还是空的
                             // （比如写 `~/.npmrc` 那一步本身失败了），那样会多出一个空行。
+                            // 三个元素都必须是 `&&…` 形态：数组元素类型会被统一成
+                            // `&dyn Display`，`d` 是 `&str`，少了那一层 `&` 就报
+                            // 「the size for values of type `str` cannot be known
+                            // at compilation time」（GitHub Actions 上就是这么挂的）。
                             let note =
-                                i18n::fmt("setup_prefix_effective_mismatch", &[&eff, d, &pkg]);
+                                i18n::fmt("setup_prefix_effective_mismatch", &[&eff, &d, &pkg]);
                             if !prefix_note.is_empty() {
                                 prefix_note.push('\n');
                             }

@@ -77,6 +77,11 @@
     home_env_now: '当前用户环境变量：DSH_HOME={0}',
     home_env_now_unset: '当前用户环境变量：未设置（新终端里的 dsh 会用默认家目录 ~/.dsh）',
     toast_home_env_fail: '已保存设置，但用户环境变量 DSH_HOME 没改成功：{0}',
+    // ---- 首选项：搬家警告（只在这一格被改动时才露出；文案里 <code> 是固定标签，无变量插入） ----
+    home_move_title: '⚠ 搬完家目录内容后，务必删掉 profiles\\node_modules',
+    note_home_move_html: '<p>家目录里的 <code>profiles\\node_modules</code> 不是普通文件，而是一棵指回安装目录的 <b>Windows 目录联接（junction）</b>。常规拷贝（资源管理器拖拽、xcopy、不带 <code>/SL</code> 的 robocopy）会把它<b>展平成一堆空目录</b>，而 dsh 每次启动都要校验这层安装回退 —— 发现不对就抛错退出，服务整个起不来。</p><p><b>所以：把旧家目录的内容拷到新位置之后，请把 <code>&lt;新家目录&gt;\\profiles\\node_modules</code> 整个删掉，让 dsh 下次启动时自己重建。</b>其它内容（会话、技能、配置、凭据、插件快照等）照拷不误。</p><p>确实要整树原样拷贝，就用 <code>robocopy &lt;旧&gt; &lt;新&gt; /E /SL</code>（<code>/SL</code> = 复制符号链接本身而不是它的内容）。</p>',
+    // 保存时家目录变了、要点「确认」的那一句（把同一个坑在动手前再说一遍）
+    confirm_home_change: '确认要把家目录改成 {0} 吗？\n\n如果这是「搬家」（把旧家目录的内容拷到新位置），记得拷贝完成后删掉 {1}，让 dsh 下次启动自己重建 —— 直接启动会失败。\n\n继续保存？',
     // ---- 首选项：包源 registry 对齐（读自动刷、点按钮才写 pnpm） ----
     lbl_registry: '包源 registry（npm / pnpm）',
     btn_align_registry: '把 pnpm 的源对齐到 {0}',
@@ -381,6 +386,11 @@
     home_env_now: 'User environment: DSH_HOME={0}',
     home_env_now_unset: 'User environment: not set (dsh in a new terminal uses the default home ~/.dsh)',
     toast_home_env_fail: 'Settings saved, but the user environment variable DSH_HOME was not updated: {0}',
+    // ---- Preferences: move warning (shown only while that field is being edited;
+    //      the <code> tags are fixed markup, no values are interpolated) ----
+    home_move_title: '⚠ After copying the home dir, delete profiles\\node_modules',
+    note_home_move_html: '<p><code>profiles\\node_modules</code> inside the home dir is not a normal directory — it is a tree of <b>Windows directory junctions</b> pointing back at the install directory. Ordinary copies (Explorer drag-and-drop, xcopy, robocopy without <code>/SL</code>) <b>flatten them into a pile of empty directories</b>, and dsh validates that installation fallback on every start — when it finds the tree damaged it throws and exits, so the service will not come up at all.</p><p><b>So: after you copy the contents of the old home into the new location, delete <code>&lt;new home&gt;\\profiles\\node_modules</code> entirely and let dsh rebuild it on the next start.</b> Everything else (sessions, skills, settings, credentials, plugin snapshots …) can be copied as-is.</p><p>If you really need to copy the whole tree verbatim, use <code>robocopy &lt;old&gt; &lt;new&gt; /E /SL</code> (<code>/SL</code> copies the links themselves instead of what they point at).</p>',
+    confirm_home_change: 'Change the home dir to {0}?\n\nIf this is a move (copying the old home dir contents to the new location), remember to delete {1} after the copy so dsh rebuilds it on the next start — starting with the copied tree fails.\n\nSave anyway?',
     // ---- Preferences: package sources (registry) — auto-read, written only on click ----
     lbl_registry: 'Package sources (npm / pnpm)',
     btn_align_registry: "Align pnpm's source to {0}",

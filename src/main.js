@@ -882,6 +882,9 @@ function applyLanguage(lang) {
   if (!$('settings-modal').classList.contains('hidden')) refreshPythonStatus();
   // 「用户环境变量 DSH_HOME」那行小字同样没挂 data-i18n（值是问后端拿的），切语言后重绘
   if (!$('settings-modal').classList.contains('hidden')) refreshHomeEnvInfo();
+  // 搬家警告的显隐按「这一格有没有被改过」判（与语言无关），但正文是 data-i18n-html，
+  // 切语言后仍要重判一次：此刻 config 已是新语言的值，未改过的一格不该被误判成改过
+  if (!$('settings-modal').classList.contains('hidden')) refreshHomeMoveWarn();
   // 包源 registry 那行由后端按语言拼好，切语言后同样要重绘
   if (!$('settings-modal').classList.contains('hidden')) refreshRegistryInfo();
 }
@@ -910,6 +913,8 @@ function openSettings() {
   $('set-safe-verify').value = Number.isFinite(sv) ? sv : 80;
   $('set-config-path').textContent = config.config_path;
   markFlag('home-exists-flag', config.home_exists);
+  // 搬家警告：每次打开设置页按「这一格是不是被改过」重判一次（与浏览/输入事件共用同一条判定）
+  refreshHomeMoveWarn();
   // 用户环境变量 DSH_HOME 那行小字（新终端会拿到的持久值）：勾选框已经改成自动规则，
   // 这里只剩「每次打开设置页读一次注册表现值」
   refreshHomeEnvInfo();
@@ -948,6 +953,29 @@ function markFlag(id, ok) {
   const el = $(id);
   el.textContent = ok ? t('flag_exists') : t('flag_missing');
   el.className = 'flag ' + (ok ? 'ok' : 'bad');
+}
+
+/// 首选项「搬家警告」：**只在「这一格里的家目录与已保存的不同」时露出**。
+///
+/// 为什么要这个提示（一次真实事故换来的）：家目录里的 `profiles\node_modules` 不是普通
+/// 文件，而是几百个指回安装目录的 Windows 目录联接（junction）。常规拷贝工具会把它们
+/// 展平成一堆空目录，而 dsh 每次启动都要校验这层安装回退 —— 发现
+/// `@deepseek-ai\dsh` 是个真实目录又不受 dsh 托管，就抛错退出，整个服务起不来。
+/// 所以「拷贝完删掉 `profiles\node_modules`，让它自己重建」必须写在动手之前。
+///
+/// 只在这一格被改动时出现：家目录平时纹丝不动，一条常驻的警告等于噪声。
+/// 比较用与 Rust 侧同一把尺子（trim + 去尾分隔符 + 小写，见 detect::home_key）——
+/// 只差一个大小写或尾斜杠不算「改了」，否则会出现「只是手滑打了个反斜杠就被警告」。
+function refreshHomeMoveWarn() {
+  const el = $('home-move-warn');
+  const input = $('set-home-dir');
+  if (!el || !input || !config) return;
+  el.classList.toggle('hidden', homeKey(input.value) === homeKey(config.dsh_home_dir || ''));
+}
+
+/// 家目录比较键：与 detect::home_key（Rust 侧）同规则——去首尾空白、去尾分隔符、转小写。
+function homeKey(s) {
+  return String(s == null ? '' : s).trim().replace(/[\\/]+$/, '').toLowerCase();
 }
 
 /// 首选项里「用户环境变量 DSH_HOME」那行小字：显示**新终端**会拿到的持久值。
@@ -1159,6 +1187,14 @@ async function saveSettings() {
   const timeout = parseInt($('set-timeout').value, 10);
   const appearance = ['light', 'dark', 'system'].includes($('set-appearance').value)
     ? $('set-appearance').value : 'system';
+  const newHome = $('set-home-dir').value.trim();
+  // 家目录真要换位置了 —— 点「保存」前把搬家的坑再说一遍（界面上那条警告可能被滚出视野）。
+  // 只在**确实变了**时问：没改的一律不问，否则每次存端口都要被无关的警告打断。
+  // 留空不算「搬家」（后端 validate_home_dir 会直接报错问不出这个坑），所以不弹这一问。
+  if (newHome && homeKey(newHome) !== homeKey((config && config.dsh_home_dir) || '')) {
+    const ok = window.confirm(t('confirm_home_change', newHome, newHome + '\\profiles\\node_modules'));
+    if (!ok) return;
+  }
   const cfg = {
     // npm / dsh 的程序路径没有输入框了（见 index.html 的说明）：原样带回内存里那份，
     // 既不清空也不重新检测 —— 后端保存时只做校验，用户手改过的有效值不会被覆盖。
@@ -1167,7 +1203,7 @@ async function saveSettings() {
     // npm 缓存位置（空 = 删除 npm 配置里的 cache 行，回到 npm 默认位置）
     npm_cache_dir: $('set-npm-cache').value.trim(),
     dsh_path: (config && config.dsh_path) || '',
-    dsh_home_dir: $('set-home-dir').value.trim(),
+    dsh_home_dir: newHome,
     port,
     close_action: $('set-close-action').value === 'quit' ? 'quit' : 'tray',
     language: $('set-language').value === 'en' ? 'en' : 'zh',
@@ -1212,6 +1248,8 @@ async function saveSettings() {
       applyLanguage(cfg.language);
     }
     markFlag('home-exists-flag', config.home_exists);
+    // 保存后这一格已与 config 一致，搬家警告随之收起（config 在上面刚被返回值覆盖）
+    refreshHomeMoveWarn();
     $('set-config-path').textContent = config.config_path;
     $('port-val').textContent = config.port;
     toast(t('toast_saved'));
@@ -1270,6 +1308,8 @@ function onPathPicked(p) {
       // 「浏览」选过目录 = 用户已经表达过意愿：别让后续检测把默认值覆盖回来
       markDirTouched(input);
       if (input.id === 'wiz-dsh-dir') refreshDshCmd();
+      // 家目录改了就当场亮出搬家警告（「浏览」是用户真正动手搬家的入口，不能只等他手输）
+      if (input.id === 'set-home-dir') refreshHomeMoveWarn();
     }
   }
 }
@@ -2103,6 +2143,11 @@ function bindUI() {
       invoke(cmd, { kind }).catch((e) => toast(String(e), true));
     };
   });
+
+  // 家目录：手输即判「与已保存的不同」，当场亮出/收起搬家警告。
+  // 用 input 而不是 change：警告的作用是「动手拷贝之前就说清楚」，等到失焦就晚了半拍。
+  const homeDirEl = $('set-home-dir');
+  if (homeDirEl) homeDirEl.addEventListener('input', refreshHomeMoveWarn);
 
   // 「安装位置」：手输一次就标记为「用户动过」，之后检测结果不再覆盖它（见 prefillNodeDir）
   const nodeDirEl = $('wiz-node-dir');

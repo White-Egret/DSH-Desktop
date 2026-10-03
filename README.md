@@ -231,6 +231,16 @@ Open **⚙ 首选项 (Preferences)** from the toolbar. The paths of the two prog
 
 > There is deliberately **no "update args" setting any more**: the update command is always `npm install -g <package name>@<channel>` (plus a `--prefix` derived from where `dsh.cmd` actually lives, when DSH is installed outside npm's default directory — see *Choosing where DSH gets installed*), and the channel (`latest` / `next`) is chosen in the **⤓ 更新 DSH** dialog itself — see [Update DSH](#update-dsh). Extra npm knobs (registry, proxy) belong in the **user-level** `~/.npmrc` — global effect, no extra file inside the DSH directory tree (this is how this machine is configured); an `.npmrc` next to the DSH home dir works too (that is where npm reads `./.npmrc`) but adds a file there. Note that **pnpm does not read `~/.npmrc`**: its own global source lives in the `auth.ini` written by `pnpm config set registry`, which is exactly what the Preferences *Package sources (registry)* button manages.
 
+### Moving the home dir — `profiles\node_modules` must not be copied
+
+While the *DSH home dir* field in Preferences is being edited (typed into or picked with 浏览 / Browse), an amber warning appears underneath it, and pressing Save asks once more. The reason: **`profiles\node_modules` is not a normal directory and must not be copied like one.**
+
+- It is not real content but a few hundred **Windows directory junctions pointing back at the install directory**. dsh validates that installation fallback on **every start**; when it finds `@deepseek-ai\dsh` as a real directory that is not a dsh-managed proxy it throws and exits, so **the service never comes up at all** (measured on this machine: Node exit code 1, the port never became ready).
+- Ordinary copy tools (Explorer drag-and-drop, `xcopy`, **robocopy without `/SL`**) do not preserve those links and **flatten them into a pile of empty directories** — what lands at the new location looks complete and is guaranteed to fail on start.
+- **The correct move**: after copying the old home dir's contents into the new location, **delete `<new home>\profiles\node_modules` entirely** and let dsh rebuild it on the next start (the rebuild matches the original state: junctions pointing back at the install directory). Everything else (sessions, skills, settings, credentials, plugin snapshots, logs) can be copied as-is.
+- To copy the whole tree verbatim after all, use `robocopy <old> <new> /E /SL` (`/SL` copies the links themselves instead of what they point at).
+- **Back up first**: after the move, keep the old home dir around for a few days and archive it only once daily mode is confirmed healthy.
+
 ### Python environment
 
 Generating Office files (`.docx` / `.pptx` / `.xlsx`) and doing any real data analysis needs Python on the machine, so Preferences carries a **Python 环境** block below *Start with Windows* and the two package-source rows (npm cache / registry):

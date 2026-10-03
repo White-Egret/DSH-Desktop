@@ -117,6 +117,18 @@
              安全模式都是）时始终显式注入 DSH_HOME 覆盖继承值，所以自动写入改变不了本程序
              自己的行为。下面那行只读显示注册表里的持久值 —— 用户仍要知道新终端会拿到什么。 -->
         <div class="hint" id="home-env-now"></div>
+        <!-- 搬家警告：**只在「这一格里的家目录与已保存的不同」时露出**（main.js::refreshHomeMoveWarn）。
+             为什么要有它：家目录里的 profiles\node_modules 不是普通文件，而是一棵指回安装目录的
+             **Windows 目录联接（junction）**。常规拷贝工具（资源管理器拖拽、xcopy、不带 /SL 的
+             robocopy）会把它**展平成一堆空目录**，而 dsh 每次启动都要校验这层「安装回退」——
+             发现 @deepseek-ai\dsh 是个真实目录又不受 dsh 托管就直接抛错退出，于是整个服务起不来。
+             正确做法：搬完把 <新家目录>\profiles\node_modules 整个删掉，让 dsh 下次启动自己重建。
+             一定要整树拷贝就用 robocopy /SL（保留链接本身）。这条只在用户**正在改这一格**时
+             出现，平时不占地方。 -->
+        <div class="home-move-warn hidden" id="home-move-warn">
+          <div class="home-move-warn-title" data-i18n="home_move_title">⚠ 搬完家目录内容后，务必删掉 profiles\node_modules</div>
+          <div class="home-move-warn-body" data-i18n-html="note_home_move_html"><p>家目录里的 <code>profiles\node_modules</code> 不是普通文件，而是一棵指回安装目录的 <b>Windows 目录联接（junction）</b>。常规拷贝（资源管理器拖拽、xcopy、不带 <code>/SL</code> 的 robocopy）会把它<b>展平成一堆空目录</b>，而 dsh 每次启动都要校验这层安装回退 —— 发现不对就抛错退出，服务整个起不来。</p><p><b>所以：把旧家目录的内容拷到新位置之后，请把 <code>&lt;新家目录&gt;\profiles\node_modules</code> 整个删掉，让 dsh 下次启动时自己重建。</b>其它内容（会话、技能、配置、凭据、插件快照等）照拷不误。</p><p>确实要整树原样拷贝，就用 <code>robocopy &lt;旧&gt; &lt;新&gt; /E /SL</code>（<code>/SL</code> = 复制符号链接本身而不是它的内容）。</p></div>
+        </div>
         <div class="row two">
           <label class="field">
             <span data-i18n="lbl_port_field">端口（1~65535，默认 3080）</span>

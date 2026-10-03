@@ -612,6 +612,38 @@ body.tb-auto .refresh-overlay { top: 0; }
   user-select: text;
 }
 
+/* 首选项「搬家警告」：视觉上复用备份提醒块（琥珀 + 左侧粗边），因为它讲的
+   是同一类事 —— 用户马上要做的动作会弄坏家目录，必须在动手前就说清楚。
+   差别只有一个：这里要显眼到不能被长说明淹没，所以标题加粗、正文用正常字色。 */
+.home-move-warn {
+  padding: 9px 11px;
+  border: 1px solid var(--backup-border);
+  border-left: 3px solid var(--backup-accent);
+  border-radius: 6px;
+  background: var(--backup-bg);
+  user-select: text;
+}
+.home-move-warn-title {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.6;
+  margin-bottom: 4px;
+}
+.home-move-warn-body {
+  font-size: 11.5px;
+  line-height: 1.75;
+  color: var(--text-dim);
+}
+.home-move-warn-body code {
+  background: var(--backup-code-bg);
+  border: 1px solid var(--backup-code-border);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 11px;
+}
+.home-move-warn-body p { margin: 0 0 3px; }
+.home-move-warn-body p:last-child { margin-bottom: 0; }
+
 /* ---------- 首选项：Python 环境块（在「npm 缓存 / 包源」两块之下，安装不走「保存」按钮） ---------- */
 .python-block {
   /* 用一条虚线分隔把它在视觉上从「一行行设置」里分出来：下面是一个自带

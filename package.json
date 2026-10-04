@@ -5,7 +5,9 @@
   "description": "DSH Desktop - 启动并管理本机全局安装的 DSH Web 服务",
   "license": "MIT",
   "scripts": {
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "check:i18n-args": "node scripts/check-i18n-args.js",
+    "verify:uninstall": "node scripts/verify-npm-uninstall.js"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0"

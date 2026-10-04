@@ -9,7 +9,34 @@ on:
   workflow_dispatch:
 
 jobs:
+  # 轻量测试通道：**手动触发**（Actions → Build Windows → Run workflow）时只跑单元测试，
+  # 不打包、不上传产物。存在的理由：开发机没有 Rust 工具链时，`cargo test --lib` 是唯一
+  # 能抓出「所有权 / 借用、trait object、单测断言」这类错误的地方，而完整打包要十几分钟 ——
+  # 每改一版就去撞一次完整流水线太贵。几十秒拿一次编译结果，迭代成本就下来了。
+  rust-test:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # 与打包 job 共用同一份缓存（key 里带 job 名，互不冲突但都覆盖 src-tauri 的编译产物）
+      - name: Rust 构建缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri'
+
+      - name: Rust 单元测试（仅测试，不打包）
+        run: cargo test --lib
+        working-directory: src-tauri
+
   build-windows:
+    # 只在 push / PR / tag 时打包；手动触发那条路交给上面的 rust-test —— 手动点一次
+    # 不该白等十几分钟的打包与上传（这也正是把测试通道拆出来的原因）。
+    if: github.event_name != 'workflow_dispatch'
     runs-on: windows-latest
     # 构建来源证明（attestation）所需：id-token 用 OIDC 向 Sigstore 换签名证书，
     # attestations 用于写入证明。contents 只读即可——本 workflow 不创建 Release。
@@ -42,8 +69,8 @@ jobs:
       - name: 安装前端依赖（@tauri-apps/cli）
         run: npm ci
 
-      # 纯函数单元测试（detect.rs 版本比较 / process.rs 的 URL 解析回归，含 HIGH-1 注入用例）。
-      # 开发机没有 Rust 工具链，这里是这些测试**唯一**真实执行的地方；失败即中止，不产出安装包。
+      # 纯函数单元测试（detect.rs 版本比较 / process.rs 的 URL 解析与卸载收尾回归等）。
+      # 失败即中止，不产出安装包。想只跑测试、不打包时用上面的 rust-test 手动通道。
       - name: Rust 单元测试
         run: cargo test --lib
         working-directory: src-tauri

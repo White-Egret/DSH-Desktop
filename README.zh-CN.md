@@ -175,11 +175,24 @@ npm run tauri build
 
 产物位于 `src-tauri/target/release/bundle/nsis/`、`.../msi/`，独立 exe 在 `src-tauri/target/release/`。
 
+### 不需要 Rust 工具链的本地检查
+
+两个只用 Node 的脚本，专门拦「本来要等 CI 才发现」的那类错误（它们只读文件、并在一个桩 DOM 里跑前端；不编译、不联网）：
+
+```bash
+npm run check:i18n-args    # 所有 i18n::fmt / i18n::t 的参数必须是 `&&…` 形态（E0277 护栏）
+npm run verify:uninstall   # 端到端：写 prefix → 安装 → 裸卸载 → 收尾，全程在临时目录里
+```
+
+`check:i18n-args` **先跑自测**（故意写错的样本必须被报出来），所以它「没有输出」不会是假绿；`verify:uninstall` 会造一个一次性 HOME 与本地 tarball 包，绝不碰你真实的 `~/.npmrc`。两者都**不进 CI**：它们的作用是让本地迭代更便宜。
+
 > NSIS 安装包的默认安装目录由 `src-tauri/nsis/installer.nsi` 决定（见「安装」一节）。升级 `@tauri-apps/cli` 后请执行 `node scripts/gen-nsis-template.mjs` 重新生成并提交。
 
 ## GitHub Actions 构建
 
-`.github/workflows/build-windows.yml` 在 push 到 `main`/`master`、打 `v*` 标签、PR 及手动触发时自动构建，产物见「安装」一节。首次构建约 8~15 分钟（Rust 编译），之后有缓存会快很多。
+`.github/workflows/build-windows.yml` 在 push 到 `main`/`master`、打 `v*` 标签、PR 时自动构建，产物见「安装」一节。首次构建约 8~15 分钟（Rust 编译），之后有缓存会快很多。
+
+**手动触发只跑测试。** 手动运行这个 workflow（Actions → Build Windows → Run workflow）时只执行 `cargo test --lib` 那个 job：几十秒出结果，不打包、不上传产物 —— 这是改 Rust 代码时的快速通道；打包 job 在手动触发时被跳过（`if: github.event_name != 'workflow_dispatch'`）。
 
 ## 使用（Usage）
 

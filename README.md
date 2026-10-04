@@ -181,11 +181,24 @@ npm run tauri build
 
 Artifacts land in `src-tauri/target/release/bundle/nsis/`, `.../msi/`, and the raw exe in `src-tauri/target/release/`.
 
+### Local checks that do not need a Rust toolchain
+
+Two Node-only scripts catch the mistakes that would otherwise only surface in CI (they read files and run the frontend in a stub DOM; no compilation, no network):
+
+```bash
+npm run check:i18n-args    # every i18n::fmt / i18n::t argument must be `&&…` (E0277 guard)
+npm run verify:uninstall   # end-to-end: prefix → install → bare uninstall → cleanup, in a temp dir
+```
+
+`check:i18n-args` self-tests first (a deliberately wrong sample must be reported), so a silent "OK" cannot be a false green. `verify:uninstall` creates a throwaway HOME and a local tarball package, so it never touches your real `~/.npmrc`. Neither script runs in CI: they exist to make local iteration cheaper.
+
 > The NSIS installer's default install directory lives in `src-tauri/nsis/installer.nsi` (see [Installation](#installation)). If you bump `@tauri-apps/cli`, regenerate it with `node scripts/gen-nsis-template.mjs` and commit the result.
 
 ## GitHub Actions build
 
-`.github/workflows/build-windows.yml` builds automatically on push to `main`/`master`, on tags `v*`, on PRs, and via manual dispatch. It produces the artifacts listed under [Installation](#installation). First build takes roughly 8–15 minutes (Rust compile); later builds are faster thanks to caching.
+`.github/workflows/build-windows.yml` builds automatically on push to `main`/`master`, on tags `v*`, and on PRs. It produces the artifacts listed under [Installation](#installation). First build takes roughly 8–15 minutes (Rust compile); later builds are faster thanks to caching.
+
+**Manual dispatch runs tests only.** Triggering the workflow by hand (Actions → Build Windows → Run workflow) runs just the `cargo test --lib` job — tens of seconds, no bundling and no artifact upload. That is the fast lane for iterating on Rust without waiting for a full package build; the packaging job is skipped on manual runs (`if: github.event_name != 'workflow_dispatch'`).
 
 > If Actions didn't trigger: check *Settings → Actions → General → Actions permissions* and make sure `.github/workflows/build-windows.yml` is committed.
 

@@ -5854,10 +5854,13 @@ fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<Uninstal
         //   - 候选里根本没有 pnpm（它装在别处）→ 告诉用户它实际在哪
         //   - 试过了但没删成 → 给 npm 的输出
         let detected = detect::find_pnpm_cmd().map(|p| p.to_string_lossy().to_string());
+        // 按**引用**匹配（`Some(ref p)`）：`detected` 后面还要用来填 UninstallItem 的 path，
+        // 按值匹配会把它移走，后面 `detected.clone()` 就成了「借用已部分移出的值」（CI 实测）。
         let (status, msg) = match detected {
-            Some(p) => (
+            Some(ref p) => (
                 "still_elsewhere",
-                i18n::fmt("log_uninstall_pnpm_elsewhere", &[&p]),
+                // as_str()：让数组元素保持 `&&str` 的统一形态（同 CI 挂过三次的那个坑）
+                i18n::fmt("log_uninstall_pnpm_elsewhere", &[&p.as_str()]),
             ),
             None => ("failed", i18n::fmt("log_uninstall_pnpm_fail", &[&last_out])),
         };
@@ -5870,7 +5873,7 @@ fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<Uninstal
             // 用 items 把「它其实在哪」带回给界面（前端按 kind/status 渲染成一行人话）
             items: vec![UninstallItem {
                 kind: "package".to_string(),
-                path: detected.clone().unwrap_or_default(),
+                path: detected.unwrap_or_default(),
                 status: status.to_string(),
             }],
         });

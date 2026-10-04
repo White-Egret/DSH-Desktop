@@ -6501,9 +6501,14 @@ mod tests {
             items.iter().any(|i| i.kind == "scope" && i.status == "kept"),
             "被保留的 scope 目录要在清单里如实出现：{kinds:?}"
         );
+        // 注意断言的是**状态**、不是「这一项不存在」：node_modules 非空时收尾会如实记一条
+        // `kept`（清单必须说清「这个我留下了」），只有 `removed` 才是错的。
+        // 第一版写成 `!any(kind == "node_modules")`，把如实报告也判成了失败（CI 实测踩到）。
         assert!(
-            !items.iter().any(|i| i.kind == "node_modules"),
-            "node_modules 非空，不该在清单里出现「已回收」：{kinds:?}"
+            !items
+                .iter()
+                .any(|i| i.kind == "node_modules" && i.status == "removed"),
+            "node_modules 非空，绝不能在清单里报成「已回收」：{kinds:?}"
         );
 
         // ---- 布局二：DSH 是这个作用域里唯一的东西（真机现场的收尾目标）----

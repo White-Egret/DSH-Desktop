@@ -6461,24 +6461,37 @@ mod tests {
     /// 用户机器上其它全局包不能因为卸载 DSH 而消失。这正是真机现场
     /// `D:\Programs\npm\node_modules\@deepseek-ai`（空）与用户其它包共存的判断依据。
     /// 布局二（DSH 是唯一的东西）：两个目录都该被回收，即用户报的「残留空目录」被清掉。
+    ///
+    /// ⚠ 两个布局的**关键区别是 `@deepseek-ai` 里面有没有东西**，不是 `node_modules` 里
+    /// 有没有别的东西 —— 第一版这个测试就写错了：把 `typescript` 建成了 `@deepseek-ai` 的
+    /// **兄弟**目录，于是 scope 其实是空的、按设计被回收，断言却要求它保留（CI 实测踩到）。
     #[test]
     fn cleanup_after_uninstall_reclaims_only_what_dsh_left_behind() {
         let base = create_private_temp_dir("uninstall-clean").expect("建临时目录");
 
-        // ---- 布局一：还有别的全局包 ----
+        // ---- 布局一：这个 scope 里还有别的包（真机上少见但完全可能）----
         let with_others = base.join("with-others");
-        std::fs::create_dir_all(with_others.join("node_modules").join("@deepseek-ai")).unwrap();
-        std::fs::create_dir_all(with_others.join("node_modules").join("typescript")).unwrap();
+        let nm_others = with_others.join("node_modules");
+        // 别的作用域包（与 DSH 同级、同样住在 @deepseek-ai 里）
+        std::fs::create_dir_all(nm_others.join("@deepseek-ai").join("dsh-plugin")).unwrap();
+        // 非作用域包，放在 node_modules 根下
+        std::fs::create_dir_all(nm_others.join("typescript")).unwrap();
         std::fs::write(with_others.join("dsh.cmd"), b"leftover").unwrap();
         let items = cleanup_after_uninstall(&with_others);
-        assert!(
-            with_others.join("node_modules").is_dir(),
-            "还有别的全局包时，node_modules 必须保留"
-        );
         assert!(
             with_others.join("node_modules").join("@deepseek-ai").is_dir(),
             "scope 目录里还有别的包时，它必须保留（空目录才回收）"
         );
+        assert!(
+            with_others
+                .join("node_modules")
+                .join("@deepseek-ai")
+                .join("dsh-plugin")
+                .is_dir(),
+            "别人的包本身一个字节都不能动"
+        );
+        assert!(nm_others.join("typescript").is_dir(), "别的全局包必须保留");
+        assert!(with_others.join("node_modules").is_dir(), "node_modules 必须保留");
         assert!(!with_others.join("dsh.cmd").exists(), "漏下的启动脚本应当被删掉");
         let kinds: Vec<(String, String)> = items
             .iter()
@@ -6488,8 +6501,15 @@ mod tests {
             items.iter().any(|i| i.kind == "scope" && i.status == "kept"),
             "被保留的 scope 目录要在清单里如实出现：{kinds:?}"
         );
+        assert!(
+            !items.iter().any(|i| i.kind == "node_modules"),
+            "node_modules 非空，不该在清单里出现「已回收」：{kinds:?}"
+        );
 
-        // ---- 布局二：DSH 是唯一的东西（真机现场的收尾目标）----
+        // ---- 布局二：DSH 是这个作用域里唯一的东西（真机现场的收尾目标）----
+        // scope 空掉 → 删掉 scope；node_modules 随之也空了 → 再删 node_modules。
+        // 两步是**顺序**的（先 scope 后 node_modules），这也是唯一可能的次序：
+        // remove_dir 不递归，node_modules 里还有 scope 在的时候就删不掉它。
         let only_dsh = base.join("only-dsh");
         std::fs::create_dir_all(only_dsh.join("node_modules").join("@deepseek-ai")).unwrap();
         for name in DSH_SHIM_NAMES {
@@ -6503,6 +6523,10 @@ mod tests {
         for name in DSH_SHIM_NAMES {
             assert!(!only_dsh.join(name).exists(), "{name} 应当被删掉");
         }
+        assert!(
+            items2.iter().any(|i| i.kind == "scope" && i.status == "removed"),
+            "回收掉的 scope 要在清单里如实出现"
+        );
         assert!(
             items2.iter().any(|i| i.kind == "node_modules" && i.status == "removed"),
             "回收结果要在清单里如实出现"

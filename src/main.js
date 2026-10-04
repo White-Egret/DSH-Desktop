@@ -1600,19 +1600,35 @@ function refreshUninstallCmd() {
   btn.disabled = updating || !config || !config.dsh_exists;
 }
 
+/// 卸载 pnpm 用的命令，与后端 `uninstall_pnpm` 真正执行的那条**逐字一致**。
+///
+/// 必须带上 `--prefix`：pnpm 与 DSH 装在同一个 npm 全局目录里，少了这个参数就会去
+/// npm 的默认全局目录里删 —— 那里没装 pnpm，npm 只回一句 `up to date` 并**返回退出码 0**，
+/// 于是界面报「已成功卸载」而 pnpm 一个字节没动（真机现场，日志里那次正是 `up to date`）。
+///
+/// 目录来源与执行时**同一个表达式**（`pnpmUninstallDir()`）：弹窗里显示的命令与实际
+/// 发出的那个目录不能有第二种算法，否则又会「说一套做一套」。
+function pnpmUninstallDir() {
+  return (uninstallDir || dshInstallDir()).replace(/[\\/]+$/, '');
+}
+
 function uninstallPnpmCommand() {
   const npm = '"' + ((config && config.npm_path) || 'npm') + '"';
-  const dir = dshInstallDir();
-  // 卸载 DSH 之后 dsh_path 已被清空，所以这里用**卸载前**记下的目录（见 doUninstallDsh）
-  const d = uninstallDir || dir;
+  const d = pnpmUninstallDir();
   return d ? `${npm} uninstall -g --prefix "${d}" pnpm` : `${npm} uninstall -g pnpm`;
 }
 
 /// 把后端返回的结构化条目渲染成人话列表（路径一律走 textContent，绝不拼 innerHTML）
 function uninstallItemText(it) {
-  // 词典里没有这个 kind 时 t() 原样返回 key（i18n.js 的兜底），那就退化成只显示路径
+  // npm 配置那一行有四种处置（removed / restored / unchanged / kept_manual），
+  // 后端把它们放在 status 里，前端各自给一句能指导下一步动作的话 —— 混成一句「已保留」
+  // 用户既不知道发生了什么，也不知道该怎么办（真机现场就是这么反馈的）。
+  const statusKey =
+    it.kind === 'npmrc'
+      ? 'uninstall_status_npmrc_' + (it.status || 'unchanged')
+      : 'uninstall_status_' + (it.status || 'removed');
   const label = t('uninstall_item_' + (it.kind || 'package'), it.path);
-  return it.path ? `${label} — ${t('uninstall_status_' + (it.status || 'removed'))}` : label;
+  return it.path ? `${label} — ${t(statusKey)}` : label;
 }
 
 /// 渲染结果列表。`rep` = 后端返回的 UninstallReport，`removedPkg` = 是否把「包本身已删除」
@@ -1734,16 +1750,20 @@ async function doUninstallPnpm() {
   $('btn-uninstall-pnpm-no').disabled = true;
   $('uninstall-pnpm-fail').classList.add('hidden');
   try {
-    const rep = await invoke('uninstall_pnpm');
+    // 目录必须显式带给后端：卸载 DSH 成功后后端已把 dsh_path 清空，它自己再也推导不出
+    // 那个全局目录 —— 第一版就是这样退化成 `npm uninstall -g pnpm`（无 --prefix）的。
+    // 传的正是弹窗里显示给用户的那个目录（同一个表达式 pnpmUninstallDir）。
+    const rep = await invoke('uninstall_pnpm', { dir: pnpmUninstallDir() });
     uninstalling = false;
     if (rep && rep.success) {
       showUninstallFinal(true);
     } else {
-      // 失败不假装成功：留在追问态，让用户可以「保留 pnpm」继续收尾
+      // 失败不假装成功：留在追问态，让用户可以「保留 pnpm」继续收尾。
+      // rep.items 里可能带着「pnpm 其实装在哪」这条信息（它不在 DSH 的全局目录里时）。
       $('uninstall-pnpm-fail').classList.remove('hidden');
       $('btn-uninstall-pnpm-yes').disabled = false;
       $('btn-uninstall-pnpm-no').disabled = false;
-      toast(t('toast_uninstall_fail', (rep && rep.output) || ''), true);
+      toast(t('toast_uninstall_fail', pnpmFailDetail(rep)), true);
     }
   } catch (err) {
     uninstalling = false;
@@ -1752,6 +1772,15 @@ async function doUninstallPnpm() {
     $('btn-uninstall-pnpm-no').disabled = false;
     toast(t('toast_uninstall_fail', err), true);
   }
+}
+
+/// 卸载 pnpm 失败时给用户的具体原因。
+/// 后端能分辨「它其实装在别处」（`still_elsewhere`，path 是实际路径）与「试过但没删成」
+/// （`failed`，output 是 npm 的话）—— 这两种的下一步动作完全不同，提示也要分开。
+function pnpmFailDetail(rep) {
+  const it = rep && (rep.items || []).find((x) => x.status === 'still_elsewhere');
+  if (it && it.path) return t('uninstall_pnpm_still_elsewhere', it.path);
+  return (rep && rep.output) || '';
 }
 
 /// 卸载目标的记忆（DSH 卸载后 dsh_path 已被清空，追问 pnpm 时还要用它拼命令）

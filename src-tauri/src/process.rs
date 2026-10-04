@@ -5478,6 +5478,11 @@ fn dir_is_empty_or_absent(dir: &Path) -> bool {
 /// 这是卸载收尾唯一的目录删除原语：判断与删除写在同一处，就不会出现
 /// 「判断时是空的、删除时已经不是」这类两段式逻辑的漏洞。
 /// 不存在 → None（清单里不必出现）；非空 → Some("kept")；删成功/失败 → removed/failed。
+///
+/// `remove_dir` 的 `Ok(())` **不足以证明它没了**：真机现场出现过「界面按成功处理、
+/// 目录却还在」的情况（`%TEMP%` 类路径上偶发，杀软/索引器短暂持有句柄也会这样）。
+/// 所以删完再确认一次存在性，只有确认不在才算 removed —— 宁可报「删除失败」，
+/// 也不能报一个「已删除」而磁盘上还留着（那是最难被用户察觉的谎报）。
 fn remove_dir_if_empty(dir: &Path) -> Option<&'static str> {
     if !dir.is_dir() {
         return None;
@@ -5485,7 +5490,36 @@ fn remove_dir_if_empty(dir: &Path) -> Option<&'static str> {
     if !dir_is_empty_or_absent(dir) {
         return Some("kept");
     }
-    Some(if std::fs::remove_dir(dir).is_ok() { "removed" } else { "failed" })
+    let removed = std::fs::remove_dir(dir).is_ok() && !dir.exists();
+    Some(if removed { "removed" } else { "failed" })
+}
+
+/// 包名最后一段（`@deepseek-ai/dsh` → `dsh`）：拼全局目录里的落点用。
+fn last_path_segment(s: &str) -> &str {
+    s.rsplit(['/', '\\']).next().unwrap_or(s).trim()
+}
+
+/// 某个全局目录里是不是装着这个包（`<目录>\node_modules\<包名>` 存在）。
+fn global_pkg_dir(prefix: &str, pkg: &str) -> PathBuf {
+    Path::new(prefix).join("node_modules").join(pkg)
+}
+
+/// 某个全局目录里这个包的启动脚本路径（npm 在全局目录根部放 `<name>` / `<name>.cmd` / `<name>.ps1`）。
+fn global_shim_path(prefix: &str, name: &str) -> PathBuf {
+    Path::new(prefix).join(format!("{}.cmd", name))
+}
+
+/// 「卸载到底生效没有」的判据：**不看 npm 的退出码，看磁盘**。
+///
+/// 为什么必须这样：`npm uninstall -g --prefix <目录> <包>` 在「那个目录里根本没装它」时
+/// **照样返回退出码 0**（输出只有一句 `up to date`）。真机现场：pnpm 被卸载的提示是
+/// 「DSH 和 pnpm 已成功卸载」，而日志里那次 npm 的输出正是 `up to date in 863ms` ——
+/// 一个字节都没删，界面却在报成功。退出码在这里是**不可信**的。
+///
+/// 生效判据：包目录 `node_modules\<包名>` 已经不在了。
+/// 启动脚本是否漏删**不算**没生效 —— npm 偶尔漏删脚本，交给收尾清理即可，两条判据分开。
+fn uninstall_took_effect(prefix: &str, pkg: &str) -> bool {
+    !global_pkg_dir(prefix, pkg).exists()
 }
 
 /// 跑一次 `npm uninstall -g [--prefix <目录>] [--cache <目录>] <包名>`。
@@ -5518,8 +5552,26 @@ fn run_npm_uninstall(
 
 /// 卸载之后收尾：回收变空的 scope 目录、`node_modules`，以及漏下的启动脚本。
 ///
-/// 逐条尽力而为，**任何一步失败都不改变 npm 的结论**（真实结果写进 items 让用户看到）。
-fn cleanup_after_uninstall(dir: &Path) -> Vec<UninstallItem> {
+/// 拆成两层是刻意的（与 detect.rs 的「决策内核 vs 动作」同一套思路）：
+///   - [`cleanup_after_uninstall_items`] 只做判断与删除，**不碰 AppHandle**，
+///     所以单元测试能直接构造临时目录树来验证它（测试里造不出 AppHandle）；
+///   - 这一层只负责把失败写进日志 —— 真机现场出现过「界面按成功处理、空目录却还在」，
+///     而当时日志里没有任何线索，所以失败必须留痕。
+fn cleanup_after_uninstall(app: &AppHandle, dir: &Path) -> Vec<UninstallItem> {
+    let items = cleanup_after_uninstall_items(dir);
+    for it in items.iter().filter(|i| i.status == "failed") {
+        emit_log(
+            app,
+            "update",
+            i18n::fmt("log_uninstall_dir_remove_fail", &[&it.path]),
+        );
+    }
+    items
+}
+
+/// 收尾的**决策内核**：逐条尽力而为，把「删了什么 / 留了什么」如实带回。
+/// 任何一步失败都不改变 npm 的结论 —— 它是收尾，不是判据。
+fn cleanup_after_uninstall_items(dir: &Path) -> Vec<UninstallItem> {
     let mut items: Vec<UninstallItem> = Vec::new();
     let npm_node_modules = dir.join("node_modules");
     let scope = npm_node_modules.join(DSH_SCOPE_DIR);
@@ -5613,8 +5665,23 @@ fn uninstall_dsh_inner(app: &AppHandle) -> Result<UninstallReport, String> {
     if !out.trim().is_empty() {
         logger::append_line(&logger::desktop_log_path(app), &out);
     }
-    if !ok {
-        emit_log(app, "update", i18n::fmt("log_uninstall_fail", &[&out]));
+    // 退出码 0 **不等于**删掉了：`npm uninstall -g --prefix <目录> <包>` 在「那个目录里
+    // 没装这个包」时也返回 0（输出只有一句 `up to date`）。所以这里按磁盘核对落点。
+    let removed = match target.as_deref() {
+        Some(p) => uninstall_took_effect(p, &cfg.package_name),
+        None => true, // 走 npm 默认目录（没有 --prefix）：目标目录不是我们能推导的，以退出码为准
+    };
+    if !ok || !removed {
+        let msg = if ok {
+            // 退出码 0 但东西还在：把这条真实原因说清楚，而不是含糊地说「失败」。
+            // 先绑定成变量再取引用 —— 直接 `&target.as_deref().unwrap_or("")` 在参数表里
+            // 拿不到 `&&str`（这正是 CI 挂过三次的那个坑）。
+            let dir = target.as_deref().unwrap_or("");
+            i18n::fmt("log_uninstall_no_effect", &[&dir, &out])
+        } else {
+            i18n::fmt("log_uninstall_fail", &[&out])
+        };
+        emit_log(app, "update", msg);
         set_status(app, "idle", None);
         return Ok(UninstallReport {
             success: false,
@@ -5627,19 +5694,30 @@ fn uninstall_dsh_inner(app: &AppHandle) -> Result<UninstallReport, String> {
 
     let mut items: Vec<UninstallItem> = Vec::new();
     if let Some(dir) = target.as_deref() {
-        items.extend(cleanup_after_uninstall(Path::new(dir)));
+        items.extend(cleanup_after_uninstall(app, Path::new(dir)));
     }
 
-    // `~/.npmrc` 里那行 `prefix=`：只有「确实是我们写的」才允许动（claimed 标志）
+    // `~/.npmrc` 里那行 `prefix=`：只有「确实是我们写的」才允许动（claimed 标志）。
+    //
+    // 为什么这条策略不能放开成「只要它指向 DSH 的目录就删」：**我们分不清**
+    // 「这行是用户自己写的」与「是我们写的但记录丢了」。删掉一行用户自己写的 prefix，
+    // 会让那台机器上**其它**全局包集体「找不到」—— 卸载 DSH 绝不该有这种副作用。
+    // 所以宁可留下一行（并在结果里给出删除命令），也不猜。
     let (npmrc_status, npmrc_path) = if cfg.npm_prefix_claimed {
-        match if cfg.npm_prefix_prev.trim().is_empty() {
-            // 写之前本来就没有这一行 → 删掉它，还用户一个干净的配置
-            config::apply_npm_prefix(None).map(|_| "removed")
+        let wanted = if cfg.npm_prefix_prev.trim().is_empty() {
+            None // 写之前本来就没有这一行 → 删掉它，还用户一个干净的配置
         } else {
             // 写之前用户自己配过 → 原路退回（而不是删掉，那会让别的全局包「找不到」）
-            config::apply_npm_prefix(Some(cfg.npm_prefix_prev.trim())).map(|_| "restored")
-        } {
-            Ok(s) => (s.to_string(), detect::npm_userconfig_path()),
+            Some(cfg.npm_prefix_prev.trim().to_string())
+        };
+        let restoring = wanted.is_some();
+        match config::apply_npm_prefix(wanted.as_deref()) {
+            // 「本来就一致」= 一个字节都没动 → 如实报「未改动」，而不是「已删除 / 已恢复」
+            Ok(o) if !o.changed() => ("unchanged".to_string(), detect::npm_userconfig_path()),
+            Ok(_) => (
+                if restoring { "restored" } else { "removed" }.to_string(),
+                detect::npm_userconfig_path(),
+            ),
             Err(e) => {
                 logger::append_line(&logger::desktop_log_path(app), &e);
                 ("failed".to_string(), detect::npm_userconfig_path())
@@ -5647,8 +5725,8 @@ fn uninstall_dsh_inner(app: &AppHandle) -> Result<UninstallReport, String> {
         }
     } else {
         // 保守路径：没有「这行是我们写的」的证据 → 一个字节都不动。
-        // 旧版本装好的机器（那时用户可能是自己 npm config set prefix 的）走的正是这条。
-        ("kept".to_string(), detect::npm_userconfig_path())
+        // 旧版本装好的机器、以及用户自己 `npm config set prefix` 写的那一行，走的都是这条。
+        ("kept_manual".to_string(), detect::npm_userconfig_path())
     };
     items.push(UninstallItem {
         kind: "npmrc".to_string(),
@@ -5681,10 +5759,15 @@ fn uninstall_dsh_inner(app: &AppHandle) -> Result<UninstallReport, String> {
 
 /// 卸载 pnpm（卸载 DSH 之后的追加提问：用户答「是」才走这里）。
 ///
-/// 与 DSH 同一条路：目标目录取 DSH 原来所在的全局目录（pnpm 是 DSH 装插件用的，
-/// 正常情况下与 DSH 在同一个 npm 全局目录里），并显式带上 `--prefix`。
+/// `dir` = 前端把「刚刚卸载 DSH 用的那个目录」原样带回来。这个参数是**必须的**：
+/// 上面的流程在卸载 DSH 成功后就把 `dsh_path` 清空了，后端再想推导那个目录已经无从推导
+/// —— 第一版就是这样漏掉的，结果命令退化成 `npm uninstall -g pnpm`（没有 `--prefix`），
+/// 在默认全局目录里什么都没删，却因为退出码 0 被报成了「已成功卸载」（真机现场）。
+///
+/// 参数名用单词 `dir`，与 setup_install_dsh 同一个理由：Tauri 会在 camelCase / snake_case
+/// 之间做风格转换，`Option<String>` 在键名对不上时会**静默变成 None**。
 #[tauri::command]
-pub async fn uninstall_pnpm(app: AppHandle) -> Result<UninstallReport, String> {
+pub async fn uninstall_pnpm(app: AppHandle, dir: Option<String>) -> Result<UninstallReport, String> {
     if crate::safe::is_active(&app) {
         return Err(i18n::t("err_safe_active_op").to_string());
     }
@@ -5692,23 +5775,48 @@ pub async fn uninstall_pnpm(app: AppHandle) -> Result<UninstallReport, String> {
     if state.updating.swap(true, Ordering::SeqCst) {
         return Err(i18n::t("err_task_busy").to_string());
     }
-    let result = uninstall_pnpm_inner(&app);
+    let result = uninstall_pnpm_inner(&app, dir);
     state.updating.store(false, Ordering::SeqCst);
     result
 }
 
-fn uninstall_pnpm_inner(app: &AppHandle) -> Result<UninstallReport, String> {
-    let cfg = config::load(app);
-    // DSH 已经卸载时 dsh_path 已被清空 → 回落到「npm 自己解析出的全局目录」
-    // （pnpm 当初就是装在那里的；package_name 那份同款的保守推导在这里不适用）
-    let target = npm_prefix_from_dsh_path(&cfg).or_else(|| {
-        let p = detect::effective_npm_prefix().unwrap_or_default();
-        if p.is_empty() {
-            None
-        } else {
-            Some(p)
+/// 可能要卸载 pnpm 的**候选全局目录**（去重、保持优先级）：
+///   ① 前端带回来的目录（刚卸载 DSH 的那个 —— 正常路径上就是它）
+///   ② `dsh_path` 还能推导出来的目录（防御性：万一前端没带）
+///   ③ npm 自己解析出的全局目录
+///   ④ npm 在 Windows 上的默认全局目录
+///
+/// 为什么要一串候选：pnpm 未必住在 DSH 的全局目录里（真机上它可能装在 Node 自己的安装
+/// 目录、或用户以前用别的 prefix 装的）。只试一个目录，就会出现「npm 说没装这个包、
+/// 退出码 0、界面报成功」这种假成功 —— 而挨个候选去**看文件系统**是廉价的（不跑 npm）。
+fn pnpm_candidate_dirs(cfg: &Config, hint: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |v: String| {
+        let t = v.trim().trim_end_matches(['\\', '/']).to_string();
+        if t.is_empty() {
+            return;
         }
-    });
+        if !out.iter().any(|d| config::same_dir(d, &t)) {
+            out.push(t);
+        }
+    };
+    if let Some(h) = hint {
+        push(h.to_string());
+    }
+    if let Some(p) = npm_prefix_from_dsh_path(cfg) {
+        push(p);
+    }
+    if let Some(p) = detect::effective_npm_prefix() {
+        push(p);
+    }
+    if let Some(base) = std::env::var("APPDATA").ok() {
+        push(Path::new(&base).join("npm").to_string_lossy().to_string());
+    }
+    out
+}
+
+fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<UninstallReport, String> {
+    let cfg = config::load(app);
     let npm = match config::validate_program_file("npm_path", &cfg.npm_path) {
         Ok(p) => p,
         Err(_) if Path::new(&cfg.npm_path).is_file() => {
@@ -5717,22 +5825,63 @@ fn uninstall_pnpm_inner(app: &AppHandle) -> Result<UninstallReport, String> {
         Err(e) => return Err(e),
     };
     let cache = npm_cache_for_use(&cfg);
+    // 只把「文件系统里真的躺着 pnpm.cmd」的候选拿去卸载：既避免对着一堆无关目录空跑 npm，
+    // 也让「pnpm 到底在哪」这件事以事实为准。
+    let candidates: Vec<String> = pnpm_candidate_dirs(&cfg, dir.as_deref())
+        .into_iter()
+        .filter(|d| global_shim_path(d, "pnpm").is_file())
+        .collect();
+
     set_status(app, "updating", None);
-    let (ok, out) = run_npm_uninstall(&npm, "pnpm", target.as_deref(), cache.as_deref())?;
-    if !out.trim().is_empty() {
-        logger::append_line(&logger::desktop_log_path(app), &out);
+    let mut last_out = String::new();
+    let mut used: Option<String> = None;
+    for d in &candidates {
+        let (ok, out) = run_npm_uninstall(&npm, "pnpm", Some(d), cache.as_deref())?;
+        if !out.trim().is_empty() {
+            logger::append_line(&logger::desktop_log_path(app), &out);
+        }
+        last_out = out;
+        // 退出码 0 且磁盘上真的没了才算成功（退出码在这条路上不可信，见 uninstall_took_effect）
+        if ok && uninstall_took_effect(d, "pnpm") {
+            used = Some(d.clone());
+            break;
+        }
     }
     set_status(app, "idle", None);
-    if ok {
-        emit_log(app, "update", i18n::t("log_uninstall_pnpm_ok").to_string());
-    } else {
-        emit_log(app, "update", i18n::fmt("log_uninstall_pnpm_fail", &[&out]));
-    }
+
+    let Some(dir_used) = used else {
+        // 没删掉。要分清两种现实，别混成一句「失败」：
+        //   - 候选里根本没有 pnpm（它装在别处）→ 告诉用户它实际在哪
+        //   - 试过了但没删成 → 给 npm 的输出
+        let detected = detect::find_pnpm_cmd().map(|p| p.to_string_lossy().to_string());
+        let (status, msg) = match detected {
+            Some(p) => (
+                "still_elsewhere",
+                i18n::fmt("log_uninstall_pnpm_elsewhere", &[&p]),
+            ),
+            None => ("failed", i18n::fmt("log_uninstall_pnpm_fail", &[&last_out])),
+        };
+        emit_log(app, "update", msg);
+        return Ok(UninstallReport {
+            success: false,
+            package_name: "pnpm".to_string(),
+            dir: dir.unwrap_or_default(),
+            output: last_out,
+            // 用 items 把「它其实在哪」带回给界面（前端按 kind/status 渲染成一行人话）
+            items: vec![UninstallItem {
+                kind: "package".to_string(),
+                path: detected.clone().unwrap_or_default(),
+                status: status.to_string(),
+            }],
+        });
+    };
+
+    emit_log(app, "update", i18n::t("log_uninstall_pnpm_ok").to_string());
     Ok(UninstallReport {
-        success: ok,
+        success: true,
         package_name: "pnpm".to_string(),
-        dir: target.unwrap_or_default(),
-        output: out,
+        dir: dir_used,
+        output: last_out,
         items: Vec::new(),
     })
 }
@@ -6494,7 +6643,7 @@ mod tests {
         // 非作用域包，放在 node_modules 根下
         std::fs::create_dir_all(nm_others.join("typescript")).unwrap();
         std::fs::write(with_others.join("dsh.cmd"), b"leftover").unwrap();
-        let items = cleanup_after_uninstall(&with_others);
+        let items = cleanup_after_uninstall_items(&with_others);
         assert!(
             with_others.join("node_modules").join("@deepseek-ai").is_dir(),
             "scope 目录里还有别的包时，它必须保留（空目录才回收）"
@@ -6537,7 +6686,7 @@ mod tests {
         for name in DSH_SHIM_NAMES {
             std::fs::write(only_dsh.join(name), b"script").unwrap();
         }
-        let items2 = cleanup_after_uninstall(&only_dsh);
+        let items2 = cleanup_after_uninstall_items(&only_dsh);
         assert!(
             !only_dsh.join("node_modules").exists(),
             "空掉的 node_modules 应当被回收"

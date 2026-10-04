@@ -525,6 +525,19 @@ body.tb-auto .refresh-overlay { top: 0; }
 }
 .modal-title-row .modal-title { padding: 0; }
 
+/* 卸载确认框 / pnpm 追问框的正文容器。
+   与 .update-desc / .safe-modal-body 同一套内边距与行高：`.modal-box` 只给标题栏和
+   按钮栏留了 18px 内边距，正文容器若没有自己的 padding，文字会直接贴到弹窗边框上
+   （v1.3.9 卸载弹窗就是这么错位的）。overflow-y 让内容变高时内部滚动，
+   避免把底部按钮挤出可视区。 */
+.modal-body {
+  padding: 4px 18px 10px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text);
+  overflow-y: auto;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;

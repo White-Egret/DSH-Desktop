@@ -333,8 +333,14 @@ pub fn t(key: &str) -> &'static str {
         "err_uninstall_npm" => if en { "Cannot find npm.cmd ({0}), so DSH cannot be uninstalled through npm. Run `npm uninstall -g <package>` in a terminal yourself." } else { "未找到 npm.cmd（{0}），无法通过 npm 卸载 DSH。请在终端里自行执行 `npm uninstall -g <包名>`。" },
         "log_uninstall_ok" => if en { "[uninstall] DSH global package removed, and the leftovers were cleaned up (empty scope folder / npm config)." } else { "[uninstall] DSH 全局包已卸载，并已收尾（空 scope 目录 / npm 配置）。" },
         "log_uninstall_fail" => if en { "[uninstall] npm uninstall failed: {0}" } else { "[uninstall] npm 卸载失败：{0}" },
+        // 退出码 0 但东西还在（`npm uninstall -g --prefix X <包>` 在 X 里没装这个包时照样返回 0）
+        "log_uninstall_no_effect" => if en { "[uninstall] npm reported success but the package is still present in {0} (npm exits 0 for \"nothing to remove\" too). npm said: {1}" } else { "[uninstall] npm 报告成功，但包仍在 {0} 里（npm 对「没有可删的东西」同样返回 0）。npm 的输出：{1}" },
+        // 收尾删空目录失败：这是「界面说删干净了、磁盘上还留着空目录」唯一能留下的证据
+        "log_uninstall_dir_remove_fail" => if en { "[uninstall] The empty folder {0} could not be removed (it is empty, so something else is holding it — a scanner, an indexer, or an open Explorer window). You can delete it by hand." } else { "[uninstall] 空目录 {0} 未能删除（它确实是空的，所以是有别的东西占着它 —— 杀软/索引器/打开的资源管理器窗口）。可以手动删除。" },
         "log_uninstall_pnpm_ok" => if en { "[uninstall] pnpm global package removed." } else { "[uninstall] pnpm 全局包已卸载。" },
         "log_uninstall_pnpm_fail" => if en { "[uninstall] pnpm uninstall failed: {0}" } else { "[uninstall] pnpm 卸载失败：{0}" },
+        // pnpm 不在我们试过的全局目录里（真机上它可能装在 Node 自己的安装目录）
+        "log_uninstall_pnpm_elsewhere" => if en { "[uninstall] pnpm is not in the npm global directory this app manages; it was found at {0} instead, so it was left alone." } else { "[uninstall] pnpm 不在本程序管理的 npm 全局目录里：实际找到的是 {0}，因此没有动它。" },
 
         // ---------- 引导安装 pnpm（Node 就绪后补装 / 向导「缺少 pnpm」一步） ----------
         "setup_pnpm_npm_missing" => if en { "npm.cmd was not found, so pnpm cannot be installed. Install Node.js first." } else { "未找到 npm.cmd，无法安装 pnpm。请先安装 Node.js。" },

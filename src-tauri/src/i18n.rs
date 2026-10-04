@@ -323,6 +323,16 @@ pub fn t(key: &str) -> &'static str {
         "setup_path_add_fail" => if en { "DSH was installed, but adding {0} to your user PATH failed: {1}. This app still starts DSH by its full path; to use `dsh` in a terminal you may need to add that folder to PATH yourself." } else { "DSH 已装好，但把 {0} 写入用户 PATH 失败：{1}。本程序仍会用完整路径启动 DSH；若要在终端里直接使用 dsh，请自行把该目录加入 PATH。" },
         "log_setup_done" => if en { "[launcher] First-run setup finished; configuration saved." } else { "[launcher] 初始化引导已完成，配置已写入。" },
 
+        // ---------- 卸载 DSH（首选项最底部那个入口） ----------
+        // Rust 这边只有错误路径与日志：结果页/追问弹窗的文案在前端词典（要跟着界面语言走，
+        // 而结构化的 UninstallReport 已经把「删了什么」交回前端）。
+        "err_uninstall_nodsh" => if en { "Cannot work out where DSH is installed (the detected path {0} is not usable). Run `npm uninstall -g {1}` in a terminal yourself, or re-check the environment and try again." } else { "无法确定 DSH 装在哪里（检测到的路径 {0} 不可用）。请在终端里自行执行 `npm uninstall -g {1}`，或点「重新检测」后重试。" },
+        "err_uninstall_npm" => if en { "Cannot find npm.cmd ({0}), so DSH cannot be uninstalled through npm. Run `npm uninstall -g <package>` in a terminal yourself." } else { "未找到 npm.cmd（{0}），无法通过 npm 卸载 DSH。请在终端里自行执行 `npm uninstall -g <包名>`。" },
+        "log_uninstall_ok" => if en { "[uninstall] DSH global package removed, and the leftovers were cleaned up (empty scope folder / npm config)." } else { "[uninstall] DSH 全局包已卸载，并已收尾（空 scope 目录 / npm 配置）。" },
+        "log_uninstall_fail" => if en { "[uninstall] npm uninstall failed: {0}" } else { "[uninstall] npm 卸载失败：{0}" },
+        "log_uninstall_pnpm_ok" => if en { "[uninstall] pnpm global package removed." } else { "[uninstall] pnpm 全局包已卸载。" },
+        "log_uninstall_pnpm_fail" => if en { "[uninstall] pnpm uninstall failed: {0}" } else { "[uninstall] pnpm 卸载失败：{0}" },
+
         // ---------- 引导安装 pnpm（Node 就绪后补装 / 向导「缺少 pnpm」一步） ----------
         "setup_pnpm_npm_missing" => if en { "npm.cmd was not found, so pnpm cannot be installed. Install Node.js first." } else { "未找到 npm.cmd，无法安装 pnpm。请先安装 Node.js。" },
         // {0} = npm 的实际路径；文案里把参数固定成 `install -g pnpm`，与真正执行的一致

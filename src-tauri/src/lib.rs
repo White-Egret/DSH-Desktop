@@ -94,6 +94,10 @@ pub fn run(launched_by_autostart: bool) {
             process::setup_install_dsh,
             // 向导「缺少 pnpm」一步：`npm install -g pnpm`（Node 自动安装成功后也会自动补装）
             process::setup_install_pnpm,
+            // 首选项最底部「卸载 DSH」：npm 删包 + 收尾（npm 不会回收的空 scope 目录、
+            // 我们写进 ~/.npmrc 的 prefix=）+ 事后追问是否顺带卸载 pnpm
+            process::uninstall_dsh,
+            process::uninstall_pnpm,
             // 首选项「Python 环境」块：只读状态 + 基本安装 + 数据分析扩展包
             process::python_status,
             process::setup_install_python,

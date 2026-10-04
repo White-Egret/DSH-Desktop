@@ -160,7 +160,7 @@ window.addEventListener('keydown', (e) => {
 
 // ---------- 模态框（打开时隐藏内嵌 DSH webview，避免其盖住弹窗） ----------
 
-const MODALS = ['settings-modal', 'log-modal', 'update-modal', 'safe-modal', 'safe-verify-modal'];
+const MODALS = ['settings-modal', 'log-modal', 'update-modal', 'safe-modal', 'safe-verify-modal', 'uninstall-modal', 'uninstall-pnpm-modal'];
 
 function anyModalOpen() {
   return MODALS.some((m) => !$(m).classList.contains('hidden'));
@@ -393,16 +393,18 @@ function refreshButtons() {
   const busy = updating || ['starting', 'stopping', 'updating'].includes(status);
   // 安全模式（或进入/退出流程进行中）：日常控制全部禁用——状态机归安全实例所有
   // （Rust 侧同样有门禁，这里只是让按钮如实反映）；保留「退出安全模式」、
-  // 「刷新页面」（此时指向 3081 的安全页面）、日志与首选项。
+  // 日志与首选项。
   if (safeMode || safeBusy) {
     $('btn-start').disabled = true;
     $('btn-stop').disabled = true;
     $('btn-restart').disabled = true;
     $('btn-update').disabled = true;
     $('btn-connect').disabled = true;
-    $('btn-refresh').disabled = busy;
     $('btn-safe').disabled = busy || safeBusy;
     $('btn-settings').disabled = updating;
+    // 安全模式期间后端会拒绝卸载（err_safe_active_op），界面也如实禁用
+    const unSafe = $('btn-uninstall-dsh');
+    if (unSafe) unSafe.disabled = true;
     return;
   }
   $('btn-start').disabled = busy || ['running', 'running-external'].includes(status);
@@ -412,6 +414,9 @@ function refreshButtons() {
   $('btn-safe').disabled = busy;
   $('btn-settings').disabled = updating;
   $('btn-connect').disabled = updating;
+  // 「卸载 DSH」只在确实检测到 DSH 时可点（没装就没什么可卸的）
+  const un = $('btn-uninstall-dsh');
+  if (un) un.disabled = updating || !config || !config.dsh_exists;
 }
 
 // ---------- 安全模式 UI（独立纯净家目录 + 端口 3081；流程编排在 Rust 侧 safe.rs） ----------
@@ -923,6 +928,8 @@ function openSettings() {
   refreshRegistryInfo();
   // Python 块：每次打开都重新问一次后端（安装在后台跑，界面上的状态不能是旧的）
   refreshPythonStatus();
+  // 维护块：确认框里那条命令要跟着当前 DSH 实际所在目录走
+  refreshUninstallCmd();
   showModal('settings-modal');
 }
 
@@ -1229,6 +1236,10 @@ async function saveSettings() {
     // pnpm 源「对齐前的原值」同样不是设置页字段：它是恢复按钮的原料，**必须原样带回** ——
     // 漏带一次，serde(default) 会把它写成空串，恢复按钮就永久消失了
     pnpm_registry_prev: (config && config.pnpm_registry_prev) || '',
+    // 卸载 DSH 时「把 ~/.npmrc 的 prefix= 原路退回」所需的两份记忆，同样不是设置页字段：
+    // 漏带一次，卸载就只能走保守路径（保留那一行），用户得到的就不再是「删干净」。
+    npm_prefix_prev: (config && config.npm_prefix_prev) || '',
+    npm_prefix_claimed: !!(config && config.npm_prefix_claimed),
     // 更新命令不再有可配置参数：固定 install -g <包名>@<频道>，
     // 频道由「更新 DSH」弹窗里的 latest / next 单选决定（见 renderUpdateModal）
   };
@@ -1519,6 +1530,192 @@ async function onUpdateFinished(p) {
     toast(t('toast_update_failed_detail', p.message), true);
   }
 }
+
+// ---------- 卸载 DSH（首选项最底部） ----------
+//
+// 为什么不是「让用户自己去终端敲 npm uninstall -g」：npm 能删掉包与启动脚本，但**不会**
+// 回收变空的 @deepseek-ai scope 目录，也不知道 ~/.npmrc 里那行 prefix= 是本程序写的。
+// 这两件收尾只有本程序能做 —— 所以界面上给一个入口，由后端删完之后负责收尾。
+//
+// 流程：确认框（uninstall-modal）→ 执行 → 追问要不要顺带卸载 pnpm（uninstall-pnpm-modal）
+// → 用户答完即最终结果页（同一个弹窗的第二态）。
+
+let uninstalling = false;
+
+/// 确认框里显示的「将执行」命令 —— 必须与后端真正执行的那条**逐字一致**
+/// （`npm uninstall -g [--prefix "<目录>"] <包名>`，见 process.rs::run_npm_uninstall）。
+/// 目标目录取 DSH 当前实际所在的目录；取不到时就不显示 --prefix（npm 会用自己解析的全局目录）。
+function uninstallCommand() {
+  const npm = '"' + ((config && config.npm_path) || 'npm') + '"';
+  const pkg = (config && config.package_name) || '@deepseek-ai/dsh';
+  const dir = dshInstallDir();
+  return dir ? `${npm} uninstall -g --prefix "${dir}" ${pkg}` : `${npm} uninstall -g ${pkg}`;
+}
+
+/// 从 `dsh.cmd` 的完整路径取它所在的目录（= npm 的全局目录，也就是卸载目标）。
+function dshInstallDir() {
+  const p = ((config && config.dsh_path) || '').replace(/[\\/]+$/, '');
+  const i = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
+  return i > 1 ? p.slice(0, i) : '';
+}
+
+/// 打开首选项时刷新「维护」那一块的可点状态（确认框里那条命令在打开时现场拼）
+function refreshUninstallCmd() {
+  const btn = $('btn-uninstall-dsh');
+  if (!btn) return;
+  btn.disabled = updating || !config || !config.dsh_exists;
+}
+
+function uninstallPnpmCommand() {
+  const npm = '"' + ((config && config.npm_path) || 'npm') + '"';
+  const dir = dshInstallDir();
+  // 卸载 DSH 之后 dsh_path 已被清空，所以这里用**卸载前**记下的目录（见 doUninstallDsh）
+  const d = uninstallDir || dir;
+  return d ? `${npm} uninstall -g --prefix "${d}" pnpm` : `${npm} uninstall -g pnpm`;
+}
+
+/// 把后端返回的结构化条目渲染成人话列表（路径一律走 textContent，绝不拼 innerHTML）
+function uninstallItemText(it) {
+  // 词典里没有这个 kind 时 t() 原样返回 key（i18n.js 的兜底），那就退化成只显示路径
+  const label = t('uninstall_item_' + (it.kind || 'package'), it.path);
+  return it.path ? `${label} — ${t('uninstall_status_' + (it.status || 'removed'))}` : label;
+}
+
+/// 渲染结果列表。`rep` = 后端返回的 UninstallReport，`removedPkg` = 是否把「包本身已删除」
+/// 也列进去（失败时不该列 —— 那时包还在）。
+function renderUninstallItems(list, rep, removedPkg) {
+  list.innerHTML = '';
+  if (removedPkg && rep) {
+    const li0 = document.createElement('li');
+    li0.textContent =
+      t('uninstall_item_package', rep.package_name) + ' — ' + t('uninstall_status_removed');
+    list.appendChild(li0);
+  }
+  for (const it of (rep && rep.items) || []) {
+    const li = document.createElement('li');
+    li.textContent = uninstallItemText(it);
+    list.appendChild(li);
+  }
+}
+
+function openUninstallConfirm() {
+  if (!config) return;
+  // 从首选项进入：先关掉首选项，视觉上「一件事一个弹窗」
+  hideModal('settings-modal');
+  hideModal('uninstall-pnpm-modal');
+  $('uninstall-cmd').textContent = uninstallCommand();
+  $('uninstall-progress').classList.add('hidden');
+  $('uninstall-result-list').innerHTML = '';
+  $('uninstall-progress-text').textContent = t('uninstall_running');
+  $('uninstall-fail-hint').classList.add('hidden');
+  $('btn-uninstall-confirm').disabled = false;
+  $('btn-uninstall-cancel').disabled = false;
+  showModal('uninstall-modal');
+}
+
+async function doUninstallDsh() {
+  if (uninstalling) return;
+  uninstalling = true;
+  $('btn-uninstall-confirm').disabled = true;
+  $('btn-uninstall-cancel').disabled = true;
+  $('uninstall-fail-hint').classList.add('hidden');
+  $('uninstall-progress').classList.remove('hidden');
+  $('uninstall-progress-text').textContent = t('uninstall_running');
+  try {
+    const rep = await invoke('uninstall_dsh');
+    renderUninstallItems($('uninstall-result-list'), rep, rep.success);
+    if (!rep.success) {
+      $('uninstall-fail-hint').classList.remove('hidden');
+      $('btn-uninstall-confirm').disabled = false;
+      $('btn-uninstall-cancel').disabled = false;
+      uninstalling = false;
+      toast(t('toast_uninstall_fail', rep.output || ''), true);
+      return;
+    }
+    // 成功后：记下卸载目标（追问弹窗要用它拼 pnpm 命令），并刷新配置与状态显示。
+    // 只刷配置：`get_config` 会重新检测一次（后端已 invalidate），config.dsh_exists /
+    // dsh_path 随之变成「未安装」，首选项那个按钮也跟着禁用 —— 这正是我们要的界面事实。
+    uninstallDir = rep.dir || uninstallDir;
+    await refreshConfig();
+    try {
+      onStatus(await invoke('get_status'));
+    } catch (_) { /* 状态事件也会推一次，拿不到不影响卸载结论 */ }
+    toast(t('toast_uninstall_ok'));
+    uninstalling = false;
+    hideModal('uninstall-modal');
+    openPnpmPrompt();
+  } catch (err) {
+    uninstalling = false;
+    $('uninstall-fail-hint').classList.remove('hidden');
+    $('btn-uninstall-confirm').disabled = false;
+    $('btn-uninstall-cancel').disabled = false;
+    toast(t('toast_uninstall_start_fail', err), true);
+  }
+}
+
+/// 追问弹窗（问 + 最终结果页这两态共用同一个弹窗）
+function openPnpmPrompt() {
+  $('uninstall-final-title').textContent = t('uninstall_final_title');
+  $('uninstall-pnpm-ask').classList.remove('hidden');
+  $('uninstall-final-body').classList.add('hidden');
+  $('uninstall-pnpm-actions').classList.remove('hidden');
+  $('uninstall-final-actions').classList.add('hidden');
+  $('uninstall-pnpm-fail').classList.add('hidden');
+  $('btn-uninstall-pnpm-yes').disabled = false;
+  $('btn-uninstall-pnpm-no').disabled = false;
+  $('uninstall-pnpm-cmd').textContent = uninstallPnpmCommand();
+  showModal('uninstall-pnpm-modal');
+}
+
+/// 最终结果页：pnpmRemoved = 用户选择了「一并卸载」并且它成功了
+function showUninstallFinal(pnpmRemoved) {
+  $('uninstall-pnpm-ask').classList.add('hidden');
+  $('uninstall-pnpm-actions').classList.add('hidden');
+  $('uninstall-final-body').classList.remove('hidden');
+  $('uninstall-final-actions').classList.remove('hidden');
+  const msg = $('uninstall-final-msg');
+  msg.textContent = '';
+  if (pnpmRemoved) {
+    // 「DSH 和 pnpm 已成功卸载。」
+    msg.textContent = t('uninstall_done_both');
+    $('uninstall-final-manual').classList.add('hidden');
+  } else {
+    // 「DSH 已成功卸载，日后如需卸载管理 DSH 插件用的 pnpm，可以在终端执行：」
+    msg.textContent = t('uninstall_done_dsh_only');
+    $('uninstall-final-manual').classList.remove('hidden');
+    $('uninstall-final-cmd').textContent = uninstallPnpmCommand();
+  }
+}
+
+async function doUninstallPnpm() {
+  if (uninstalling) return;
+  uninstalling = true;
+  $('btn-uninstall-pnpm-yes').disabled = true;
+  $('btn-uninstall-pnpm-no').disabled = true;
+  $('uninstall-pnpm-fail').classList.add('hidden');
+  try {
+    const rep = await invoke('uninstall_pnpm');
+    uninstalling = false;
+    if (rep && rep.success) {
+      showUninstallFinal(true);
+    } else {
+      // 失败不假装成功：留在追问态，让用户可以「保留 pnpm」继续收尾
+      $('uninstall-pnpm-fail').classList.remove('hidden');
+      $('btn-uninstall-pnpm-yes').disabled = false;
+      $('btn-uninstall-pnpm-no').disabled = false;
+      toast(t('toast_uninstall_fail', (rep && rep.output) || ''), true);
+    }
+  } catch (err) {
+    uninstalling = false;
+    $('uninstall-pnpm-fail').classList.remove('hidden');
+    $('btn-uninstall-pnpm-yes').disabled = false;
+    $('btn-uninstall-pnpm-no').disabled = false;
+    toast(t('toast_uninstall_fail', err), true);
+  }
+}
+
+/// 卸载目标的记忆（DSH 卸载后 dsh_path 已被清空，追问 pnpm 时还要用它拼命令）
+let uninstallDir = '';
 
 // ---------- 首次运行引导向导（环境检查 + 引导安装，可随时跳过） ----------
 
@@ -1978,7 +2175,6 @@ function bindUI() {
   $('btn-start').onclick = () => invoke('start_dsh').catch((e) => toast(String(e), true));
   $('btn-stop').onclick = () => invoke('stop_dsh').catch((e) => toast(String(e), true));
   $('btn-restart').onclick = () => invoke('restart_dsh').catch((e) => toast(String(e), true));
-  $('btn-refresh').onclick = refreshPage;
   $('btn-update').onclick = confirmUpdate;
   // 安全模式：未进入 = 进入（后端会先完整停掉日常实例）；已进入 = 退出并重启日常
   $('btn-safe').onclick = () => { if (safeMode) exitSafeMode(); else enterSafeMode(); };
@@ -2107,6 +2303,21 @@ function bindUI() {
       toast(t('toast_pkg_fail', err), true);
     }
   };
+
+  // ---- 首选项最底部「维护」：卸载全局 DSH 包（确认 → 执行 → 追问 pnpm → 结果页）----
+  $('btn-uninstall-dsh').onclick = () => openUninstallConfirm();
+  $('btn-uninstall-cancel').onclick = () => {
+    if (uninstalling) return; // 正在删：取消按钮也禁用，避免半途关掉看不见结果
+    hideModal('uninstall-modal');
+  };
+  $('btn-uninstall-confirm').onclick = () => doUninstallDsh();
+  // 追问：答「是」= 顺带卸载 pnpm；答「否」= 直接进最终结果页（并给出日后的手动命令）
+  $('btn-uninstall-pnpm-yes').onclick = () => doUninstallPnpm();
+  $('btn-uninstall-pnpm-no').onclick = () => {
+    if (uninstalling) return;
+    showUninstallFinal(false);
+  };
+  $('btn-uninstall-final-close').onclick = () => hideModal('uninstall-pnpm-modal');
 
   // ---- 首选项：包源 registry 对齐（读自动刷、写要点按钮）----
   // 与 npm 缓存 / DSH_HOME 同款分工：后端返回一句已生成好的消息，成功进日志并弹 toast，

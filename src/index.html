@@ -21,13 +21,14 @@
   <!-- 顶部工具栏（高度 43.2px，与 Rust 端 TOOLBAR_H 常量一致，DSH 页面内嵌在此栏下方）。
        固定显示模式下它就是文档流的第一行；自动隐藏模式下由 body.tb-auto 接管成
        悬浮层（脱离文档流 + translateY 动画），此时内嵌页面的位置由 Rust 侧同步。
-       静态文案通过 data-i18n 由 i18n.js 按设置语言渲染（默认中文）。 -->
+       静态文案通过 data-i18n 由 i18n.js 按设置语言渲染（默认中文）。
+       注：这里**没有**「刷新页面」按钮（按用户要求移除）—— DSH 页面内右键
+       自带「重新加载」，且 F5 / Ctrl+R 快捷键仍然可用（见 main.js::refreshPage）。 -->
   <header id="toolbar">
     <div class="tb-left">
       <button id="btn-start" class="btn primary" data-i18n="btn_start">▶ 启动</button>
       <button id="btn-stop" class="btn danger" data-i18n="btn_stop">■ 停止</button>
       <button id="btn-restart" class="btn" data-i18n="btn_restart">⟳ 重启</button>
-      <button id="btn-refresh" class="btn" data-i18n="btn_refresh">↻ 刷新页面</button>
       <button id="btn-update" class="btn" data-i18n="btn_update">⤓ 更新 DSH</button>
       <!-- 安全模式：进入（停日常→归档→借凭据→起 3081）/ 退出（kill 安全实例→重启日常）。
            文案由 main.js renderSafeButton() 动态切换，故不挂 data-i18n -->
@@ -266,6 +267,20 @@
         <div class="row gap">
           <button id="btn-detect-package" class="btn small" data-i18n="btn_detect_pkg">检测全局包名（npm list -g）</button>
         </div>
+        <!-- 维护（面板最底部）：卸载全局 DSH 包。
+             为什么这个入口必须存在：npm 只能删掉包本身与启动脚本，**不会**回收变空的
+             @deepseek-ai scope 目录，也不知道 ~/.npmrc 里那行 prefix= 是本程序写的。
+             这两件收尾只有本程序能做。
+             刻意做成低饱和的次要按钮 + 二次确认：这是破坏性动作，不该在视觉上抢焦点。 -->
+        <div class="field uninstall-block">
+          <span data-i18n="lbl_uninstall_dsh">维护</span>
+          <div class="hint" data-i18n="uninstall_hint">
+            从 npm 全局目录里卸载 DSH。卸载只会删除那个全局包：DSH 家目录（会话与配置）、本程序自身、以及 DSH 的插件都不会被删除。
+          </div>
+          <div class="row gap">
+            <button id="btn-uninstall-dsh" class="btn small subtle" type="button" data-i18n="btn_uninstall_dsh">卸载 DSH…</button>
+          </div>
+        </div>
       </div>
       <div class="modal-actions">
         <button id="btn-cancel-settings" class="btn" data-i18n="btn_cancel">取消</button>
@@ -339,6 +354,84 @@
       <div class="modal-actions">
         <button id="btn-cancel-update" class="btn" data-i18n="btn_cancel">取消</button>
         <button id="btn-confirm-update" class="btn primary" data-i18n="btn_start_update">开始安装</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 卸载 DSH 确认框（首选项最底部「卸载 DSH…」→ 这里 → 执行 → 结果页）。
+       三个弹窗是一串：uninstall-modal（确认/执行）→ uninstall-pnpm-modal（追问是否
+       顺带卸载 pnpm，同时也是最终结果页）。刻意不复用 update-modal：更新是「装」，
+       卸载是「删」，两者的提醒内容与按钮语气都不一样。 -->
+  <div id="uninstall-modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-title" data-i18n="uninstall_title">卸载 DSH</div>
+      <div class="modal-body">
+        <div class="upd-cmd-label" data-i18n="uninstall_will_run">将执行：</div>
+        <code class="block-code" id="uninstall-cmd"></code>
+        <div class="upd-backup">
+          <div class="upd-backup-title" data-i18n="uninstall_removes_title">会被删除</div>
+          <div class="upd-backup-note" data-i18n="uninstall_removes_note">
+            全局包 @deepseek-ai/dsh（含 dsh / dsh.cmd / dsh.ps1）、被它空出来的 @deepseek-ai 目录，以及本程序写进 npm 配置（~/.npmrc）的全局目录设置。
+          </div>
+          <div class="upd-backup-title" data-i18n="uninstall_keeps_title">不会被删除</div>
+          <div class="upd-backup-note" data-i18n="uninstall_keeps_note">
+            DSH 家目录（会话、配置与凭据）、DSH 的插件数据、以及本程序自身。卸载后本程序仍在，随时可以在首装向导里重新安装 DSH。
+          </div>
+        </div>
+        <!-- 执行中/结果列表：卸载完成后逐条列出「删了什么、留了什么」 -->
+        <div id="uninstall-progress" class="hidden">
+          <div class="row gap">
+            <div class="spinner small"></div>
+            <div id="uninstall-progress-text" class="py-progress-text"></div>
+          </div>
+          <ul id="uninstall-result-list" class="uninstall-list"></ul>
+        </div>
+        <div class="hint hidden" id="uninstall-fail-hint" data-i18n="uninstall_fail_hint">
+          卸载未成功。完整输出已写入日志（点工具栏「日志」查看），也可以在终端里自行执行上面的命令。
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-uninstall-cancel" class="btn" data-i18n="btn_cancel">取消</button>
+        <button id="btn-uninstall-confirm" class="btn danger" data-i18n="btn_uninstall_confirm">确认卸载</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 卸载后追问：要不要顺带卸载管理 DSH 插件用的 pnpm？答完即最终结果页 -->
+  <div id="uninstall-pnpm-modal" class="modal hidden">
+    <div class="modal-box narrow">
+      <div class="modal-title" id="uninstall-final-title" data-i18n="uninstall_final_title">DSH 已成功卸载</div>
+      <div class="modal-body">
+        <!-- 追问态 -->
+        <div id="uninstall-pnpm-ask">
+          <div data-i18n-html="uninstall_pnpm_ask_html">
+            管理 DSH 插件用的 pnpm 也已装在同一个 npm 全局目录里。要不要顺带把它也卸载掉？
+          </div>
+          <div class="upd-cmd-label" data-i18n="uninstall_will_run" style="margin-top:8px">将执行：</div>
+          <code class="block-code" id="uninstall-pnpm-cmd"></code>
+          <div class="upd-backup-note" data-i18n="uninstall_pnpm_keep_note">
+            选择「保留」也不会影响其它任何东西 —— pnpm 还是个通用的包管理器，你可能在别处用它。
+          </div>
+          <div class="hint hidden" id="uninstall-pnpm-fail" data-i18n="uninstall_pnpm_fail">
+            卸载 pnpm 未成功。可以稍后在终端里自行执行上面的命令（完整输出已写入日志）。
+          </div>
+        </div>
+        <!-- 最终结果态 -->
+        <div id="uninstall-final-body" class="hidden">
+          <div id="uninstall-final-msg"></div>
+          <!-- 只有「保留 pnpm」那条路需要给出终端命令；删掉之后这一块隐藏 -->
+          <div id="uninstall-final-manual">
+            <div class="upd-cmd-label" data-i18n="uninstall_final_cmd_label">日后如需卸载 pnpm，在终端执行：</div>
+            <code class="block-code" id="uninstall-final-cmd"></code>
+          </div>
+        </div>
+      </div>
+      <div class="modal-actions" id="uninstall-pnpm-actions">
+        <button id="btn-uninstall-pnpm-no" class="btn" data-i18n="btn_uninstall_pnpm_no">保留 pnpm</button>
+        <button id="btn-uninstall-pnpm-yes" class="btn primary" data-i18n="btn_uninstall_pnpm_yes">一并卸载 pnpm</button>
+      </div>
+      <div class="modal-actions hidden" id="uninstall-final-actions">
+        <button id="btn-uninstall-final-close" class="btn primary" data-i18n="btn_uninstall_close">完成</button>
       </div>
     </div>
   </div>

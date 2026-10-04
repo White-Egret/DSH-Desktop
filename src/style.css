@@ -1007,6 +1007,24 @@ body.tb-auto .refresh-overlay { top: 0; }
   color: var(--text);
 }
 
+/* 首选项最底部的「维护」块：卸载是破坏性动作，用一条分隔线把它和上面的
+   普通设置隔开，视觉上明确「下面是另一类操作」。 */
+.uninstall-block {
+  margin-top: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+/* 卸载结果清单（卸载 DSH 确认框里，执行完逐条列出删了什么、留了什么） */
+.uninstall-list {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--text-dim);
+  max-height: 180px;
+  overflow-y: auto;
+}
+
 .block-code {
   display: block;
   background: var(--code-bg);

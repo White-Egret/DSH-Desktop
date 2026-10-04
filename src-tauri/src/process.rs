@@ -2242,6 +2242,18 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
         config.toolbar_mode.clone()
     };
     config.toolbar_mode = config::normalize_toolbar_mode(&requested_mode).to_string();
+    // 卸载 DSH 时要用的两份记忆（`~/.npmrc` 那行 prefix= 写之前的值 / 那行是不是我们写的）：
+    // 同样不是设置页字段，老版本前端根本不认识它们 —— 而它们一旦丢失，卸载就只能走保守路径
+    // （保留那一行），用户拿到的就不是「删干净」。所以缺字段时沿用磁盘上的值：
+    //   - prev：空串 = 不知道原值（沿用磁盘值即可，两边都是「不知道」时不写回也无所谓）
+    //   - claimed：只在「磁盘上已经是 true」时才保留，绝不把 false 提升成 true
+    //     （claimed 一旦被误置为 true，卸载就可能去删用户自己 `npm config set prefix` 写的那一行）
+    if config.npm_prefix_prev.trim().is_empty() && !old_cfg.npm_prefix_prev.trim().is_empty() {
+        config.npm_prefix_prev = old_cfg.npm_prefix_prev.clone();
+    }
+    if old_cfg.npm_prefix_claimed {
+        config.npm_prefix_claimed = true;
+    }
     config::save(&app, &config)?;
     // 固定显示模式下「收起」没有意义：顺手清掉，免得前端漏同步时内容区仍按 0 偏移
     if config.toolbar_mode != "auto" {
@@ -2680,15 +2692,13 @@ pub async fn update_dsh(app: AppHandle, tag: String) -> Result<(), String> {
     // 找到「没装这个包」而平静退出）。用户升级本程序后，DSH 未必会重新走一遍引导，
     // 但一定会点「更新 DSH」—— 把修复挂在这条必经之路上。
     //
-    // 失败不打断更新（放前面、失败只留一行日志）：`--prefix` 仍在，更新本身照样装回原地。
+    // 失败不打断更新（失败只留一行日志）：`--prefix` 仍在，更新本身照样装回原地。
     if let Some(d) = update_prefix.as_deref() {
-        match config::apply_npm_prefix(Some(d)) {
-            Ok(config::NpmPrefixOutcome::Written(v)) => emit_log(
-                &app,
-                "update",
-                i18n::fmt("update_prefix_npmrc_written", &[&v, &cfg.package_name]),
-            ),
-            _ => {}
+        if let Some((note, is_fail)) = sync_npm_prefix(&app, d, &cfg.package_name) {
+            if is_fail {
+                logger::append_line(&logger::desktop_log_path(&app), &note);
+            }
+            emit_log(&app, "update", note);
         }
     }
 
@@ -4971,6 +4981,35 @@ fn npm_prefix_from_dsh_path(cfg: &Config) -> Option<String> {
     Some(dir_s)
 }
 
+/// 记下「`~/.npmrc` 的 `prefix=` 原来指向哪」，再把所选目录写进去。
+///
+/// 返回值 = 该给用户看的一句提示（`None` = 本来就一致，没什么可说的）。
+///
+/// 为什么写之前要先把「原来的值」记进 `config.json`（`npm_prefix_prev`）：卸载时要把这一行
+/// **原路退回**，而恢复所需的信息在 npm 那边已经没了（它只知道当前值）。直接删掉那一行会
+/// 把「用户本来自己配过 prefix」的机器悄悄改回 npm 默认目录 —— 那台机器上**其它**全局包
+/// 会因此集体「找不到」。记不住原值时一律**不动那一行**（见 uninstall_dsh 的处理）。
+///
+/// 两处调用：向导引导安装（装前写）与「更新 DSH」（旧机器只能靠这条被治好）。
+/// 写失败不是致命错误（`--prefix` 仍在，安装/更新照样落回原地），所以这里只把原因说出来。
+///
+/// 返回值 = `(给用户看的一句话, 是不是失败说明)`；`None` = 本来就一致，没什么可说的。
+/// 用二元组而不是「字符串前缀判断」：那是拿文案当协议，改一个字就静默失效。
+fn sync_npm_prefix(app: &AppHandle, dir: &str, pkg: &str) -> Option<(String, bool)> {
+    match config::apply_npm_prefix(Some(dir)) {
+        Ok(outcome) => {
+            if !outcome.changed() {
+                return None; // 本来就一致：不必重复说一遍
+            }
+            // 写成功才记原值：失败时 config.json 不该出现一个「其实没生效」的记忆。
+            // 这里失败也不打断安装 —— 只影响将来卸载时能否原路退回（那就走保守路径）。
+            let _ = config::set_npm_prefix_prev(app, outcome.previous());
+            Some((i18n::fmt("setup_prefix_npmrc_written", &[dir, pkg]), false))
+        }
+        Err(e) => Some((i18n::fmt("setup_prefix_npmrc_fail", &[dir, &e, pkg]), true)),
+    }
+}
+
 /// 引导安装 DSH：执行 `cmd /C <npm> install -g [--prefix <目录>] @deepseek-ai/dsh`，
 /// 输出实时转发到日志面板，结束后自动重新检测。
 ///
@@ -5042,24 +5081,12 @@ pub async fn setup_install_dsh(app: AppHandle, dir: Option<String>) -> Result<()
     let mut prefix_note = String::new();
     if let Some(d) = prefix.as_deref() {
         env_prefix = Some(d.to_string());
-        match config::apply_npm_prefix(Some(d)) {
-            Ok(config::NpmPrefixOutcome::Written(v)) => {
-                prefix_note = i18n::fmt("setup_prefix_npmrc_written", &[&v, &cfg.package_name]);
+        if let Some((note, is_fail)) = sync_npm_prefix(&app2, d, &cfg.package_name) {
+            // 写失败要立刻落盘留痕；成功那句与安装结果一起给（见下面成功分支）
+            if is_fail {
+                logger::append_line(&logger::desktop_log_path(&app2), &note);
             }
-            // 已经在配置里了（用户自己配过 / 上一次引导装过）：不必重复说一遍
-            Ok(config::NpmPrefixOutcome::Unchanged(_)) => {}
-            // 这个调用点不会走到：传进去的一定是 Some(目录)，删行那条路径只留给
-            // 将来「清空安装位置」的入口；真走到了也什么提示都不必给（配置已是干净的）。
-            Ok(config::NpmPrefixOutcome::Removed(_)) => {}
-            // 写不进去不是安装失败（本次 `--prefix` 仍然把 DSH 装到所选目录），
-            // 但必须说清后果：裸 `npm uninstall -g` 会找不到它，以及怎么补。
-            Err(e) => {
-                prefix_note = i18n::fmt(
-                    "setup_prefix_npmrc_fail",
-                    &[&d, &e, &cfg.package_name],
-                );
-                logger::append_line(&logger::desktop_log_path(&app2), &prefix_note);
-            }
+            prefix_note = note;
         }
     }
 
@@ -5354,6 +5381,335 @@ pub async fn setup_install_dsh(app: AppHandle, dir: Option<String>) -> Result<()
         }
     });
     Ok(())
+}
+
+// ---------- 卸载 DSH（首选项最底部那个入口） ----------
+//
+// 为什么要有这个入口：`npm uninstall -g <包名>`（在 prefix 写进 npm 自己配置之后）已经能
+// 删掉包本身、启动脚本与 `node_modules\@deepseek-ai\dsh`，但有两件 npm 永远不会替你做：
+//   ① 回收**变空的** `@deepseek-ai` scope 目录（npm 只删包目录，不清理变空的父目录）；
+//   ② 把 `~/.npmrc` 里那行由我们写入的 `prefix=` **原路退回**（npm 根本不知道那行是谁写的）。
+// 这两件事只有 DSH Desktop 能做，因为它们只有 DSH Desktop 知道。
+
+/// 清理结果里的一项（`kind` 是给前端做图标的分类，`status` 是给前端本地化的一句话）。
+#[derive(Clone, Serialize)]
+pub struct UninstallItem {
+    /// 项目分类：package | scope | shims | node_modules | npmrc | home
+    pub kind: String,
+    /// 路径（home 这类没有路径时为空串）
+    pub path: String,
+    /// removed = 已删除 / kept = 有意保留 / failed = 删除失败 / absent = 本来就没有
+    pub status: String,
+}
+
+/// 卸载结果。刻意不返回「人话」而返回结构化数据：文案要跟着界面语言走，
+/// 而语言是前端的事（后端只在错误路径与日志里用 i18n）。
+#[derive(Clone, Serialize)]
+pub struct UninstallReport {
+    pub success: bool,
+    pub package_name: String,
+    /// DSH 所在的全局目录（卸载目标）
+    pub dir: String,
+    /// npm 的原始输出（前端只用它给出错提示与「查看日志」的依据）
+    pub output: String,
+    pub items: Vec<UninstallItem>,
+}
+
+/// npm 的全局目录里，**只有这个 scope 目录**是我们有权在空掉之后回收的
+/// （DSH 的包名就住在这里）；别的 scope 目录一律不碰。
+const DSH_SCOPE_DIR: &str = "@deepseek-ai";
+/// DSH 的启动脚本（npm 通常自己会删；这里是漏下时的保险丝）
+const DSH_SHIM_NAMES: [&str; 3] = ["dsh", "dsh.cmd", "dsh.ps1"];
+
+/// 停掉正在运行的 DSH，好让 npm 删得掉 `node_modules` 里的文件。
+///
+/// 为什么必须停：Windows 上正在运行的 `node` 占着包目录里的文件，npm 会以 EBUSY/EPERM
+/// 失败（错误信息还长得像权限问题）。停不下来就**如实失败**，不假装可以继续。
+fn stop_dsh_for_uninstall(app: &AppHandle) -> Result<(), String> {
+    let st = current_status(app);
+    if st == "running" || st == "starting" {
+        stop_internal(app)?;
+    } else if st == "running-external" {
+        // 外部实例不是本程序启动的：断开内嵌页面即可，进程本身不归我们停
+        destroy_dsh_webview(app);
+        set_status(app, "idle", None);
+    }
+    Ok(())
+}
+
+/// 目录是不是**空的**（不存在也算「空」）。
+///
+/// 空目录才删：`@deepseek-ai` 下可能还有别的包（DSH 家目录里的插件就走 npm/pnpm 装，
+/// 用户的其它东西也可能在），`node_modules` 更可能装着别的全局包 —— 那种情况一律保留。
+fn dir_is_empty_or_absent(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(mut it) => it.next().is_none(),
+        Err(_) => true,
+    }
+}
+
+/// **只在目录真空时**才删除它（不递归、不强行删），并返回处置结论（供结果清单显示）。
+///
+/// 这是卸载收尾唯一的目录删除原语：判断与删除写在同一处，就不会出现
+/// 「判断时是空的、删除时已经不是」这类两段式逻辑的漏洞。
+/// 不存在 → None（清单里不必出现）；非空 → Some("kept")；删成功/失败 → removed/failed。
+fn remove_dir_if_empty(dir: &Path) -> Option<&'static str> {
+    if !dir.is_dir() {
+        return None;
+    }
+    if !dir_is_empty_or_absent(dir) {
+        return Some("kept");
+    }
+    Some(if std::fs::remove_dir(dir).is_ok() { "removed" } else { "failed" })
+}
+
+/// 跑一次 `npm uninstall -g [--prefix <目录>] [--cache <目录>] <包名>`。
+///
+/// 返回 `(是否成功, npm 输出)`。卸载与安装对称：装的参数表见 `dsh_install_args`，
+/// 卸载的目标目录同样由 `--prefix` 与 `~/.npmrc` 共同决定（两者在正常路径上是一致的）。
+fn run_npm_uninstall(
+    npm: &str,
+    pkg: &str,
+    prefix: Option<&str>,
+    cache: Option<&str>,
+) -> Result<(bool, String), String> {
+    let mut args: Vec<String> = vec!["uninstall".to_string(), "-g".to_string()];
+    if let Some(d) = prefix {
+        args.push("--prefix".to_string());
+        args.push(d.to_string());
+    }
+    if let Some(c) = cache {
+        args.push("--cache".to_string());
+        args.push(c.to_string());
+    }
+    args.push(pkg.to_string());
+    // 以家目录为 cwd：与 update/setup 一致的「不落在项目目录里」纪律
+    // （npm 会读 cwd 下的 `./.npmrc`，把 cwd 定在用户家目录比定在某个项目里更可预期）。
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    run_cmd_capture(npm, &args, &home, Duration::from_secs(5 * 60))
+}
+
+/// 卸载之后收尾：回收变空的 scope 目录、`node_modules`，以及漏下的启动脚本。
+///
+/// 逐条尽力而为，**任何一步失败都不改变 npm 的结论**（真实结果写进 items 让用户看到）。
+fn cleanup_after_uninstall(dir: &Path) -> Vec<UninstallItem> {
+    let mut items: Vec<UninstallItem> = Vec::new();
+    let npm_node_modules = dir.join("node_modules");
+    let scope = npm_node_modules.join(DSH_SCOPE_DIR);
+
+    // ① 漏下的启动脚本（正常路径上 npm 已经删过了，这里只兜底）
+    for name in DSH_SHIM_NAMES {
+        let p = dir.join(name);
+        if !p.is_file() {
+            continue;
+        }
+        let (status, path) = match std::fs::remove_file(&p) {
+            Ok(()) => ("removed", p),
+            Err(_) => ("failed", p),
+        };
+        items.push(UninstallItem {
+            kind: "shims".to_string(),
+            path: path.to_string_lossy().to_string(),
+            status: status.to_string(),
+        });
+    }
+
+    // ② 空掉的 scope 目录（npm 不会回收它 —— 这就是那个「残留空目录」）
+    if let Some(s) = remove_dir_if_empty(&scope) {
+        items.push(UninstallItem {
+            kind: "scope".to_string(),
+            path: scope.to_string_lossy().to_string(),
+            status: s.to_string(),
+        });
+    }
+
+    // ③ `node_modules` 自己（只有在它**彻底空掉**时才删；有别人的包就保留）
+    if let Some(s) = remove_dir_if_empty(&npm_node_modules) {
+        items.push(UninstallItem {
+            kind: "node_modules".to_string(),
+            path: npm_node_modules.to_string_lossy().to_string(),
+            status: s.to_string(),
+        });
+    }
+    items
+}
+
+/// 卸载 DSH（首选项最底部「卸载 DSH」→ 确认框 → 这里）。
+///
+/// 顺序刻意是「先停服务 → 再让 npm 删 → 最后收尾」，理由见 stop_dsh_for_uninstall 与
+/// cleanup_after_uninstall 的注释。任何一步失败都**如实返回**，绝不把「没删干净」说成成功。
+#[tauri::command]
+pub async fn uninstall_dsh(app: AppHandle) -> Result<UninstallReport, String> {
+    // 与更新/引导安装同一套门禁：安全模式期间状态机归安全实例所有；
+    // 有别的任务在跑（更新、引导安装）时也不该同时卸载。
+    if crate::safe::is_active(&app) {
+        return Err(i18n::t("err_safe_active_op").to_string());
+    }
+    let state = app.state::<AppState>();
+    if state.updating.swap(true, Ordering::SeqCst) {
+        return Err(i18n::t("err_task_busy").to_string());
+    }
+    // 从这一刻起，后面任何一条早退路径都必须把 updating 复位（否则「正在更新」永久卡住）
+    let result = uninstall_dsh_inner(&app);
+    state.updating.store(false, Ordering::SeqCst);
+    result
+}
+
+fn uninstall_dsh_inner(app: &AppHandle) -> Result<UninstallReport, String> {
+    let cfg = config::load(app);
+    if let Err(e) = validate_arg_field("package_name", &cfg.package_name) {
+        return Err(e);
+    }
+    // 卸载目标 = DSH 实际所在的全局目录（更新那条路用的是同一个推导）
+    let target = npm_prefix_from_dsh_path(&cfg);
+    if target.is_none() {
+        // 两个不同的现实要分开报：dsh_path 本身无效 vs 它就在 npm 默认全局目录里
+        // （后者不需要 --prefix，走默认目录正好）。
+        if config::validate_program_file("dsh_path", &cfg.dsh_path).is_err() {
+            return Err(i18n::t("err_uninstall_nodsh").to_string());
+        }
+    }
+    let npm = match config::validate_program_file("npm_path", &cfg.npm_path) {
+        Ok(p) => p,
+        Err(_) if Path::new(&cfg.npm_path).is_file() => {
+            return Err(i18n::fmt("err_uninstall_npm", &[&cfg.npm_path]))
+        }
+        Err(e) => return Err(e),
+    };
+    let cache = npm_cache_for_use(&cfg);
+
+    stop_dsh_for_uninstall(app)?;
+    set_status(app, "updating", None);
+
+    let (ok, out) = run_npm_uninstall(&npm, &cfg.package_name, target.as_deref(), cache.as_deref())?;
+    // npm 的完整输出落盘（与更新/安装同一条纪律：日志里才有排查依据）
+    if !out.trim().is_empty() {
+        logger::append_line(&logger::desktop_log_path(app), &out);
+    }
+    if !ok {
+        emit_log(app, "update", i18n::fmt("log_uninstall_fail", &[&out]));
+        set_status(app, "idle", None);
+        return Ok(UninstallReport {
+            success: false,
+            package_name: cfg.package_name.clone(),
+            dir: target.clone().unwrap_or_default(),
+            output: out,
+            items: Vec::new(),
+        });
+    }
+
+    let mut items: Vec<UninstallItem> = Vec::new();
+    if let Some(dir) = target.as_deref() {
+        items.extend(cleanup_after_uninstall(Path::new(dir)));
+    }
+
+    // `~/.npmrc` 里那行 `prefix=`：只有「确实是我们写的」才允许动（claimed 标志）
+    let (npmrc_status, npmrc_path) = if cfg.npm_prefix_claimed {
+        match if cfg.npm_prefix_prev.trim().is_empty() {
+            // 写之前本来就没有这一行 → 删掉它，还用户一个干净的配置
+            config::apply_npm_prefix(None).map(|_| "removed")
+        } else {
+            // 写之前用户自己配过 → 原路退回（而不是删掉，那会让别的全局包「找不到」）
+            config::apply_npm_prefix(Some(cfg.npm_prefix_prev.trim())).map(|_| "restored")
+        } {
+            Ok(s) => (s.to_string(), detect::npm_userconfig_path()),
+            Err(e) => {
+                logger::append_line(&logger::desktop_log_path(app), &e);
+                ("failed".to_string(), detect::npm_userconfig_path())
+            }
+        }
+    } else {
+        // 保守路径：没有「这行是我们写的」的证据 → 一个字节都不动。
+        // 旧版本装好的机器（那时用户可能是自己 npm config set prefix 的）走的正是这条。
+        ("kept".to_string(), detect::npm_userconfig_path())
+    };
+    items.push(UninstallItem {
+        kind: "npmrc".to_string(),
+        path: npmrc_path.map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        status: npmrc_status,
+    });
+
+    // DSH 家目录：**有意保留**（会话、配置、凭据都在里面），但要在结果里明说，
+    // 否则用户会以为「卸载是不是没删干净」。
+    items.push(UninstallItem {
+        kind: "home".to_string(),
+        path: cfg.dsh_home_dir.clone(),
+        status: "kept".to_string(),
+    });
+
+    // 清掉指向已删程序的路径并把状态归位（检测结果会自然变成「未找到 DSH」）
+    let _ = config::write_config_key(app, "dsh_path", "");
+    detect::invalidate_cache();
+    set_status(app, "idle", None);
+    emit_log(app, "update", i18n::t("log_uninstall_ok").to_string());
+
+    Ok(UninstallReport {
+        success: true,
+        package_name: cfg.package_name.clone(),
+        dir: target.unwrap_or_default(),
+        output: out,
+        items,
+    })
+}
+
+/// 卸载 pnpm（卸载 DSH 之后的追加提问：用户答「是」才走这里）。
+///
+/// 与 DSH 同一条路：目标目录取 DSH 原来所在的全局目录（pnpm 是 DSH 装插件用的，
+/// 正常情况下与 DSH 在同一个 npm 全局目录里），并显式带上 `--prefix`。
+#[tauri::command]
+pub async fn uninstall_pnpm(app: AppHandle) -> Result<UninstallReport, String> {
+    if crate::safe::is_active(&app) {
+        return Err(i18n::t("err_safe_active_op").to_string());
+    }
+    let state = app.state::<AppState>();
+    if state.updating.swap(true, Ordering::SeqCst) {
+        return Err(i18n::t("err_task_busy").to_string());
+    }
+    let result = uninstall_pnpm_inner(&app);
+    state.updating.store(false, Ordering::SeqCst);
+    result
+}
+
+fn uninstall_pnpm_inner(app: &AppHandle) -> Result<UninstallReport, String> {
+    let cfg = config::load(app);
+    // DSH 已经卸载时 dsh_path 已被清空 → 回落到「npm 自己解析出的全局目录」
+    // （pnpm 当初就是装在那里的；package_name 那份同款的保守推导在这里不适用）
+    let target = npm_prefix_from_dsh_path(&cfg).or_else(|| {
+        let p = detect::effective_npm_prefix().unwrap_or_default();
+        if p.is_empty() {
+            None
+        } else {
+            Some(p)
+        }
+    });
+    let npm = match config::validate_program_file("npm_path", &cfg.npm_path) {
+        Ok(p) => p,
+        Err(_) if Path::new(&cfg.npm_path).is_file() => {
+            return Err(i18n::fmt("err_uninstall_npm", &[&cfg.npm_path]))
+        }
+        Err(e) => return Err(e),
+    };
+    let cache = npm_cache_for_use(&cfg);
+    set_status(app, "updating", None);
+    let (ok, out) = run_npm_uninstall(&npm, "pnpm", target.as_deref(), cache.as_deref())?;
+    if !out.trim().is_empty() {
+        logger::append_line(&logger::desktop_log_path(app), &out);
+    }
+    set_status(app, "idle", None);
+    if ok {
+        emit_log(app, "update", i18n::t("log_uninstall_pnpm_ok").to_string());
+    } else {
+        emit_log(app, "update", i18n::fmt("log_uninstall_pnpm_fail", &[&out]));
+    }
+    Ok(UninstallReport {
+        success: ok,
+        package_name: "pnpm".to_string(),
+        dir: target.unwrap_or_default(),
+        output: out,
+        items: Vec::new(),
+    })
 }
 
 /// 完成首次运行引导：把当前（含自动检测补全的）配置写入 %APPDATA%\com.dsh.desktop\config.json。
@@ -6061,5 +6417,88 @@ mod tests {
             assert_eq!(args.get(1).map(String::as_str), Some("-g"), "{args:?}");
             assert_eq!(args.get(0).map(String::as_str), Some("install"), "{args:?}");
         }
+    }
+
+    // ---------- 卸载收尾：只删「真空掉的」目录 ----------
+
+    /// 收尾删除的唯一原语：**只有真空目录才删**，非空一律保留。
+    ///
+    /// 这条守的是「卸载 DSH 不能顺手删掉别人的东西」：`node_modules` 里完全可能装着
+    /// 用户其它的全局包（`@types/*`、`typescript`…），`@deepseek-ai` 下也可能还有别的包。
+    #[test]
+    fn remove_dir_if_empty_only_removes_truly_empty_dirs() {
+        let base = create_private_temp_dir("uninstall-unit").expect("建临时目录");
+        // 真空目录 → 删掉
+        let empty = base.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(remove_dir_if_empty(&empty), Some("removed"));
+        assert!(!empty.exists(), "真空目录应当被删掉");
+        // 不相干的目录 → 不报结论（清单里不该出现）
+        assert_eq!(remove_dir_if_empty(&base.join("nope")), None);
+        // 非空目录 → 保留（里面哪怕只有一个空子目录也算非空）
+        let kept = base.join("kept");
+        std::fs::create_dir_all(kept.join("child")).unwrap();
+        assert_eq!(remove_dir_if_empty(&kept), Some("kept"));
+        assert!(kept.exists(), "非空目录必须留下");
+        // 文件不是目录 → 不报结论
+        let file = base.join("a-file");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(remove_dir_if_empty(&file), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 卸载收尾在两种真实布局下的行为：只回收「DSH 空出来的」那部分。
+    ///
+    /// 布局一（DSH + 别的全局包共存）：`node_modules` 与 `@deepseek-ai` 都必须留下 ——
+    /// 用户机器上其它全局包不能因为卸载 DSH 而消失。这正是真机现场
+    /// `D:\Programs\npm\node_modules\@deepseek-ai`（空）与用户其它包共存的判断依据。
+    /// 布局二（DSH 是唯一的东西）：两个目录都该被回收，即用户报的「残留空目录」被清掉。
+    #[test]
+    fn cleanup_after_uninstall_reclaims_only_what_dsh_left_behind() {
+        let base = create_private_temp_dir("uninstall-clean").expect("建临时目录");
+
+        // ---- 布局一：还有别的全局包 ----
+        let with_others = base.join("with-others");
+        std::fs::create_dir_all(with_others.join("node_modules").join("@deepseek-ai")).unwrap();
+        std::fs::create_dir_all(with_others.join("node_modules").join("typescript")).unwrap();
+        std::fs::write(with_others.join("dsh.cmd"), b"leftover").unwrap();
+        let items = cleanup_after_uninstall(&with_others);
+        assert!(
+            with_others.join("node_modules").is_dir(),
+            "还有别的全局包时，node_modules 必须保留"
+        );
+        assert!(
+            with_others.join("node_modules").join("@deepseek-ai").is_dir(),
+            "scope 目录里还有别的包时，它必须保留（空目录才回收）"
+        );
+        assert!(!with_others.join("dsh.cmd").exists(), "漏下的启动脚本应当被删掉");
+        let kinds: Vec<(String, String)> = items
+            .iter()
+            .map(|i| (i.kind.clone(), i.status.clone()))
+            .collect();
+        assert!(
+            items.iter().any(|i| i.kind == "scope" && i.status == "kept"),
+            "被保留的 scope 目录要在清单里如实出现：{kinds:?}"
+        );
+
+        // ---- 布局二：DSH 是唯一的东西（真机现场的收尾目标）----
+        let only_dsh = base.join("only-dsh");
+        std::fs::create_dir_all(only_dsh.join("node_modules").join("@deepseek-ai")).unwrap();
+        for name in DSH_SHIM_NAMES {
+            std::fs::write(only_dsh.join(name), b"script").unwrap();
+        }
+        let items2 = cleanup_after_uninstall(&only_dsh);
+        assert!(
+            !only_dsh.join("node_modules").exists(),
+            "空掉的 node_modules 应当被回收"
+        );
+        for name in DSH_SHIM_NAMES {
+            assert!(!only_dsh.join(name).exists(), "{name} 应当被删掉");
+        }
+        assert!(
+            items2.iter().any(|i| i.kind == "node_modules" && i.status == "removed"),
+            "回收结果要在清单里如实出现"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

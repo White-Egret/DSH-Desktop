@@ -88,6 +88,23 @@ pub struct Config {
     /// 且只在日常模式生效 —— 安全模式强制固定显示，因为安全模式的退出按钮与
     /// 琥珀色徽标就长在工具栏上，把它藏起来等于把用户困在安全模式里。
     pub toolbar_mode: String,
+    /// 我们把「DSH 的安装位置」写进 npm 用户配置（`~/.npmrc` 的 `prefix=`）**之前**，
+    /// npm 原来解析出的全局目录；空串 = 写的时候配置里本来就没有这一行。
+    ///
+    /// 为什么必须记下来：那一行是我们替用户写的，卸载时就该原路退回 —— 直接删掉会把
+    /// 「用户本来自己配过 prefix」的机器悄悄改回 npm 默认目录，那台机器上**其它**全局包
+    /// 会因此集体「找不到」。
+    ///
+    /// 与 `pnpm_registry_prev` 同一套处理：只走 write_config_key 单键读改写，
+    /// 前端 save_config 时原样带回。
+    pub npm_prefix_prev: String,
+    /// 「`~/.npmrc` 里现在那一行 `prefix=` 是不是本程序写的」（`npm_prefix_prev` 为空时
+    /// 必须有它，才能区分两种现实：本来就没有这一行 vs 我们没记下原值）。
+    ///
+    /// 两者的卸载动作不同 —— 前者该删掉那行，后者**绝不能动**（见 process.rs::uninstall_dsh）。
+    /// 旧版本装好的机器两个字段都是默认值（false + 空串），于是卸载时走「不动那一行」
+    /// 这条保守路径，正是我们要的：那时用户机器上的 prefix 可能是他自己 `npm config set` 的。
+    pub npm_prefix_claimed: bool,
 }
 
 impl Default for Config {
@@ -125,6 +142,10 @@ impl Default for Config {
             safe_verify_secs: 80,
             // 工具栏默认固定显示（= 历史行为）：升级后不会突然变成"工具栏不见了"
             toolbar_mode: "pinned".to_string(),
+            // 空 = 没有需要恢复的 npm 全局目录（还没写过 prefix，或写的时候本来就没有）
+            npm_prefix_prev: String::new(),
+            // false = 没写过（旧版本装好的机器就是这两个默认值 → 卸载时不动那一行）
+            npm_prefix_claimed: false,
         }
     }
 }
@@ -863,13 +884,39 @@ pub fn edit_npmrc_prefix(content: &str, desired: Option<&str>) -> String {
 /// 「npm 全局目录」落盘的几种结局（上层据此说清「到底动没动」）。
 /// 与 `NpmCacheOutcome` 同形，理由相同：`Unchanged(None)` 与 `Unchanged(Some(_))`
 /// 是两种不同的现实（「本来就没设置」vs「本来就是它」），提示语不该混为一谈。
+///
+/// **每个结局都带 `previous`**：写之前 npm 原来解析出的值。卸载时要靠它原路退回
+/// —— 那行 `prefix=` 是我们替用户写的，直接删掉会把「用户本来自己配过 prefix」的
+/// 机器悄悄改回默认目录，那些机器上**其它**全局包会集体「找不到」。
 pub enum NpmPrefixOutcome {
     /// 配置里本来就是它（或本来就没设置、用户也没要求设置）——一个字节都没动
-    Unchanged(Option<String>),
+    Unchanged {
+        previous: Option<String>,
+    },
     /// 已写入 `prefix=<目录>`
-    Written(String),
-    /// 已删掉 `prefix` 行（回到 npm 的默认全局目录），带上被删掉的原值
-    Removed(String),
+    Written {
+        previous: Option<String>,
+    },
+    /// 已删掉 `prefix` 行（回到 npm 的默认全局目录）
+    Removed {
+        previous: Option<String>,
+    },
+}
+
+impl NpmPrefixOutcome {
+    /// 写之前 npm 原来解析出的全局目录（没有 = 配置里本来没有这一行）。
+    pub fn previous(&self) -> Option<&str> {
+        match self {
+            NpmPrefixOutcome::Unchanged { previous }
+            | NpmPrefixOutcome::Written { previous }
+            | NpmPrefixOutcome::Removed { previous } => previous.as_deref(),
+        }
+    }
+
+    /// 本次是否真的改了 npm 的配置（上层据此决定要不要提示）。
+    pub fn changed(&self) -> bool {
+        !matches!(self, NpmPrefixOutcome::Unchanged { .. })
+    }
 }
 
 /// 把「npm 全局目录」应用到 npm 自己的用户配置文件（`~/.npmrc`）。
@@ -888,7 +935,7 @@ pub fn apply_npm_prefix(desired: Option<&str>) -> Result<NpmPrefixOutcome, Strin
     let exists = path.is_file();
     // 文件不存在 + 也没有要写的位置：什么都不做，连文件都不建
     if !exists && desired.is_none() {
-        return Ok(NpmPrefixOutcome::Unchanged(None));
+        return Ok(NpmPrefixOutcome::Unchanged { previous: None });
     }
     let content = if exists {
         // 读不成 UTF-8 就如实报错并**什么都不改**：宁可不生效，也不要把用户的
@@ -907,14 +954,14 @@ pub fn apply_npm_prefix(desired: Option<&str>) -> Result<NpmPrefixOutcome, Strin
         }
         String::new()
     };
-    let current = npmrc_prefix_value(&content);
-    let unchanged = match (current.as_deref(), desired) {
+    let previous = npmrc_prefix_value(&content);
+    let unchanged = match (previous.as_deref(), desired) {
         (Some(c), Some(d)) => same_dir(c, d),
         (None, None) => true,
         _ => false,
     };
     if unchanged {
-        return Ok(NpmPrefixOutcome::Unchanged(current));
+        return Ok(NpmPrefixOutcome::Unchanged { previous });
     }
     let next = edit_npmrc_prefix(&content, desired);
     write_atomic(&path, next.as_bytes()).map_err(|e| {
@@ -924,9 +971,40 @@ pub fn apply_npm_prefix(desired: Option<&str>) -> Result<NpmPrefixOutcome, Strin
         )
     })?;
     Ok(match desired {
-        Some(d) => NpmPrefixOutcome::Written(d.to_string()),
-        None => NpmPrefixOutcome::Removed(current.unwrap_or_default()),
+        Some(_) => NpmPrefixOutcome::Written { previous },
+        None => NpmPrefixOutcome::Removed { previous },
     })
+}
+
+/// 记下「写 `~/.npmrc` 的 `prefix=` 之前 npm 原来解析出的全局目录」，供卸载时原路退回
+/// （`~/.npmrc` 与 config.json 不是一回事：前者是 npm 自己的配置，后者是我们的记忆，
+/// 恢复时需要的那条信息只能存在我们自己这边）。传 None = 写的时候本来就没有这一行。
+///
+/// 同时把 `npm_prefix_claimed` 置 true：那是「这一行确实是本程序写的」的标志，
+/// 只有 claimed = true 的机器，卸载时才允许碰 `~/.npmrc` 里那一行。
+pub fn set_npm_prefix_prev(app: &AppHandle, prev: Option<&str>) -> Result<(), String> {
+    write_config_key(app, "npm_prefix_prev", prev.unwrap_or(""))?;
+    write_config_bool(app, "npm_prefix_claimed", true)
+}
+
+/// 只改 config.json 里的一个**布尔**键（读取-修改-写回，同 `write_config_key`）。
+///
+/// 单独一个函数而不是复用字符串版：`write_config_key` 把值写成 JSON 字符串，
+/// 而布尔字段写成 `"true"` 之后 `serde` 反序列化会失败 —— 那样整个 config.json
+/// 加载失败、所有设置回落到默认值（比这个开关本身重要得多的事故）。
+fn write_config_bool(app: &AppHandle, key: &str, value: bool) -> Result<(), String> {
+    let dir = config_dir(app);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| i18n::fmt("err_cfg_dir", &[&dir.display().to_string(), &e.to_string()]))?;
+    let path = config_path(app);
+    let mut root = serde_json::to_value(load(app)).unwrap_or_default();
+    if !root.is_object() {
+        root = serde_json::to_value(Config::default()).unwrap_or_default();
+    }
+    root[key] = serde_json::Value::Bool(value);
+    let text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    write_atomic(&path, text.as_bytes())
+        .map_err(|e| i18n::fmt("err_cfg_write", &[&path.display().to_string(), &e.to_string()]))
 }
 
 /// 外观值归一化：只接受 light / dark / system，其余（含手改的非法值）回落 system。
@@ -1377,7 +1455,9 @@ pub fn last_url(app: &AppHandle) -> String {
 
 /// 只改 config.json 里的一个字符串键（读取-修改-写回）。
 /// 写盘仍然走 L-6 的原子替换（`write_atomic`），**绝不回落**成直接覆盖。
-fn write_config_key(app: &AppHandle, key: &str, value: &str) -> Result<(), String> {
+///
+/// 对 process.rs 可见（pub(crate)）：卸载 DSH 之后要把指向已删程序的 `dsh_path` 清空。
+pub(crate) fn write_config_key(app: &AppHandle, key: &str, value: &str) -> Result<(), String> {
     let dir = config_dir(app);
     std::fs::create_dir_all(&dir)
         .map_err(|e| i18n::fmt("err_cfg_dir", &[&dir.display().to_string(), &e.to_string()]))?;

@@ -25,7 +25,7 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 - Actual-address detection: if DSH prints its real listen URL (e.g. `dsh web: http://127.0.0.1:3080`), the app loads that address preferentially
 - **next-channel browser-session token**: DSH `next` (0.1.2+) protects the Web page with a per-process launch token — it prints e.g. `dsh web: http://127.0.0.1:3080?token=...`, and a bare URL gets `401 authentication required`. The launcher keeps the full printed address (including `?token=...`) when embedding the page; the first authenticated load makes DSH mint a signed cookie (HttpOnly, 30 days by default) that keeps refreshes and subsequent launches working. The last loaded page address is remembered too (`last_url` in config.json, shape/port-validated before every use), so "connect to existing service" and page re-open also carry the token
 - File logging: Desktop log at `%APPDATA%\com.dsh.desktop\desktop.log`, DSH output log at `%USERPROFILE%\.dsh\logs\dsh.log`; UI buttons to open the log folder and copy errors/log text
-- Refresh Page: reloads only the embedded DSH page without restarting the backend service (`F5` / `Ctrl+R`)
+- Page refresh: reloads only the embedded page without restarting the backend service — **right-click inside the DSH page → Reload**; there is no toolbar button for it any more (the `F5` / `Ctrl+R` shortcuts still work while the launcher UI has focus)
 - One-click update of DSH via npm, live output streaming; choose the `latest` **or** `next` channel in the confirmation dialog (upgrade *and* downgrade are offered regardless of what is installed), with a backup reminder for the DSH home dir
 - **Safe Mode**: start DSH from a separate, pristine home (`%USERPROFILE%\.dsh-safe`) on port 3081 to inspect and repair the daily environment; borrows only the `.credentials.yaml` file (its content never leaves the Rust side), optionally archives the previous safe home instead of deleting it ("reset baseline on entry", off by default), and verifies the repair after switching back — see [Safe Mode](#safe-mode)
 - Version check against both npm dist-tags (`npm view <pkg> dist-tags`); the toolbar flags "update available" when your install trails the newest channel
@@ -462,13 +462,15 @@ Click **⤓ 更新 DSH (Update)** → the dialog lists **both channels with thei
 
 ## Uninstalling DSH
 
-Plain npm, no extra flags — including when you installed DSH into a folder of your own choosing during the wizard:
+**Easiest: Preferences → the "Maintenance" block at the very bottom → "Uninstall DSH…".** The confirmation dialog spells out what will be removed and what will be kept, and the finished run lists the outcome item by item. It does the two things plain npm cannot: it reclaims the **emptied** `@deepseek-ai` scope folder (npm removes the package but leaves that folder behind) and it **puts back** the `prefix=` line this app wrote into `~/.npmrc` (deleting it if there was none before, restoring your original value if there was one). Afterwards it asks whether to also uninstall the pnpm used for DSH plugins; if you keep pnpm, the final page shows the command to remove it later.
+
+You can also just use plain npm, no extra flags — including when you installed DSH into a folder of your own choosing during the wizard:
 
 ```
 npm uninstall -g @deepseek-ai/dsh
 ```
 
-This works because the wizard records the chosen folder as npm's global directory (the `prefix=` line in your user-level `~/.npmrc`, see [Choosing where DSH gets installed](#choosing-where-dsh-gets-installed)), so npm looks in the same place DSH was installed into.
+This works because the wizard records the chosen folder as npm's global directory (the `prefix=` line in your user-level `~/.npmrc`, see [Choosing where DSH gets installed](#choosing-where-dsh-gets-installed)), so npm looks in the same place DSH was installed into. Note that this route does **not** reclaim the emptied `@deepseek-ai` folder or put the `prefix=` line back (npm has no idea who wrote it) — use the in-app entry point if you want the leftovers handled too.
 
 If you installed DSH **before** that behaviour existed, npm's answer and DSH's actual folder may still differ. Either point npm at the right folder once and uninstall:
 
@@ -486,7 +488,7 @@ npm uninstall -g --prefix "D:\your\chosen\npm" @deepseek-ai/dsh
 
 **Updating this app and then clicking "Update DSH" once also records it for you** (the update writes the directory `dsh.cmd` actually lives in into `~/.npmrc`), after which the plain command works.
 
-What stays behind after uninstalling DSH is deliberate: the `prefix=` line in `~/.npmrc` (delete it with `npm config delete prefix` if you want global installs back in npm's default folder — note that any *other* globally installed package would then appear "missing" until you reinstall it there), the DSH home dir (`%USERPROFILE%\.dsh`, holding your sessions and credentials), and DSH Desktop itself (remove it from *Apps & features*).
+What deliberately stays behind: the **DSH home dir** (`%USERPROFILE%\.dsh`, holding your sessions and credentials), your **DSH plugin data**, and **DSH Desktop itself** (remove it separately from *Apps & features*). As for the `prefix=` line in `~/.npmrc`: one this app wrote is put back the way it was; one you wrote yourself with `npm config set prefix` is left **untouched** by the in-app uninstall (deleting it would make your other global packages "disappear"), and `npm config delete prefix` returns npm to its default global folder — note that packages installed in the custom folder would then need reinstalling there.
 
 ## Safe Mode
 

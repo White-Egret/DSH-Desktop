@@ -5004,9 +5004,17 @@ fn sync_npm_prefix(app: &AppHandle, dir: &str, pkg: &str) -> Option<(String, boo
             // 写成功才记原值：失败时 config.json 不该出现一个「其实没生效」的记忆。
             // 这里失败也不打断安装 —— 只影响将来卸载时能否原路退回（那就走保守路径）。
             let _ = config::set_npm_prefix_prev(app, outcome.previous());
-            Some((i18n::fmt("setup_prefix_npmrc_written", &[dir, pkg]), false))
+            // `&dir` / `&pkg` 里的**第二层 `&` 是必须的**：参数表会被统一成
+            // `&dyn std::fmt::Display`，而 `dir` / `pkg` 本身是 `&str` —— 裸写 `dir`
+            // 等于让 `str` 转 trait object（unsized，编译不过，CI 已经在这上面挂过两次）。
+            // 凡是进 `i18n::fmt` 的参数，一律保证是 `&&…` 形态。
+            let msg = i18n::fmt("setup_prefix_npmrc_written", &[&dir, &pkg]);
+            Some((msg, false))
         }
-        Err(e) => Some((i18n::fmt("setup_prefix_npmrc_fail", &[dir, &e, pkg]), true)),
+        Err(e) => {
+            let msg = i18n::fmt("setup_prefix_npmrc_fail", &[&dir, &e, &pkg]);
+            Some((msg, true))
+        }
     }
 }
 

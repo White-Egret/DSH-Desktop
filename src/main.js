@@ -126,7 +126,7 @@ function refreshPage() {
   // 这里先按 1.6 秒兜底，避免长时间无响应。
   refreshTimer = setTimeout(() => {
     ov.classList.add('hidden');
-    if (!anyModalOpen()) invoke('set_dsh_webview_visible', { visible: true }).catch(() => {});
+    showDshWebviewUnlessModal();
   }, 1600);
 
   invoke('refresh_dsh_page')
@@ -136,9 +136,19 @@ function refreshPage() {
     .catch((err) => {
       clearTimeout(refreshTimer);
       ov.classList.add('hidden');
-      if (!anyModalOpen()) invoke('set_dsh_webview_visible', { visible: true }).catch(() => {});
+      showDshWebviewUnlessModal();
       toast(String(err), true);
     });
+}
+
+/// 强制要求「显示内嵌页」（刷新流程用），但弹窗还开着时保持隐藏。
+/// 顺手把记下的意图同步成实际发出的值 —— 否则去重逻辑会以为后端还是旧状态。
+function showDshWebviewUnlessModal() {
+  if (anyModalOpen()) return;
+  webviewVisibleSent = true;
+  invoke('set_dsh_webview_visible', { visible: true }).catch(() => {
+    webviewVisibleSent = null;
+  });
 }
 
 // F5 / Ctrl+R 快捷键：焦点在 Launcher 界面时触发刷新；
@@ -166,9 +176,32 @@ function anyModalOpen() {
   return MODALS.some((m) => !$(m).classList.contains('hidden'));
 }
 
+/// 已经发给后端的内嵌页显隐意图（null = 还没发过）。
+///
+/// 为什么要记：弹窗（DOM，同步）与内嵌 webview（原生子窗口，**异步 IPC**）是两条独立通道。
+/// 一个「打开 A 再打开 B」的动作会连续触发 open→close→open，连发三次意图；只要有一次
+/// 顺序颠倒或消息丢失，最终生效的就可能是「显示内嵌页」—— 于是弹窗被原生页盖住，
+/// 用户看到的是「工具栏变暗、什么都点不动、日志里一条错都没有」。
+/// 记住上次发过的值，只在**真的变化**时才发，这类抖动窗口就从根上少了一大半。
+let webviewVisibleSent = null;
+
 function syncWebviewVisibility() {
+  const want = !anyModalOpen();
+  if (want === webviewVisibleSent) return; // 与后端已达成的状态一致：不必再发
+  webviewVisibleSent = want;
   // 无 webview 时 Rust 端为 no-op，可安全调用
-  invoke('set_dsh_webview_visible', { visible: !anyModalOpen() }).catch(() => {});
+  invoke('set_dsh_webview_visible', { visible: want }).catch(() => {
+    // 发送失败就把记录清掉，让下一次同步重新尝试（否则会一直以为「已经隐藏了」）
+    webviewVisibleSent = null;
+  });
+}
+
+/// 页面重新就绪 / 状态回到 running 时调用：把「当前是否该显示内嵌页」重新申明一次。
+/// 与 syncWebviewVisibility 的区别是**强制重发**——那时内嵌 webview 可能刚被重建
+/// （新建的页面默认可见），后端记录的意图与它在 DOM 上的现实未必一致。
+function resyncWebviewVisibility() {
+  webviewVisibleSent = null;
+  syncWebviewVisibility();
 }
 
 function showModal(id) {
@@ -304,10 +337,11 @@ function onStatus(p) {
   // 内嵌 DSH 页面是「就绪后才创建」的原生 webview（盖在本页面之上）：
   // 打开模态框那一刻调用的 set_dsh_webview_visible(false) 对还不存在的 webview 是空操作，
   // 于是弹窗会被刚创建的页面盖住（安全模式引导横幅正好在就绪前后显示，最易撞上；
-  // 日常模式在启动中打开设置/日志时同理）。就绪时机补一次同步，并留一次延迟兜底。
+  // 日常模式在启动中打开设置/日志时同理）。就绪时机**强制重发**一次意图（resync：
+  // 页面可能刚重建、后端记录与现实未必一致），并留一次延迟兜底。
   if (p.status === 'running' || p.status === 'running-external') {
-    syncWebviewVisibility();
-    setTimeout(syncWebviewVisibility, 400);
+    resyncWebviewVisibility();
+    setTimeout(resyncWebviewVisibility, 400);
   }
 
   const line = $('stage-line');
@@ -1600,6 +1634,9 @@ function renderUninstallItems(list, rep, removedPkg) {
 
 function openUninstallConfirm() {
   if (!config) return;
+  // 诊断留痕：这条路径上「点了没反应」最难查（界面无变化、Rust 侧也没收到命令），
+  // 日志里有这一行就能立刻分清是「弹窗没开」还是「开了但被内嵌页盖住」。
+  appendLog('launcher', '[uninstall] 打开卸载确认框（目标目录：' + (dshInstallDir() || 'npm 默认目录') + '）');
   // 从首选项进入：先关掉首选项，视觉上「一件事一个弹窗」
   hideModal('settings-modal');
   hideModal('uninstall-pnpm-modal');
@@ -1616,6 +1653,9 @@ function openUninstallConfirm() {
 async function doUninstallDsh() {
   if (uninstalling) return;
   uninstalling = true;
+  // 诊断留痕（见 openUninstallConfirm 的说明）：从这里开始才有后端动作，
+  // 日志里有没有这一行，就能区分「用户没点到确认」与「后端没干活」。
+  appendLog('launcher', '[uninstall] 用户确认卸载，开始执行');
   $('btn-uninstall-confirm').disabled = true;
   $('btn-uninstall-cancel').disabled = true;
   $('uninstall-fail-hint').classList.add('hidden');

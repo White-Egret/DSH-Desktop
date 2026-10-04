@@ -1266,14 +1266,31 @@ pub fn set_dsh_webview_visible(app: AppHandle, visible: bool) -> Result<(), Stri
     app.state::<AppState>()
         .dsh_webview_visible
         .store(visible, Ordering::SeqCst);
-    if let Some(wv) = app.get_webview("dsh") {
-        let _ = if visible { wv.show() } else { wv.hide() };
-        // 重新显示（= 弹窗关闭、内嵌页盖回来）后，主 webview 里曾带弹窗遮罩的旧帧
-        // 可能留在工具栏那条的缓冲中（发暗，点一下才恢复）——延迟补一次强制重绘。
-        // hide 不刷：遮罩期间主 webview 全露、本来就会正常合成。
-        if visible {
-            force_main_webview_repaint(&app);
+    match app.get_webview("dsh") {
+        Some(wv) => {
+            // show/hide 的结果**不能吞**：Windows 上原生子窗口的显隐失败（例如句柄已失效）
+            // 会让「弹窗被内嵌页盖住」表现为「点了没反应、日志里一条错都没有」——
+            // 排查时唯一能分辨的就是这一行。
+            if let Err(e) = if visible { wv.show() } else { wv.hide() } {
+                emit_log(
+                    &app,
+                    "launcher",
+                    i18n::fmt(
+                        "log_webview_toggle_fail",
+                        &[&if visible { "show" } else { "hide" }, &e.to_string()],
+                    ),
+                );
+            }
+            // 重新显示（= 弹窗关闭、内嵌页盖回来）后，主 webview 里曾带弹窗遮罩的旧帧
+            // 可能留在工具栏那条的缓冲中（发暗，点一下才恢复）——延迟补一次强制重绘。
+            // hide 不刷：遮罩期间主 webview 全露、本来就会正常合成。
+            if visible {
+                force_main_webview_repaint(&app);
+            }
         }
+        // 还没有内嵌页：意图已记在 AppState，等页面创建时由
+        // sync_dsh_webview_visibility 补应用（这条路径正常，不是错误，故不写日志）
+        None => {}
     }
     Ok(())
 }

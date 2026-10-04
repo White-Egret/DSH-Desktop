@@ -67,6 +67,9 @@ pub fn t(key: &str) -> &'static str {
 
         // ---------- 内嵌页面 / 刷新 ----------
         "log_no_main_window" => if en { "[launcher] Main window not found; cannot embed the DSH page." } else { "[launcher] 找不到主窗口，无法内嵌 DSH 页面。" },
+        // 内嵌页显隐失败：这是「弹窗被原生页盖住、看起来点了没反应」唯一能留下的证据，
+        // 所以不能像原来那样把 show/hide 的错误 `let _ =` 吞掉。
+        "log_webview_toggle_fail" => if en { "[launcher] Failed to {0} the embedded DSH page: {1} — a dialog opened at that moment may be covered by it." } else { "[launcher] 未能{0}内嵌的 DSH 页面：{1} —— 此刻打开的弹窗可能被它盖住。" },
         "log_embed_fail" => if en { "[launcher] Failed to embed the DSH page: {0}" } else { "[launcher] 内嵌 DSH 页面失败: {0}" },
         "log_load_fail" => if en { "[launcher] Failed to navigate the embedded DSH page: {0}" } else { "[launcher] 内嵌 DSH 页面跳转失败: {0}" },
         "log_invalid_url" => if en { "[launcher] Invalid load URL: {0}" } else { "[launcher] 非法的加载地址: {0}" },

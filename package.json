@@ -7,6 +7,7 @@
   "scripts": {
     "tauri": "tauri",
     "check:i18n-args": "node scripts/check-i18n-args.js",
+    "check:spawn-recursion": "node scripts/check-spawn-recursion.js",
     "verify:uninstall": "node scripts/verify-npm-uninstall.js"
   },
   "devDependencies": {

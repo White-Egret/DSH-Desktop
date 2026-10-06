@@ -53,6 +53,8 @@ pub fn invalidate_cache() {
     SCANNED.store(false, Ordering::SeqCst);
     // 安装器同样会改写注册表里的 PATH，注册表快照必须一起丢弃，否则又会拿到旧的。
     invalidate_reg_path_cache();
+    // 用户改 `.npmrc`（prefix）之后也要重新问一次 npm
+    invalidate_npm_prefix_memo();
 }
 
 fn scan() -> EnvPaths {
@@ -298,14 +300,59 @@ fn npm_global_bin_dirs() -> Vec<PathBuf> {
 
 /// 给 `npm_global_bin_dirs` 用的 npm prefix：**优先不要走 `default_npm_prefix` 的回落**。
 ///
-/// `default_npm_prefix()` 在问不到 npm 时会回落到 `%APPDATA%\npm`；而这里紧接着就会
-/// 把 `%APPDATA%\npm` 自己加进候选，回落值只会造成一次重复。所以只在**真的问到了 npm
-/// 的回答**时返回它，问不到就返回空串（让调用方走它自己的默认目录分支）。
+/// 记住「问过 npm 之后拿到的全局目录」。
+///
+/// 为什么必须记住 —— 这是一次**真机崩溃**的教训（0xc00000fd 栈溢出，程序双击后没有窗口）：
+///
+/// ```text
+/// npm_global_bin_dirs()            ← 想拿 npm 的 prefix 作为候选目录
+///   → npm_prefix_for_global_bins() → find_npm_cmd()
+///     → 启动 npm（run_capture_timeout_in）
+///       → child_path_for()          ← 给子进程拼 PATH
+///         → npm_global_bin_dirs()   ← 回到起点
+///           → …                      ← 无限递归，栈打穿
+/// ```
+///
+/// `child_path_for` 是「**启动任何子进程**都要走」的函数，而它内部要 `npm_global_bin_dirs`；
+/// 于是任何一次「为了问 npm 而启动 npm」都会绕回自己。加上这层记忆之后：
+///   - 第一次问（由 find_dsh_cmd / find_pnpm_cmd → npm_global_bin_dirs 发起，**不在 spawn 链上**）
+///     真去跑一次 npm 并记住结果；
+///   - 之后（尤其是 spawn 链里的 `child_path_for`）直接读记住的值，不再启动任何进程 → 环断掉。
+///
+/// 记忆只在本进程内、不落盘：它只是「这一次运行里 npm 说它装在哪」，用户改完 `.npmrc` 后
+/// 由 `invalidate_cache()` 清掉（PATH 变更同源），下一次扫描重新问。
+static NPM_PREFIX_MEMO: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+/// 正在问 npm 的标记（见下：重入必须立刻返回，否则又会绕回 spawn 链）。
+static NPM_PREFIX_RESOLVING: AtomicBool = AtomicBool::new(false);
+
+fn npm_prefix_memo_slot() -> &'static Mutex<Option<String>> {
+    NPM_PREFIX_MEMO.get_or_init(|| Mutex::new(None))
+}
+
 fn npm_prefix_for_global_bins() -> String {
-    match find_npm_cmd() {
+    // ① 已问过就直接返回（空串也照样记住：问不到 npm 时不必每次都重试一遍）
+    if let Some(v) = npm_prefix_memo_slot().lock().unwrap().clone() {
+        return v;
+    }
+    // ② 正在问（= 我们已经在这个函数里面，正通过 spawn 链绕回来）→ 立刻返回空串。
+    //    这一道保险不依赖「谁先调用」的顺序：即便将来 `child_path_for` 又重新用上
+    //    `npm_global_bin_dirs`，也只会少一条候选目录，不会再把栈打穿。
+    if NPM_PREFIX_RESOLVING.swap(true, Ordering::SeqCst) {
+        return String::new();
+    }
+    let prefix = match find_npm_cmd() {
+        // 只有**确实问到 npm 的回答**才用；问不到就返回空串，让调用方走自己的默认分支
         Some(npm) => npm_reported_prefix(&npm).unwrap_or_default(),
         None => String::new(),
-    }
+    };
+    *npm_prefix_memo_slot().lock().unwrap() = Some(prefix.clone());
+    NPM_PREFIX_RESOLVING.store(false, Ordering::SeqCst);
+    prefix
+}
+
+/// 丢掉「问过 npm 的全局目录」这份记忆（PATH / `.npmrc` 变更后由 `invalidate_cache` 调用）。
+fn invalidate_npm_prefix_memo() {
+    *npm_prefix_memo_slot().lock().unwrap() = None;
 }
 
 /// 在**指定目录**里找 dsh 启动脚本（dsh.cmd / dsh.exe / dsh.bat）。
@@ -1281,6 +1328,15 @@ pub fn refresh_process_path() -> usize {
 /// 为 npm / dsh 等子进程组装 PATH：把 node、npm、npm 全局 bin、dsh 所在目录放到最前面，
 /// 再接本进程 PATH 与注册表 PATH（去重）。即使本进程 PATH 还是旧快照，
 /// 子进程里的 `node`、npm 生命周期脚本也一定能被解析到。
+///
+/// ⚠ 这里有两条**不能破的纪律**（都是 0xc00000fd 栈溢出的教训，见 npm_prefix_for_global_bins 的长注释）：
+///   1. **不调 `npm_global_bin_dirs()`** —— 它现在会为了拿 npm 的 prefix 而启动 npm，而本函数
+///      正是「启动任何子进程」都要走的路径，一调就成环（npm 启 npm 启 npm …）。
+///      它提供的 `%APPDATA%\npm` 由下面的 `appdata_npm_dir()` 直接补上；
+///      「自定义 prefix」不需要在这里出现 —— 子进程要用的 node / npm 都在别的目录。
+///   2. **不用 `detect_all(false)`** —— 那会在**首次扫描**（`scan()` 持锁期间）自锁：
+///      首次扫描里可能 spawn 子进程 → child_path_for → detect_all → 同一个锁 → 死锁。
+///      用 `try_peek_cached()`：扫过一次就有结果可用，扫描进行中则安全跳过（少几条候选而已）。
 pub fn child_path_for(exes: &[&str]) -> std::ffi::OsString {
     let mut dirs: Vec<PathBuf> = Vec::new();
     for e in exes {
@@ -1290,12 +1346,15 @@ pub fn child_path_for(exes: &[&str]) -> std::ffi::OsString {
             }
         }
     }
-    dirs.extend(npm_global_bin_dirs());
-    let cached = detect_all(false);
-    for p in [&cached.node, &cached.npm, &cached.dsh, &cached.pnpm] {
-        if let Some(p) = p {
-            if let Some(d) = p.parent() {
-                dirs.push(d.to_path_buf());
+    if let Some(appdata) = appdata_npm_dir() {
+        dirs.push(appdata);
+    }
+    if let Some(cached) = try_peek_cached() {
+        for p in [&cached.node, &cached.npm, &cached.dsh, &cached.pnpm] {
+            if let Some(p) = p {
+                if let Some(d) = p.parent() {
+                    dirs.push(d.to_path_buf());
+                }
             }
         }
     }
@@ -1304,6 +1363,14 @@ pub fn child_path_for(exes: &[&str]) -> std::ffi::OsString {
     let dirs = dedupe_dirs(dirs);
     std::env::join_paths(&dirs)
         .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
+}
+
+/// 已有的检测结果（**不触发扫描、加锁失败也不等**）。
+/// 与 `detect_all(false)` 的区别：后者在首次调用时会**持锁扫描**，而本函数只「看一眼」。
+/// 用途是那些可能在扫描过程中被调到的函数（如 `child_path_for`）——它们拿不到旧结果没关系，
+/// 扫描完成后自然就拿得到了。
+fn try_peek_cached() -> Option<Arc<EnvPaths>> {
+    cache_slot().try_lock().ok().map(|g| g.clone())
 }
 
 // ---------- 把「自定义 DSH 安装位置」写进**用户** PATH ----------

@@ -60,6 +60,10 @@ pub fn run(launched_by_autostart: bool) {
             // 显式注入、覆盖继承值），写/删 HKCU\Environment + 读回现值
             process::apply_dsh_home_env,
             process::dsh_home_env_info,
+            // 首选项「npm 全局目录」：读状态（零风险）+ 点按钮把它加进用户 PATH。
+            // 用户自己配了 prefix 的机器上，终端里 `dsh` 能不能直接敲就看这个。
+            process::npm_path_status,
+            process::apply_npm_path,
             // 首选项「包源 registry 对齐」：读是零风险的（info 自动刷），写要用户点按钮
             process::registry_align_info,
             process::registry_align_apply,

@@ -958,6 +958,8 @@ function openSettings() {
   // 这里只剩「每次打开设置页读一次注册表现值」
   refreshHomeEnvInfo();
   refreshNpmCacheInfo();
+  // npm 全局目录 / 用户 PATH：每次打开重问一次（用户可能刚在外部改了 .npmrc 的 prefix）
+  refreshNpmPathInfo();
   // 包源 registry 那行状态（+ 两个按钮的可见性）：读是零风险的，每次打开都重问一次
   refreshRegistryInfo();
   // Python 块：每次打开都重新问一次后端（安装在后台跑，界面上的状态不能是旧的）
@@ -1017,6 +1019,39 @@ function refreshHomeMoveWarn() {
 /// 家目录比较键：与 detect::home_key（Rust 侧）同规则——去首尾空白、去尾分隔符、转小写。
 function homeKey(s) {
   return String(s == null ? '' : s).trim().replace(/[\\/]+$/, '').toLowerCase();
+}
+
+/// 首选项里「npm 全局目录 / 用户 PATH」那行状态：那个目录在哪、在不在用户 PATH 里。
+///
+/// 为什么值得单列一行：用户自己在 ~/.npmrc 里配了 `prefix=D:\...` 时，全局命令装在那里，
+/// 但 npm 的 `--prefix` **不会**把目录加进 PATH —— 终端里敲 `dsh` 就会报「不是内部或外部
+/// 命令」，只能用完整路径（2026-10-06 真机现场）。状态行读注册表真值，按钮只在点击时写。
+async function refreshNpmPathInfo() {
+  const line = $('npm-path-line');
+  const btn = $('btn-npm-path-add');
+  if (!line || !btn) return;
+  try {
+    const info = await invoke('npm_path_status');
+    const dir = (info.dir || '').trim();
+    if (!dir) {
+      line.textContent = t('npm_path_state_unknown');
+      btn.classList.add('hidden');
+      return;
+    }
+    if (!info.exists) {
+      line.textContent = t('npm_path_state_missing_dir', dir);
+    } else if (info.in_path) {
+      line.textContent = t('npm_path_state_in_path', dir);
+    } else {
+      line.textContent = t('npm_path_state_not_in_path', dir);
+    }
+    // 按钮只在「目录存在、但不在 PATH 里」时露出 —— 其余情况点它没有意义
+    btn.classList.toggle('hidden', !(info.exists && !info.in_path));
+  } catch (_) {
+    // 读不到（注册表被策略锁定等）不显示提示：它是提示，不该挡住设置页
+    line.textContent = '';
+    btn.classList.add('hidden');
+  }
 }
 
 /// 首选项里「用户环境变量 DSH_HOME」那行小字：显示**新终端**会拿到的持久值。
@@ -2372,6 +2407,22 @@ function bindUI() {
       toast(t('toast_pkg_fail', err), true);
     }
   };
+
+  // ---- 首选项：把 npm 全局目录加进用户 PATH（终端里才能直接敲 dsh）----
+  // 与其它「点按钮才写」的入口同款：成功进日志 + toast，随后重问一次状态行
+  // —— 按钮该不该继续显示，以刚发生的事实为准（加完之后它就该消失了）。
+  $('btn-npm-path-add').onclick = async () => {
+    try {
+      const rep = await invoke('apply_npm_path');
+      appendLog('launcher', '[launcher] ' + rep.message);
+      toast(rep.message);
+      refreshNpmPathInfo();
+    } catch (err) {
+      toast(t('toast_npm_path_fail', err), true);
+      appendLog('launcher', t('toast_npm_path_fail', err));
+    }
+  };
+
 
   // ---- 首选项最底部「维护」：卸载全局 DSH 包（确认 → 执行 → 追问 pnpm → 结果页）----
   $('btn-uninstall-dsh').onclick = () => openUninstallConfirm();

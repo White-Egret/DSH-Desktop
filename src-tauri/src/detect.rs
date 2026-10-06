@@ -255,21 +255,57 @@ fn dir_keys(dirs: &[PathBuf]) -> Vec<String> {
     dirs.iter().map(|d| dir_key(d)).collect()
 }
 
-/// npm 全局 bin 目录（%APPDATA%\npm 是 npm 在 Windows 的默认 prefix）。
+/// npm 全局 bin 目录 —— 找 `dsh` / `pnpm` 这类「npm 全局装出来的」命令时用的候选目录。
+///
+/// 顺序即优先级，三条线索各管一件事：
+///   ① **npm 自己解析出的 prefix**（`npm config get prefix`）——权威答案。用户在 `~/.npmrc`
+///      里写过 `prefix=D:\...` 时，全局命令就装在那里；这个值只能问 npm 拿到。
+///      真机故障（2026-10-06 现场）：用户的 `.npmrc` 里是 `prefix=D:\Programs\npm`、`dsh.cmd`
+///      也确实在那里，但该目录**不在 PATH 里**（PATH 里只有更早的旧目录），于是
+///      `where dsh` 找不到、向导也没登记过这个目录（那是用户自己写的 .npmrc，程序从未写过
+///      它，`npm_prefix_claimed=false`）—— 程序因此报「未找到 DSH」，而 dsh 明明装好且可用。
+///      这就是把本线索排在第一位的原因：**只要 npm 认得，我们就该认得**。
+///      性能：检测结果按次缓存（detect_all），这条最多在每次扫描时多跑一次 npm。
+///   ② `%APPDATA%\npm`：Windows 上**没有配置 prefix 时**的默认全局目录。
+///      问不出 prefix 时（npm 缺失 / 超时 / 输出认不出）它是正确答案。
+///   ③ 向导登记的自定义目录（`--prefix` 装过东西的那次）与 node 自身目录。
 fn npm_global_bin_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(appdata) = env_path("APPDATA") {
-        dirs.push(appdata.join("npm"));
+    let mut push = |dirs: &mut Vec<PathBuf>, d: PathBuf| {
+        let key = dir_key(&d);
+        if !key.is_empty() && !dirs.iter().any(|x| dir_key(x) == key) {
+            dirs.push(d);
+        }
+    };
+    let npm_prefix = npm_prefix_for_global_bins();
+    if !npm_prefix.is_empty() {
+        push(&mut dirs, PathBuf::from(&npm_prefix));
     }
-    // 自定义安装位置（`--prefix`）排在这里：它比 %APPDATA% 的默认目录更"新"，
-    // 而且用户刚刚明确指定过它。
-    dirs.extend(extra_bin_dirs());
+    if let Some(appdata) = env_path("APPDATA") {
+        push(&mut dirs, appdata.join("npm"));
+    }
+    // 向导登记的自定义安装位置：它可能比 npm 当前配置更新（刚装完、npm 还没反应过来）
+    for d in extra_bin_dirs() {
+        push(&mut dirs, d);
+    }
     if let Some(node) = find_node_exe() {
         if let Some(dir) = node.parent() {
-            dirs.push(dir.to_path_buf());
+            push(&mut dirs, dir.to_path_buf());
         }
     }
     dirs
+}
+
+/// 给 `npm_global_bin_dirs` 用的 npm prefix：**优先不要走 `default_npm_prefix` 的回落**。
+///
+/// `default_npm_prefix()` 在问不到 npm 时会回落到 `%APPDATA%\npm`；而这里紧接着就会
+/// 把 `%APPDATA%\npm` 自己加进候选，回落值只会造成一次重复。所以只在**真的问到了 npm
+/// 的回答**时返回它，问不到就返回空串（让调用方走它自己的默认目录分支）。
+fn npm_prefix_for_global_bins() -> String {
+    match find_npm_cmd() {
+        Some(npm) => npm_reported_prefix(&npm).unwrap_or_default(),
+        None => String::new(),
+    }
 }
 
 /// 在**指定目录**里找 dsh 启动脚本（dsh.cmd / dsh.exe / dsh.bat）。
@@ -1284,6 +1320,23 @@ pub fn child_path_for(exes: &[&str]) -> std::ffi::OsString {
 /// 读取用户 PATH 的**原始值**（未展开 `%VAR%`；REG_SZ 与 REG_EXPAND_SZ 都能读到）。
 pub fn user_path_raw() -> Option<String> {
     registry_path_raw(USER_PATH_KEY)
+}
+
+/// 用户 PATH 里是不是**已经有**这个目录（注册表真值，展开 `%VAR%`、忽略大小写与尾分隔符）。
+///
+/// 实现上直接复用 [`user_path_with_dir`] 的判定内核：它「已经在里面」时返回 `None` 且一个
+/// 字节都不写，所以「返回 None」就是「已存在」。**刻意不另写一套字符串比较** —— 两份
+/// 比较规则迟早会分叉，那时就会出现「界面说不在、点了按钮又说已存在」这种自相矛盾。
+/// PATH 读不到（注册表异常）时返回 false：让用户能点按钮去补，而不是被一个读不到的值卡住。
+pub fn user_path_contains(dir: &Path) -> bool {
+    // 空目录不是「已存在」，而是「别问了」——与 user_path_with_dir 对空值的处理保持一致
+    if dir_key(dir).is_empty() {
+        return false;
+    }
+    match user_path_raw() {
+        Some(cur) => user_path_with_dir(&cur, dir).is_none(),
+        None => false,
+    }
 }
 
 /// 把 `dir` 追加到用户 PATH 末尾。返回 true = 真的改了注册表；

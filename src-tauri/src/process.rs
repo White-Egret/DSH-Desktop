@@ -2189,6 +2189,66 @@ pub async fn dsh_home_env_info(_app: AppHandle) -> String {
     detect::user_env_raw(detect::HOME_ENV_NAME).unwrap_or_default()
 }
 
+/// 首选项「npm 全局目录」那一行的状态（只读，零风险）。
+///
+/// 真机故障（2026-10-06）：用户的 `~/.npmrc` 里写着 `prefix=D:\Programs\npm`、dsh 也装在那里，
+/// 但该目录**不在 PATH 里** —— 于是终端里敲 `dsh` 报「不是内部或外部命令」，只能用绝对路径
+/// 启动。程序侧同样认不出（那条线索已单独修：detect::npm_global_bin_dirs 现在会问 npm）。
+/// 这一块把「全局目录在哪、在不在 PATH 里」显示出来，并给一个按钮把它加进用户 PATH。
+#[derive(Clone, Serialize)]
+pub struct NpmPathReport {
+    /// npm 自己解析出的全局目录（空 = 问不到 npm）
+    pub dir: String,
+    /// 该目录是不是已经在本进程/注册表的 PATH 里（true = 终端里能用 `dsh` / `pnpm`）
+    pub in_path: bool,
+    /// 该目录是否真的存在（存在 = 里面确实装着全局命令）
+    pub exists: bool,
+}
+
+#[tauri::command]
+pub async fn npm_path_status(_app: AppHandle) -> NpmPathReport {
+    let dir = detect::default_npm_prefix();
+    // in_path 用**注册表真值**判断路径包含关系：本进程的环境块是启动快照，而用户关心的
+    // 是「我新开的终端能不能敲 dsh」。不用 where：那要经过 PATH 快照，正是我们要绕开的东西。
+    let in_path = if dir.is_empty() {
+        false
+    } else {
+        detect::user_path_contains(Path::new(&dir.trim_end_matches(['\\', '/'])))
+    };
+    NpmPathReport {
+        exists: !dir.is_empty() && Path::new(&dir).is_dir(),
+        dir,
+        in_path,
+    }
+}
+
+/// 把 npm 的全局目录加进**用户** PATH（首选项里点按钮才走这里，绝不自动改）。
+///
+/// 为什么要用户点一下：写 PATH 是用户级持久改动，本程序只在**自己装的**目录上自动做过
+/// （引导安装那一步）。而这一块面对的是「用户自己配了 prefix」的机器 —— 那种情况下
+/// 由用户明确点一次更合适，也符合本程序「只提示、不擅自改环境」的既有分工。
+#[tauri::command]
+pub async fn apply_npm_path(app: AppHandle) -> Result<HomeEnvReport, String> {
+    if crate::safe::is_active(&app) {
+        return Err(i18n::t("err_safe_active_op").to_string());
+    }
+    let dir = detect::default_npm_prefix();
+    if dir.trim().is_empty() {
+        return Err(i18n::t("err_npm_path_unknown").to_string());
+    }
+    if !Path::new(&dir).is_dir() {
+        return Err(i18n::fmt("err_npm_path_missing", &[&dir]));
+    }
+    let added = detect::append_to_user_path(Path::new(&dir))
+        .map_err(|e| i18n::fmt("err_npm_path_write", &[&dir, &e]))?;
+    let message = if added {
+        i18n::fmt("npm_path_added", &[&dir])
+    } else {
+        i18n::fmt("npm_path_already", &[&dir])
+    };
+    Ok(HomeEnvReport { message, changed: added })
+}
+
 #[tauri::command]
 pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, String> {
     // 端口必须是 1~65535 的数字（要求一.5）

@@ -283,6 +283,21 @@ pub fn t(key: &str) -> &'static str {
         "err_home_env_write" => if en { "Cannot write the user environment variable DSH_HOME: {0}" } else { "无法写入用户环境变量 DSH_HOME：{0}" },
         "err_home_env_delete" => if en { "Cannot delete the user environment variable DSH_HOME: {0}" } else { "无法删除用户环境变量 DSH_HOME：{0}" },
 
+        // ---------- 首选项：npm 全局目录 / 用户 PATH ----------
+        // 背景（2026-10-06 真机）：用户自己在 ~/.npmrc 里配了 prefix=D:\Programs\npm、dsh 也装在
+        // 那里，但该目录不在 PATH 里 —— 终端敲 `dsh` 报「不是内部或外部命令」，只能用完整路径。
+        "lbl_npm_path" => if en { "npm global directory (where global commands such as dsh / pnpm live)" } else { "npm 全局目录（dsh / pnpm 这类全局命令就在那里）" },
+        "npm_path_state_in_path" => if en { "{0} — already on your user PATH, so `dsh` works in a terminal." } else { "{0} —— 已在你的用户 PATH 里，终端里可以直接敲 dsh。" },
+        "npm_path_state_missing_dir" => if en { "{0} — npm points here, but the folder does not exist (nothing is installed into it yet)." } else { "{0} —— npm 指向这里，但该目录还不存在（里面暂时没有装东西）。" },
+        "npm_path_state_not_in_path" => if en { "{0} — NOT on your user PATH: a terminal will not recognise `dsh` (you would have to use its full path). Click the button to add it." } else { "{0} —— 不在你的用户 PATH 里：终端里敲 `dsh` 会提示「不是内部或外部命令」，只能用完整路径。点右侧按钮即可加上。" },
+        "npm_path_state_unknown" => if en { "Cannot read npm's global directory (npm missing, or `npm config get prefix` did not answer)." } else { "读不到 npm 的全局目录（npm 缺失，或 `npm config get prefix` 没有回应）。" },
+        "btn_npm_path_add" => if en { "Add to user PATH" } else { "加入用户 PATH" },
+        "npm_path_added" => if en { "Added {0} to your user PATH. Open a NEW terminal for it to take effect (already-open ones keep the old environment)." } else { "已把 {0} 加入你的用户 PATH。**新开**一个终端才生效（已开着的终端仍是旧环境）。" },
+        "npm_path_already" => if en { "{0} is already in your user PATH; nothing changed." } else { "{0} 已在你的用户 PATH 中，未做改动。" },
+        "err_npm_path_unknown" => if en { "Cannot determine npm's global directory, so it cannot be added to PATH." } else { "无法确定 npm 的全局目录，无法加入 PATH。" },
+        "err_npm_path_missing" => if en { "{0} does not exist, so there is nothing to add to PATH." } else { "{0} 不存在，没有可加入 PATH 的目录。" },
+        "err_npm_path_write" => if en { "Cannot add {0} to your user PATH: {1}" } else { "无法把 {0} 加入你的用户 PATH：{1}" },
+
         // ---------- 首选项：包源（registry）对齐 —— 程序只提示，点按钮才改 ----------
         // 状态行必须带上**比较用的目录**：registry 的答案随 cwd 变（项目级 .npmrc），
         // 不写清楚"在哪儿不一致"，用户没法判断该不该动。

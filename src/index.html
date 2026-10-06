@@ -195,6 +195,19 @@
           </div>
           <div class="hint" data-i18n="note_npm_cache">通过 npm 自己的配置文件（~/.npmrc 的 cache 一行）生效，所以终端里的 npm 也会用它；本程序只增删/替换那一行，文件的其余内容（注释、registry、token）原样保留。留空 = 删除该行、回到 npm 的默认位置（Windows 上是 %LOCALAPPDATA%\npm-cache）。</div>
         </label>
+        <!-- npm 全局目录 / 用户 PATH：**只读状态行 + 点按钮才写**（与包源 registry 同一分工）。
+             为什么需要它：用户自己在 ~/.npmrc 里配了 prefix=D:\... 时，全局命令（dsh / pnpm）
+             装在那里，但 npm 的 --prefix **不会**把目录加进 PATH —— 于是终端里敲 dsh 报
+             「不是内部或外部命令」，只能用完整路径启动（2026-10-06 真机现场）。
+             本程序只在**自己装的**目录上自动写 PATH（引导安装那一步）；对用户自己配的目录，
+             由用户明确点一次更合适。状态行用注册表真值判断，避免被本进程的旧 PATH 快照误导。 -->
+        <div class="field">
+          <span><span data-i18n="lbl_npm_path">npm 全局目录（dsh / pnpm 这类全局命令就在那里）</span></span>
+          <div class="row gap">
+            <button id="btn-npm-path-add" class="btn small hidden" type="button" data-i18n="btn_npm_path_add">加入用户 PATH</button>
+          </div>
+          <div class="hint" id="npm-path-line"></div>
+        </div>
         <!-- 包源 registry（npm / pnpm）：**只读状态行 + 点按钮才写**。
              为什么不做成开关：registry 决定今后所有安装流量去哪（供应链敏感），而且不是
              需要持续维护的状态 —— 每次保存都重写一遍，反而会跟用户手动 `pnpm config set`

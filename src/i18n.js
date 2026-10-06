@@ -74,6 +74,16 @@
     cache_eff_set: 'npm 配置：{0}',
     cache_eff_diff: 'npm 配置：{0}　⚠ 实际生效：{1}（被环境变量或项目级 .npmrc 覆盖）',
     toast_npm_cache_fail: '已保存设置，但 npm 配置没改成功：{0}',
+    // ---- 首选项：npm 全局目录 / 用户 PATH（终端里能不能直接敲 dsh 就看这个）----
+    // 背景：用户在 ~/.npmrc 里自己配了 prefix 时，全局命令装在那里，但 npm 不会把目录加进
+    // PATH —— 终端敲 dsh 就报「不是内部或外部命令」。状态行读注册表真值，写只在点击时发生。
+    lbl_npm_path: 'npm 全局目录（dsh / pnpm 这类全局命令就在那里）',
+    npm_path_state_in_path: '{0} —— 已在你的用户 PATH 里，终端里可以直接敲 dsh。',
+    npm_path_state_missing_dir: '{0} —— npm 指向这里，但该目录还不存在（里面暂时没有装东西）。',
+    npm_path_state_not_in_path: '{0} —— 不在你的用户 PATH 里：终端里敲 `dsh` 会提示「不是内部或外部命令」，只能用完整路径。点上方按钮即可加上。',
+    npm_path_state_unknown: '读不到 npm 的全局目录（npm 缺失，或 npm config get prefix 没有回应）。',
+    btn_npm_path_add: '加入用户 PATH',
+    toast_npm_path_fail: '加入用户 PATH 失败: {0}',
     // ---- 首选项：用户环境变量 DSH_HOME（**没有开关**：家目录非默认就自动写、改回默认
     //      就自动删，只影响用户另外打开的终端）—— 这里只保留「读出来显示」那两行文案 ----
     home_env_now: '当前用户环境变量：DSH_HOME={0}',
@@ -428,6 +438,16 @@
     cache_eff_set: 'npm config: {0}',
     cache_eff_diff: 'npm config: {0}　⚠ actually in effect: {1} (overridden by an env var or a project .npmrc)',
     toast_npm_cache_fail: 'Settings saved, but npm config was not updated: {0}',
+    // ---- Preferences: npm global directory / user PATH (whether plain `dsh` works in a
+    //      terminal). Global commands live in npm's prefix, but `--prefix` does NOT add that
+    //      folder to PATH — so the terminal says "not recognized" unless we add it. ----
+    lbl_npm_path: 'npm global directory (where global commands such as dsh / pnpm live)',
+    npm_path_state_in_path: '{0} — already on your user PATH, so `dsh` works in a terminal.',
+    npm_path_state_missing_dir: '{0} — npm points here, but the folder does not exist (nothing is installed into it yet).',
+    npm_path_state_not_in_path: '{0} — NOT on your user PATH: a terminal will not recognise `dsh` (you would have to use its full path). Click the button above to add it.',
+    npm_path_state_unknown: "Cannot read npm's global directory (npm missing, or `npm config get prefix` did not answer).",
+    btn_npm_path_add: 'Add to user PATH',
+    toast_npm_path_fail: 'Could not add it to your user PATH: {0}',
     // ---- Preferences: user environment variable DSH_HOME (**no switch**: written
     //      automatically while the home dir is non-default, removed when it is the
     //      default again; it only affects terminals the user opens themselves) ----

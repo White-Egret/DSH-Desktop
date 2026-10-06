@@ -273,7 +273,10 @@ fn dir_keys(dirs: &[PathBuf]) -> Vec<String> {
 ///   ③ 向导登记的自定义目录（`--prefix` 装过东西的那次）与 node 自身目录。
 fn npm_global_bin_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    let mut push = |dirs: &mut Vec<PathBuf>, d: PathBuf| {
+    // 闭包把 `dirs` 当参数收（不是捕获），所以它自己不需要 `mut` —— 需要 `mut` 的是
+    // 调用点的那个 `dirs`（`push(&mut dirs, …)`）。原来这里写了 `let mut push`，
+    // rustc 会报 unused_mut（CI 实测）。
+    let push = |dirs: &mut Vec<PathBuf>, d: PathBuf| {
         let key = dir_key(&d);
         if !key.is_empty() && !dirs.iter().any(|x| dir_key(x) == key) {
             dirs.push(d);

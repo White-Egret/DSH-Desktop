@@ -6709,17 +6709,17 @@ mod tests {
     #[test]
     fn remove_dir_if_empty_only_removes_truly_empty_dirs() {
         let base = create_private_temp_dir("uninstall-unit").expect("建临时目录");
-        // 真空目录 → 删掉
+        // 真空目录 → 删掉（成功时没有「原因」可带，第二个元素是 None）
         let empty = base.join("empty");
         std::fs::create_dir_all(&empty).unwrap();
-        assert_eq!(remove_dir_if_empty(&empty), Some("removed"));
+        assert_eq!(remove_dir_if_empty(&empty), Some(("removed", None)));
         assert!(!empty.exists(), "真空目录应当被删掉");
         // 不相干的目录 → 不报结论（清单里不该出现）
         assert_eq!(remove_dir_if_empty(&base.join("nope")), None);
         // 非空目录 → 保留（里面哪怕只有一个空子目录也算非空）
         let kept = base.join("kept");
         std::fs::create_dir_all(kept.join("child")).unwrap();
-        assert_eq!(remove_dir_if_empty(&kept), Some("kept"));
+        assert_eq!(remove_dir_if_empty(&kept), Some(("kept", None)));
         assert!(kept.exists(), "非空目录必须留下");
         // 文件不是目录 → 不报结论
         let file = base.join("a-file");

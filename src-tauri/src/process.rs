@@ -5572,6 +5572,71 @@ fn remove_dir_if_empty(dir: &Path) -> Option<(&'static str, Option<String>)> {
     Some(("failed", last_err))
 }
 
+/// 卸载 DSH 时，**收尾该去哪个目录**做清理。
+///
+/// 为什么不能直接用 [`npm_prefix_from_dsh_path`] 的结果：那个函数的定位是
+/// 「更新时该用哪个 `--prefix` 装回原地」，它的两条保守条件（目录下要有 `node_modules`、
+/// 且不能等于 npm 的默认全局目录）在卸载收尾这里是**错的**：
+///
+/// 真机现场（2026-10-07）：用户 `~/.npmrc` 里是 `prefix=D:\Programs\npm`，
+/// `dsh.cmd` 也在那里，**而这恰恰就是 npm 解析出的默认全局目录**
+/// （向导装 DSH 时把那行写进去的结果）。于是 `npm_prefix_from_dsh_path` 因为
+/// 「等于默认目录」而返回 `None` → 收尾清理整段被跳过 → npm 删掉包之后
+/// `node_modules\@deepseek-ai` 留成一个空目录，界面却报「已成功卸载」。
+/// 「默认目录」在这里不是「没有方向」，而是**最常见的正常落点**。
+///
+/// 三级来源，逐级放宽（都能用才用，推导不出就返回 None）：
+///   ① `dsh.cmd` 实际所在的目录（最权威 —— 以磁盘事实为准）；
+///   ② 卸载目标目录 `target`（dsh_path 不可信、但本次卸载确实是从那儿做的）；
+///   ③ `~/.npmrc` 里那行 `prefix=` 的字面值（不启动任何进程，npm 问不动时仍拿得到）；
+///   ④ 实在问不动才去问 npm 当前解析出的全局目录。
+/// 全都推不出来时返回 None，调用方**如实报「收尾没做」**，绝不假装已经清理过。
+fn uninstall_cleanup_dir(cfg: &Config, target: Option<&str>) -> Option<PathBuf> {
+    // ① 最权威：从 dsh.cmd 的实际位置推导（不要求它等于默认目录）
+    if let Some(dir) = dsh_dir_from_path(cfg) {
+        return Some(dir);
+    }
+    // ② npm 自己的答案
+    if let Some(p) = target {
+        if !p.trim().is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    // ③ ~/.npmrc 里的 prefix 行（甚至不需要问 npm）
+    let from_file = npmrc_prefix_value();
+    if !from_file.trim().is_empty() {
+        return Some(PathBuf::from(from_file));
+    }
+    // 最后才问 npm（要启动进程，最慢也最可能失败）—— 注意它排在读文件之后，
+    // 因为 `.npmrc` 里那行字面值在「npm 起不来」时仍然拿得到。
+    detect::effective_npm_prefix().map(PathBuf::from)
+}
+
+/// `dsh.cmd` 所在目录（不要求那目录下有 `node_modules`、也不要求它不是 npm 默认目录）。
+///
+/// 与 [`npm_prefix_from_dsh_path`] 的差别只有一处，就是去掉那两条保守条件 —— 它们服务的是
+/// 「装回去」的决策（往一个显然不是全局目录的地方撒 `node_modules` 是有害的），
+/// 而「DSH 到底装在哪」这件事本身没有这种含糊：文件在哪就是哪。
+fn dsh_dir_from_path(cfg: &Config) -> Option<PathBuf> {
+    let dsh = config::validate_program_file("dsh_path", &cfg.dsh_path).ok()?;
+    Path::new(&dsh).parent().map(|p| p.to_path_buf())
+}
+
+/// 从 `~/.npmrc` 的**内容**里取出 `prefix=` 的值。
+///
+/// 为什么用「读文件」而不是 `npm config get prefix`：卸载收尾必须能在 npm 缺失、
+/// 进程启动失败这些情况下继续跑（那时恰恰最需要收尾）。纯文件系统操作，且不启动任何进程 ——
+/// 这也顺带避开了 detect.rs 里那条「为了问 npm 而启动 npm」的 spawn 递归纪律。
+fn npmrc_prefix_value() -> String {
+    let Some(p) = detect::npm_userconfig_path() else {
+        return String::new();
+    };
+    let Ok(content) = std::fs::read_to_string(&p) else {
+        return String::new();
+    };
+    config::npmrc_prefix_value(&content).unwrap_or_default()
+}
+
 /// 包名最后一段（`@deepseek-ai/dsh` → `dsh`）：拼全局目录里的落点用。
 fn last_path_segment(s: &str) -> &str {
     s.rsplit(['/', '\\']).next().unwrap_or(s).trim()
@@ -5582,9 +5647,89 @@ fn global_pkg_dir(prefix: &str, pkg: &str) -> PathBuf {
     Path::new(prefix).join("node_modules").join(pkg)
 }
 
-/// 某个全局目录里这个包的启动脚本路径（npm 在全局目录根部放 `<name>` / `<name>.cmd` / `<name>.ps1`）。
-fn global_shim_path(prefix: &str, name: &str) -> PathBuf {
-    Path::new(prefix).join(format!("{}.cmd", name))
+/// pnpm 的**文件名候选**。
+///
+/// 为什么不止 `pnpm.cmd`：真机现场（2026-10-07）那台机器上 `where pnpm` 打出来的是
+/// `C:\Program Files\nodejs\pnpm`（一个**目录**）与 `…\pnpm\pnpm.CMD`（注意大写 `.CMD`）——
+/// pnpm 官方独立安装版 / corepack 装出来的是 `pnpm` + `pnpm.CMD` + `pnpm.exe` 这一组，
+/// 且落在 `PNPM_HOME` **之下**再一级。只认 `pnpm.cmd` 会把这一种整个漏掉。
+const PNPM_SHIM_NAMES: [&str; 4] = ["pnpm.cmd", "pnpm.CMD", "pnpm.exe", "pnpm"];
+
+/// 收尾补删时**认得**的 pnpm 脚本全集（比 [`PNPM_SHIM_NAMES`] 多一个 `.ps1`：
+/// `npm install -g pnpm` 会写出 `pnpm` / `pnpm.cmd` / `pnpm.ps1` 三个，而 npm 偶尔只删其中一个）。
+///
+/// 两种布局共用这一份：文件名集合本来就与「装在哪一级」无关 —— 差别只在**去哪个目录**找。
+const PNPM_SCRIPT_NAMES: [&str; 5] = ["pnpm.cmd", "pnpm.CMD", "pnpm.ps1", "pnpm", "pnpm.exe"];
+
+/// 一个「pnpm 可能住在这里」的落点：目录 + 具体哪个文件确实存在。
+///
+/// `Clone`/`Debug` 是给 `Vec<PnpmLocation>` 的克隆与测试断言用的（测试里要把落点
+/// 打出来对比 `file`/`layout` 两个字段）。
+#[derive(Clone, Debug)]
+struct PnpmLocation {
+    /// 脚本所在目录（npm 全局目录 或 `PNPM_HOME`）。
+    dir: PathBuf,
+    /// 相对于 `dir` 的文件名（PNPM_HOME 布局是 `pnpm\pnpm.CMD` 这种带一级的写法）。
+    file: String,
+    /// 这一份 pnpm 是怎么装的 —— 决定用哪条命令卸载。
+    layout: PnpmLayout,
+}
+
+/// pnpm 的安装形态。卸载命令**随形态而变**，这是本次修复的核心（见 `uninstall_pnpm_inner`）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PnpmLayout {
+    /// `npm install -g pnpm`：脚本与包都在同一个 npm 全局目录里 → `npm uninstall -g`。
+    NpmGlobal,
+    /// corepack / pnpm 官方独立安装版：脚本在 `PNPM_HOME`（其下**再一级**同名子目录），
+    /// 包在别处 → 不是 npm 装的，得连脚本带包一起删（方案 B）。
+    Standalone,
+}
+
+/// 扫出某个目录下**所有**真实的 pnpm 落点（不假设只有一种装法）。
+///
+/// 为什么不用「拼一个路径再 is_file」：那正是漏掉本次现场的写法。pnpm 的脚本可能
+/// 在目录根部，也可能在同名子目录里（PNPM_HOME 布局），文件名还可能是
+/// `pnpm.cmd` / `pnpm.CMD` / `pnpm.exe` / `pnpm` 中的任意一个。这里把两种布局都试一遍，
+/// 谁真实存在谁算数。
+///
+/// 去重按 **(目录, 形态)** 而不是只按目录 —— 同一个目录里两种布局可以并存
+/// （npm 装过一份、后来又装了独立版），那是**两处要分别删的东西**，按目录去重会把
+/// 其中一处悄悄吞掉（第一版就是这么写的，与「两种布局都要认出来」的测试直接冲突）。
+fn pnpm_install_locations(dir: &Path) -> Vec<PnpmLocation> {
+    let mut out: Vec<PnpmLocation> = Vec::new();
+    let mut push = |loc: PnpmLocation| {
+        if !out.iter().any(|x| {
+            x.layout == loc.layout
+                && config::same_dir(&x.dir.to_string_lossy(), &loc.dir.to_string_lossy())
+        }) {
+            out.push(loc);
+        }
+    };
+    // 布局 A：npm 全局目录（脚本直接躺在目录根部）
+    for name in PNPM_SHIM_NAMES {
+        let p = dir.join(name);
+        if p.is_file() {
+            push(PnpmLocation {
+                dir: dir.to_path_buf(),
+                file: name.to_string(),
+                layout: PnpmLayout::NpmGlobal,
+            });
+            break; // 同一目录只记一个落点，删一次就够
+        }
+    }
+    // 布局 B：PNPM_HOME 布局 —— 目录里躺着的是同名**子目录**，脚本在它下面
+    for name in PNPM_SHIM_NAMES {
+        let p = dir.join("pnpm").join(name);
+        if p.is_file() {
+            push(PnpmLocation {
+                dir: dir.to_path_buf(),
+                file: format!("pnpm\\{}", name),
+                layout: PnpmLayout::Standalone,
+            });
+            break;
+        }
+    }
+    out
 }
 
 /// 「卸载到底生效没有」的判据：**不看 npm 的退出码，看磁盘**。
@@ -5637,6 +5782,13 @@ fn run_npm_uninstall(
 ///     而当时日志里没有任何线索，所以失败必须留痕。
 fn cleanup_after_uninstall(app: &AppHandle, dir: &Path) -> Vec<UninstallItem> {
     let items = cleanup_after_uninstall_items(dir);
+    log_uninstall_cleanup_failures(app, &items);
+    items
+}
+
+/// 把收尾里 `failed` 的条目写进日志。单独抽出来是为了让 [`uninstall_dsh_inner`] 那条
+/// 「推导不出目录」的兜底分支也能用同一份留痕纪律（真机现场：报成功、目录还在、日志无痕）。
+fn log_uninstall_cleanup_failures(app: &AppHandle, items: &[UninstallItem]) {
     for it in items.iter().filter(|i| i.status == "failed") {
         // 带上系统给的具体原因（`detail`）：上次现场只有一句笼统的「删除失败」，
         // 等于没有线索。有错误码/文案才能判断是权限、占用还是别的原因。
@@ -5646,7 +5798,6 @@ fn cleanup_after_uninstall(app: &AppHandle, dir: &Path) -> Vec<UninstallItem> {
             i18n::fmt("log_uninstall_dir_remove_fail", &[&it.path, &it.detail]),
         );
     }
-    items
 }
 
 /// 收尾的**决策内核**：逐条尽力而为，把「删了什么 / 留了什么」如实带回。
@@ -5776,8 +5927,22 @@ fn uninstall_dsh_inner(app: &AppHandle) -> Result<UninstallReport, String> {
     }
 
     let mut items: Vec<UninstallItem> = Vec::new();
-    if let Some(dir) = target.as_deref() {
-        items.extend(cleanup_after_uninstall(app, Path::new(dir)));
+    // 收尾目录**不能**跟着 `target` 走：`target` 为 None（DSH 装在 npm 自己的默认全局目录里
+    // —— 向导装完的常态）时，正是最需要回收空 scope 目录的时候，见
+    // `uninstall_cleanup_dir` 的注释。
+    match uninstall_cleanup_dir(&cfg, target.as_deref()) {
+        Some(dir) => items.extend(cleanup_after_uninstall(app, &dir)),
+        None => {
+            // 三级来源都推不出来：如实说明「这一步没做」，而不是让用户对着残留的空目录
+            // 以为程序已经清理过了（真机现场就是这么反馈的）。
+            emit_log(app, "update", i18n::t("log_uninstall_cleanup_skipped").to_string());
+            items.push(UninstallItem {
+                kind: "scope".to_string(),
+                path: String::new(),
+                status: "skipped".to_string(),
+                detail: String::new(),
+            });
+        }
     }
 
     // `~/.npmrc` 里那行 `prefix=`：只有「确实是我们写的」才允许动（claimed 标志）。
@@ -5879,9 +6044,12 @@ pub async fn uninstall_pnpm(app: AppHandle, dir: Option<String>) -> Result<Unins
 ///
 /// 为什么要一串候选：pnpm 未必住在 DSH 的全局目录里。只试一个目录，就会出现
 /// 「npm 说没装这个包、退出码 0、界面报成功」这种假成功 —— 而挨个候选去**看文件系统**
-/// 是廉价的（不跑 npm），只有真躺着 `pnpm.cmd` 的那个才会拿去卸载。
+/// 是廉价的（不跑 npm），只有真躺着 pnpm 脚本的那个才会拿去卸载。
 ///
 /// 顺序即优先级：用户明确带回来的目录（刚卸 DSH 用的那个）排最前，其余按「谁更可能是它家」排。
+/// 返回的是**落点**而不是目录串（[`PnpmLocation`]）：目录本身不足以判断该怎么卸载 ——
+/// 同一个目录里既可能是 `npm install -g pnpm` 装的，也可能是 PNPM_HOME 布局的
+/// 同名子目录，两者要跑的命令不一样（见 [`pnpm_candidate_locations`]）。
 fn pnpm_candidate_dirs(cfg: &Config, hint: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |v: String| {
@@ -5913,6 +6081,29 @@ fn pnpm_candidate_dirs(cfg: &Config, hint: Option<&str>) -> Vec<String> {
     out
 }
 
+/// 把候选目录展开成**真实存在的 pnpm 落点**（每个目录可能有两种布局，见 [`PnpmLocation`]）。
+///
+/// 「筛出零个候选」这件事必须与「筛出了但都删不掉」分开报 —— 前者是「压根没找到 pnpm
+/// 该在哪」，后者是「找到了但删不动」。2026-10-07 的现场正好是**被静默并入前者**的那种：
+/// pnpm 以 PNPM_HOME 布局存在，而筛选条件只认 `<目录>\pnpm.cmd`，于是落点为零，
+/// 界面却在报「已成功卸载」。
+fn pnpm_candidate_locations(cfg: &Config, hint: Option<&str>) -> Vec<PnpmLocation> {
+    let mut out: Vec<PnpmLocation> = Vec::new();
+    for d in pnpm_candidate_dirs(cfg, hint) {
+        for loc in pnpm_install_locations(Path::new(&d)) {
+            // 与 pnpm_install_locations 同一把尺子：按 (目录, 形态) 去重，
+            // 否则同一目录里的第二种布局会被悄悄吞掉。
+            if !out.iter().any(|x| {
+                x.layout == loc.layout
+                    && config::same_dir(&x.dir.to_string_lossy(), &loc.dir.to_string_lossy())
+            }) {
+                out.push(loc);
+            }
+        }
+    }
+    out
+}
+
 fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<UninstallReport, String> {
     let cfg = config::load(app);
     let npm = match config::validate_program_file("npm_path", &cfg.npm_path) {
@@ -5923,33 +6114,35 @@ fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<Uninstal
         Err(e) => return Err(e),
     };
     let cache = npm_cache_for_use(&cfg);
-    // 只把「文件系统里真的躺着 pnpm.cmd」的候选拿去卸载：既避免对着一堆无关目录空跑 npm，
-    // 也让「pnpm 到底在哪」这件事以事实为准。
-    let candidates: Vec<String> = pnpm_candidate_dirs(&cfg, dir.as_deref())
-        .into_iter()
-        .filter(|d| global_shim_path(d, "pnpm").is_file())
-        .collect();
+    // 只把「文件系统里真的躺着 pnpm」的候选拿去卸载：既避免对着一堆无关目录空跑 npm，
+    // 也让「pnpm 到底在哪、以什么形态装的」这件事以事实为准（而不是猜一个固定文件名）。
+    let candidates: Vec<PnpmLocation> = pnpm_candidate_locations(&cfg, dir.as_deref());
 
     set_status(app, "updating", None);
     let mut last_out = String::new();
-    let mut used: Option<String> = None;
-    for d in &candidates {
-        let (ok, out) = run_npm_uninstall(&npm, "pnpm", Some(d), cache.as_deref())?;
+    let mut used: Option<PnpmLocation> = None;
+    let mut items: Vec<UninstallItem> = Vec::new();
+    for loc in &candidates {
+        // 落点还在吗？（下一轮候选的判断要用）—— 不在就当它已处理过。
+        if !loc.dir.join(&loc.file).is_file() {
+            continue;
+        }
+        let (out, removed_items) = remove_pnpm_at(app, &npm, loc, cache.as_deref());
         if !out.trim().is_empty() {
             logger::append_line(&logger::desktop_log_path(app), &out);
         }
         last_out = out;
-        // 退出码 0 且磁盘上真的没了才算成功（退出码在这条路上不可信，见 uninstall_took_effect）
-        if ok && uninstall_took_effect(d, "pnpm") {
-            used = Some(d.clone());
+        items.extend(removed_items);
+        if !pnpm_still_present(loc) {
+            used = Some(loc.clone());
             break;
         }
     }
     set_status(app, "idle", None);
 
-    let Some(dir_used) = used else {
+    let Some(loc_used) = used else {
         // 没删掉。三种现实必须分开说，混成一句「失败」用户没法行动：
-        //   ① 所有候选目录里都没有 `pnpm.cmd` → 它根本不是 npm 全局装的，或装在别的地方
+        //   ① 所有候选目录里都没有 pnpm → 它根本不是 npm 全局装的，或装在别的地方
         //   ② 找到了、也试着删了，但**还在**（多半要管理员权限）→ 给出它在哪 + npm 的话
         //   ③ 找到了、删掉了，但检测仍能看见它 → 同 ②，交给用户手动处理
         let detected = detect::find_pnpm_cmd().map(|p| p.to_string_lossy().to_string());
@@ -5968,18 +6161,21 @@ fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<Uninstal
             None => ("failed", i18n::fmt("log_uninstall_pnpm_fail", &[&last_out])),
         };
         emit_log(app, "update", msg);
+        // 逐个落点如实回报（哪些删了、哪些没删成、为什么）
+        let mut all = items;
+        all.push(UninstallItem {
+            kind: "package".to_string(),
+            path: detected.unwrap_or_default(),
+            status: status.to_string(),
+            detail: String::new(),
+        });
         return Ok(UninstallReport {
             success: false,
             package_name: "pnpm".to_string(),
             dir: dir.unwrap_or_default(),
             output: last_out,
             // 用 items 把「它其实在哪」带回给界面（前端按 kind/status 渲染成一行人话）
-            items: vec![UninstallItem {
-                kind: "package".to_string(),
-                path: detected.unwrap_or_default(),
-                status: status.to_string(),
-                detail: String::new(),
-            }],
+            items: all,
         });
     };
 
@@ -5987,10 +6183,126 @@ fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<Uninstal
     Ok(UninstallReport {
         success: true,
         package_name: "pnpm".to_string(),
-        dir: dir_used,
+        dir: loc_used.dir.to_string_lossy().to_string(),
         output: last_out,
-        items: Vec::new(),
+        items,
     })
+}
+
+/// pnpm 删掉没有 —— **只看磁盘**，不看 npm 的退出码（见 [`uninstall_took_effect`]）。
+///
+/// 判据是「那一组文件里还剩不剩任何一个」：`npm install -g pnpm` 会写出
+/// `pnpm` / `pnpm.cmd` / `pnpm.ps1` 三个脚本，只检查其中一个、而 npm 恰好漏删另一个的话，
+/// 就会把「还在」判成「没了」（用户终端里 `where pnpm` 仍然看得见它）。
+fn pnpm_still_present(loc: &PnpmLocation) -> bool {
+    // 包目录在 = 明确还在（这是最强的判据，npm 没删掉就是没删掉）
+    if global_pkg_dir(&loc.dir.to_string_lossy(), "pnpm").exists() {
+        return true;
+    }
+    // 脚本仍在（任一同组文件）= 还在。两种布局各查一遍，目录级与同名子目录级。
+    pnpm_install_locations(&loc.dir)
+        .iter()
+        .any(|x| x.layout == loc.layout)
+}
+
+/// 删掉**一个** pnpm 落点。返回 `(npm 输出, 逐条结果)`。
+///
+/// 命令**随 [`PnpmLayout`] 而变** —— 这是本次修复的核心（2026-10-07 真机现场）：
+/// 之前无论 pnpm 怎么装的都只跑 `npm uninstall -g pnpm`，而 corepack / 官方独立安装版
+/// 的 pnpm 根本不在 npm 全局目录里，那条命令只会回一句 `up to date` 并返回 0。
+///
+///   - [`PnpmLayout::NpmGlobal`]：脚本与包都在同一个 npm 全局目录 → `npm uninstall -g`，
+///     再把 npm 漏删的脚本补掉（npm 偶尔只删 `pnpm.cmd` 而留下 `pnpm` / `pnpm.ps1`）。
+///   - [`PnpmLayout::Standalone`]：不是 npm 装的（`PNPM_HOME` 布局）→ npm 帮不上忙，
+///     按用户要求**连脚本带包一起删**。这里只删**认得出是 pnpm 的东西**：同组的那几个脚本
+///     与 `node_modules\pnpm` / `node_modules\.bin\pnpm*`。`PNPM_HOME` 目录本身**不删**
+///     —— 它可能还指着别的工具（corepack 的 shim 就在那里），删掉是超出授权的破坏。
+///
+/// **不返回 Err**：删不掉单个文件不是「这一步做不下去」，而是「这一项 failed」—— 事实由
+/// `items` 如实带回去，调用方据此决定整体成功与否（`pnpm_still_present`）。npm 自己那条命令
+/// 失败（超时 / 起不来）同样只作为输出文本记下：后面还有补删要做。
+fn remove_pnpm_at(
+    app: &AppHandle,
+    npm: &str,
+    loc: &PnpmLocation,
+    cache: Option<&str>,
+) -> (String, Vec<UninstallItem>) {
+    let dir_s = loc.dir.to_string_lossy().to_string();
+    let mut items: Vec<UninstallItem> = Vec::new();
+    let mut out = String::new();
+
+    if loc.layout == PnpmLayout::NpmGlobal {
+        // 先交给 npm（它知道依赖树该一起删掉），失败不中断 —— 后面还有补删。
+        match run_npm_uninstall(npm, "pnpm", Some(&dir_s), cache) {
+            Ok((_, o)) => out = o,
+            Err(e) => out = e,
+        }
+    }
+
+    // 无论哪种布局，都把「删完还在的文件」逐个补掉（npm 漏删 / 非 npm 装）。
+    // 只删**本程序认定的 pnpm 文件名**，绝不对目录做递归删除。
+    let mut leftovers: Vec<PathBuf> = Vec::new();
+    for name in PNPM_SCRIPT_NAMES {
+        for base in [loc.dir.clone(), loc.dir.join("pnpm")] {
+            let p = base.join(name);
+            if p.is_file() {
+                leftovers.push(p);
+            }
+        }
+    }
+    let pkg_dir = global_pkg_dir(&dir_s, "pnpm");
+    if pkg_dir.exists() {
+        leftovers.push(pkg_dir);
+    }
+    // `node_modules\.bin` 里的 pnpm 转发脚本（独立安装版也会有）
+    for name in ["pnpm", "pnpm.cmd", "pnpm.ps1"] {
+        let p = loc.dir.join("node_modules").join(".bin").join(name);
+        if p.is_file() {
+            leftovers.push(p);
+        }
+    }
+
+    for p in leftovers {
+        let kind = if p.is_dir() { "package" } else { "shims" }.to_string();
+        let path = p.to_string_lossy().to_string();
+        let res = if p.is_dir() {
+            std::fs::remove_dir_all(&p)
+        } else {
+            std::fs::remove_file(&p)
+        };
+        let status = match res {
+            Ok(()) => "removed",
+            Err(e) => {
+                emit_log(
+                    app,
+                    "update",
+                    i18n::fmt("log_uninstall_pnpm_file_fail", &[&path, &e.to_string()]),
+                );
+                "failed"
+            }
+        };
+        items.push(UninstallItem {
+            kind,
+            path,
+            status: status.to_string(),
+            detail: String::new(),
+        });
+    }
+
+    // 独立安装版删完之后，PNPM_HOME 下那个同名空子目录也回收掉（留着它，
+    // 用户 `where pnpm` 仍会看到那个空目录，等于「卸载了但看着像没卸」——本次现场就是这个观感）。
+    if loc.layout == PnpmLayout::Standalone {
+        if let Some((status, detail)) = remove_dir_if_empty(&loc.dir.join("pnpm")) {
+            items.push(UninstallItem {
+                kind: "scope".to_string(),
+                path: loc.dir.join("pnpm").to_string_lossy().to_string(),
+                status: status.to_string(),
+                detail: detail.unwrap_or_default(),
+            });
+        }
+    }
+
+    (out, items)
 }
 
 /// 完成首次运行引导：把当前（含自动检测补全的）配置写入 %APPDATA%\com.dsh.desktop\config.json。
@@ -6809,6 +7121,149 @@ mod tests {
             items2.iter().any(|i| i.kind == "node_modules" && i.status == "removed"),
             "回收结果要在清单里如实出现"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- pnpm 定位：两种装法都要认得（2026-10-07 真机现场） ----------
+
+    /// 收尾目录的推导：**必须**认得「DSH 装在 npm 默认全局目录里」这一种落点。
+    ///
+    /// 2026-10-07 真机现场：`~/.npmrc` 里是 `prefix=D:\Programs\npm`，`dsh.cmd` 也在那里，
+    /// 而那**就是** npm 解析出的默认全局目录（向导装完的常态）。旧代码走
+    /// `npm_prefix_from_dsh_path`，它有一条「不能等于默认目录」的保守条件 → 返回 None →
+    /// 收尾整段被跳过 → 空 `@deepseek-ai` 目录留下，界面报成功。
+    ///
+    /// 所以这里直接测推导函数本身：给它一个真实的 dsh.cmd，答案必须是它所在的目录，
+    /// 哪怕那个目录恰好是 npm 的默认全局目录。
+    #[test]
+    fn dsh_dir_from_path_works_even_in_the_default_global_dir() {
+        let base = create_private_temp_dir("cleanup-dir").expect("建临时目录");
+        // 造一个像 npm 全局目录的落点：node_modules + dsh.cmd
+        std::fs::create_dir_all(base.join("node_modules").join("@deepseek-ai")).unwrap();
+        let dsh = base.join("dsh.cmd");
+        std::fs::write(&dsh, b"@echo off").unwrap();
+
+        let cfg = Config {
+            dsh_path: dsh.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let got = dsh_dir_from_path(&cfg).expect("应当能从 dsh.cmd 推导所在目录");
+        assert_eq!(
+            got,
+            base,
+            "推导出的收尾目录必须就是 dsh.cmd 所在的目录"
+        );
+
+        // dsh_path 不可用时返回 None（调用方据此「如实报没做」，而不是瞎猜一个目录）
+        let bad = Config {
+            dsh_path: base.join("nope").join("dsh.cmd").to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        assert!(
+            dsh_dir_from_path(&bad).is_none(),
+            "dsh.cmd 不存在时不能编一个目录出来"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+    /// pnpm 的落点扫描必须同时认得两种装法。
+    ///
+    /// 现场（`C:\Program Files\nodejs`）：`where pnpm` 打出来的是**目录**
+    /// `…\nodejs\pnpm` 与脚本 `…\nodejs\pnpm\pnpm.CMD`（注意大写 `.CMD`）——
+    /// corepack / pnpm 官方独立安装版的 `PNPM_HOME` 布局，脚本在同名**子目录**之下。
+    /// 旧代码只认 `<目录>\pnpm.cmd`，于是这个落点被判成「这里没有 pnpm」，
+    /// 候选清零 → 界面报「已成功卸载」，而 pnpm 一个字节没动。
+    #[test]
+    fn pnpm_install_locations_recognizes_both_layouts() {
+        let base = create_private_temp_dir("pnpm-layout").expect("建临时目录");
+
+        // ---- 布局 A：npm 全局目录（脚本直接躺在目录根部）----
+        let npm_global = base.join("npm-global");
+        std::fs::create_dir_all(&npm_global).unwrap();
+        std::fs::write(npm_global.join("pnpm.cmd"), b"x").unwrap();
+        let locs = pnpm_install_locations(&npm_global);
+        assert_eq!(locs.len(), 1, "npm 全局目录应当识别出一个落点：{locs:?}");
+        assert_eq!(locs[0].layout, PnpmLayout::NpmGlobal);
+        assert_eq!(locs[0].file, "pnpm.cmd");
+
+        // ---- 布局 B：PNPM_HOME 布局（同名子目录 + 大写 .CMD）----
+        let pnpm_home = base.join("nodejs");
+        std::fs::create_dir_all(pnpm_home.join("pnpm")).unwrap();
+        std::fs::write(pnpm_home.join("pnpm").join("pnpm.CMD"), b"x").unwrap();
+        let locs2 = pnpm_install_locations(&pnpm_home);
+        assert_eq!(
+            locs2.len(),
+            1,
+            "PNPM_HOME 布局必须被认出来（旧代码只拼 <目录>\\pnpm.cmd，正是这里漏掉）：{locs2:?}"
+        );
+        assert_eq!(locs2[0].layout, PnpmLayout::Standalone);
+        assert_eq!(locs2[0].file, "pnpm\\pnpm.CMD");
+        assert!(
+            pnpm_home.join(&locs2[0].file).is_file(),
+            "file 字段拼出来的路径必须真的指向那个脚本（否则删的是空气）"
+        );
+
+        // ---- 两种布局并存时，两个落点都要在（不能只报第一个）----
+        let both = base.join("both");
+        std::fs::create_dir_all(both.join("pnpm")).unwrap();
+        std::fs::write(both.join("pnpm.cmd"), b"x").unwrap();
+        std::fs::write(both.join("pnpm").join("pnpm.exe"), b"x").unwrap();
+        let locs3 = pnpm_install_locations(&both);
+        assert_eq!(locs3.len(), 2, "两种布局并存时都要认出来：{locs3:?}");
+        assert!(locs3
+            .iter()
+            .any(|l| l.layout == PnpmLayout::NpmGlobal));
+        assert!(locs3
+            .iter()
+            .any(|l| l.layout == PnpmLayout::Standalone));
+
+        // ---- 什么都没有的目录 → 零个落点（这就是「压根没找到 pnpm」那一路）----
+        let empty = base.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(pnpm_install_locations(&empty).is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 「pnpm 删掉没有」必须以**整组文件**为准，不能只看 npm 删的那个。
+    ///
+    /// `npm install -g pnpm` 会写出 `pnpm` / `pnpm.cmd` / `pnpm.ps1` 三个脚本；npm 偶尔
+    /// 只删掉其中一个。只检查一个的话就会把「还在」判成「没了」，用户终端里
+    /// `where pnpm` 仍然看得见它 —— 那正是「报成功、东西还在」的另一种形态。
+    #[test]
+    fn pnpm_still_present_checks_every_script_and_the_package() {
+        let base = create_private_temp_dir("pnpm-still").expect("建临时目录");
+        let dir = base.join("g");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 一个脚本都没有、包目录也没有 → 确实删干净了
+        let clean = PnpmLocation {
+            dir: dir.clone(),
+            file: "pnpm.cmd".to_string(),
+            layout: PnpmLayout::NpmGlobal,
+        };
+        assert!(
+            !pnpm_still_present(&clean),
+            "脚本与包目录都不在时才算删干净"
+        );
+
+        // npm 漏删了 .ps1（只删了 .cmd）→ 必须仍然判为「还在」
+        std::fs::write(dir.join("pnpm.cmd"), b"x").unwrap();
+        assert!(pnpm_still_present(&clean), "脚本还在时不能报成功");
+        std::fs::remove_file(dir.join("pnpm.cmd")).unwrap();
+        std::fs::write(dir.join("pnpm.ps1"), b"x").unwrap();
+        assert!(
+            pnpm_still_present(&clean),
+            "只删掉 pnpm.cmd、pnpm.ps1 还在时也必须判为「还在」"
+        );
+        std::fs::remove_file(dir.join("pnpm.ps1")).unwrap();
+
+        // 脚本没了但包目录还在（npm 没删干净包）→ 也算「还在」
+        std::fs::create_dir_all(dir.join("node_modules").join("pnpm")).unwrap();
+        assert!(
+            pnpm_still_present(&clean),
+            "包目录还在时不能报成功"
+        );
+
         let _ = std::fs::remove_dir_all(&base);
     }
 }

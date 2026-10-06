@@ -354,6 +354,13 @@ pub fn t(key: &str) -> &'static str {
         // {1} = 系统给的具体原因（被占用 / 权限 / 其实非空）。没有它就只有一句笼统的「失败」，
         // 而 GUI 程序没有控制台，那种日志等于没有线索（上一次真机现场就是这样）。
         "log_uninstall_dir_remove_fail" => if en { "[uninstall] The folder {0} could not be removed (3 attempts): {1}" } else { "[uninstall] 目录 {0} 试了 3 次仍未删除：{1}" },
+        // 2026-10-07 真机现场：DSH 装在 npm 自己的默认全局目录里（向导装完的常态）时，
+        // 旧代码因为「等于默认目录 → 推导不出 target」而整段跳过收尾，残留一个空
+        // @deepseek-ai 目录却报成功。现在这条只在三级来源都推不出目录时才会出现，
+        // 必须留痕 —— 否则用户看到的仍然是「报成功、目录还在」。
+        "log_uninstall_cleanup_skipped" => if en { "[uninstall] Could not work out which folder to tidy up in (dsh.cmd's location, npm's global directory and the prefix= line in ~/.npmrc were all unavailable), so the emptied @deepseek-ai folder may still be there." } else { "[uninstall] 没能确定要在哪个目录做收尾（dsh.cmd 所在目录、npm 解析出的全局目录、~/.npmrc 里的 prefix= 三条线索都不可用），残留的空 @deepseek-ai 目录可能仍在。" },
+        // 单个 pnpm 文件删除失败（方案 B 里要删 PNPM_HOME 下的脚本，多半需要管理员权限）
+        "log_uninstall_pnpm_file_fail" => if en { "[uninstall] Could not remove {0}: {1}" } else { "[uninstall] 未能删除 {0}：{1}" },
         "log_uninstall_pnpm_ok" => if en { "[uninstall] pnpm global package removed." } else { "[uninstall] pnpm 全局包已卸载。" },
         "log_uninstall_pnpm_fail" => if en { "[uninstall] pnpm uninstall failed: {0}" } else { "[uninstall] pnpm 卸载失败：{0}" },
         // pnpm 不在我们试过的全局目录里（真机上它可能装在 Node 自己的安装目录）

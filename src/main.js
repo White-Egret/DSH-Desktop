@@ -1668,6 +1668,10 @@ function uninstallItemText(it) {
 
 /// 渲染结果列表。`rep` = 后端返回的 UninstallReport，`removedPkg` = 是否把「包本身已删除」
 /// 也列进去（失败时不该列 —— 那时包还在）。
+///
+/// 不去动容器自己的 `hidden` —— 确认弹窗里这个 <ul> 位于 `#uninstall-progress` 之内，
+/// 显示与否由父容器统一管；最终结果页那个才是独立控制。空清单在确认弹窗里是合法的
+/// （npm 删干净时收尾可能什么都不剩）。
 function renderUninstallItems(list, rep, removedPkg) {
   list.innerHTML = '';
   if (removedPkg && rep) {
@@ -1759,7 +1763,11 @@ function openPnpmPrompt() {
 }
 
 /// 最终结果页：pnpmRemoved = 用户选择了「一并卸载」并且它成功了
-function showUninstallFinal(pnpmRemoved) {
+///
+/// `pnpmRep` = 后端那次卸载的完整结果。成功时也把**逐条明细**列出来：
+/// 方案 B 之后 pnpm 可能不是 npm 装的，那时要删的是「脚本 + 包目录」好几项，
+/// 只说一句「已成功卸载」等于让用户无法确认自己到底删了什么。
+function showUninstallFinal(pnpmRemoved, pnpmRep) {
   $('uninstall-pnpm-ask').classList.add('hidden');
   $('uninstall-pnpm-actions').classList.add('hidden');
   $('uninstall-final-body').classList.remove('hidden');
@@ -1770,11 +1778,17 @@ function showUninstallFinal(pnpmRemoved) {
     // 「DSH 和 pnpm 已成功卸载。」
     msg.textContent = t('uninstall_done_both');
     $('uninstall-final-manual').classList.add('hidden');
+    // 逐条明细：方案 B 下 pnpm 可能不是 npm 装的，删的是「脚本 + 包目录」好几项
+    const list = $('uninstall-final-list');
+    renderUninstallItems(list, pnpmRep, true);
+    list.classList.toggle('hidden', !list.childNodes.length);
   } else {
     // 「DSH 已成功卸载，日后如需卸载管理 DSH 插件用的 pnpm，可以在终端执行：」
     msg.textContent = t('uninstall_done_dsh_only');
     $('uninstall-final-manual').classList.remove('hidden');
     $('uninstall-final-cmd').textContent = uninstallPnpmCommand();
+    // 「保留 pnpm」这条路没有删过任何东西，别把上一轮残留的明细留在这儿
+    $('uninstall-final-list').classList.add('hidden');
   }
 }
 
@@ -1791,7 +1805,7 @@ async function doUninstallPnpm() {
     const rep = await invoke('uninstall_pnpm', { dir: pnpmUninstallDir() });
     uninstalling = false;
     if (rep && rep.success) {
-      showUninstallFinal(true);
+      showUninstallFinal(true, rep);
     } else {
       // 失败不假装成功：留在追问态，让用户可以「保留 pnpm」继续收尾。
       // rep.items 里可能带着「pnpm 其实装在哪」这条信息（它不在 DSH 的全局目录里时）。

@@ -91,7 +91,7 @@
     toast_home_env_fail: '已保存设置，但用户环境变量 DSH_HOME 没改成功：{0}',
     // ---- 首选项：搬家警告（只在这一格被改动时才露出；文案里 <code> 是固定标签，无变量插入） ----
     home_move_title: '⚠ 搬完家目录内容后，务必删掉 profiles\\node_modules',
-    note_home_move_html: '<p>家目录里的 <code>profiles\\node_modules</code> 不是普通文件，而是一棵指回安装目录的 <b>Windows 目录联接（junction）</b>。常规拷贝（资源管理器拖拽、xcopy、不带 <code>/SL</code> 的 robocopy）会把它<b>展平成一堆空目录</b>，而 DSH 每次启动都要校验这层安装回退 —— 发现不对就抛错退出，服务整个起不来。</p><p><b>所以：把旧家目录的内容拷到新位置之后，请把 <code>&lt;新家目录&gt;\\profiles\\node_modules</code> 整个删掉，让 DSH 下次启动时自己重建。</b>其它内容（会话、技能、配置、凭据、插件快照等）照拷不误。</p><p>确实要整树原样拷贝，就用 <code>robocopy &lt;旧&gt; &lt;新&gt; /E /SL</code>（<code>/SL</code> = 复制符号链接本身而不是它的内容）。</p><p>如果你只是想<b>重建</b>一个新的家目录，那就不必拷贝旧家目录的全部内容 —— 只需拷贝 <code>.credentials.yaml</code>（或再加上 <code>settings.yaml</code>）就可以了，其余的 DSH 会在重启的时候自动生成。</p>',
+    note_home_move_html: '<p>家目录里的 <code>profiles\\node_modules</code> 不是普通文件，而是一棵指回安装目录的 <b>Windows 目录联接（junction）</b>。常规拷贝（资源管理器拖拽、xcopy、不带 <code>/SL</code> 的 robocopy）会把它<b>展平成一堆空目录</b>，而 DSH 每次启动都要校验这层安装回退 —— 发现不对就抛错退出，服务整个起不来。</p><p><b>所以：把旧家目录的内容拷到新位置之后，请把 <code>&lt;新家目录&gt;\\profiles\\node_modules</code> 整个删掉，让 DSH 下次启动时自己重建。</b>其它内容（会话、技能、配置、凭据、插件快照等）照拷不误。</p><p>确实要整树原样拷贝，就用 <code>robocopy &lt;旧&gt; &lt;新&gt; /E /SL</code>（<code>/SL</code> = 复制符号链接本身而不是它的内容）。</p><p>如果你只是想<b>重建</b>一个新的家目录，那就不必拷贝旧家目录的全部内容 —— 只需拷贝 <code>.credentials.yaml</code>（或再加上 <code>$DSH_HOME/profiles/web/cordis.patch.yml</code>）就可以了，其余的 DSH 会在重启的时候自动生成。</p>',
     // 保存时家目录变了、要点「确认」的那一句（把同一个坑在动手前再说一遍）
     confirm_home_change: '确认要把家目录改成 {0} 吗？\n\n如果这是「搬家」（把旧家目录的内容拷到新位置），记得拷贝完成后删掉 {1}，让 DSH 下次启动自己重建 —— 直接启动会失败。\n\n继续保存？',
     // ---- 首选项：包源 registry 对齐（读自动刷、点按钮才写 pnpm） ----
@@ -236,6 +236,9 @@
     uninstall_status_kept: '已保留',
     uninstall_status_failed: '删除失败',
     uninstall_status_absent: '本来就没有',
+    // 「这一步没做」必须与「已保留」分开说：前者是没找到该去哪个目录（残留可能还在），
+    // 后者是看过了、里面还有别人的东西所以有意留下。
+    uninstall_status_skipped: '未执行（没能确定目录，残留可能仍在）',
     // npm 配置那一行有四种处置，必须分开说 —— 混成一句「已保留」用户不知道该怎么办
     uninstall_status_npmrc_removed: '已删除（那一行是本程序写入的）',
     uninstall_status_npmrc_restored: '已还原为安装前的值',
@@ -458,7 +461,7 @@
     // ---- Preferences: move warning (shown only while that field is being edited;
     //      the <code> tags are fixed markup, no values are interpolated) ----
     home_move_title: '⚠ After copying the home dir, delete profiles\\node_modules',
-    note_home_move_html: '<p><code>profiles\\node_modules</code> inside the home dir is not a normal directory — it is a tree of <b>Windows directory junctions</b> pointing back at the install directory. Ordinary copies (Explorer drag-and-drop, xcopy, robocopy without <code>/SL</code>) <b>flatten them into a pile of empty directories</b>, and DSH validates that installation fallback on every start — when it finds the tree damaged it throws and exits, so the service will not come up at all.</p><p><b>So: after you copy the contents of the old home into the new location, delete <code>&lt;new home&gt;\\profiles\\node_modules</code> entirely and let DSH rebuild it on the next start.</b> Everything else (sessions, skills, settings, credentials, plugin snapshots …) can be copied as-is.</p><p>If you really need to copy the whole tree verbatim, use <code>robocopy &lt;old&gt; &lt;new&gt; /E /SL</code> (<code>/SL</code> copies the links themselves instead of what they point at).</p><p>If you only want to <b>rebuild a fresh home directory</b>, you do not need to copy the whole old home at all — just copy <code>.credentials.yaml</code> (plus <code>settings.yaml</code> if you want to keep your preferences); DSH generates the rest by itself on the next start.</p>',
+    note_home_move_html: '<p><code>profiles\\node_modules</code> inside the home dir is not a normal directory — it is a tree of <b>Windows directory junctions</b> pointing back at the install directory. Ordinary copies (Explorer drag-and-drop, xcopy, robocopy without <code>/SL</code>) <b>flatten them into a pile of empty directories</b>, and DSH validates that installation fallback on every start — when it finds the tree damaged it throws and exits, so the service will not come up at all.</p><p><b>So: after you copy the contents of the old home into the new location, delete <code>&lt;new home&gt;\\profiles\\node_modules</code> entirely and let DSH rebuild it on the next start.</b> Everything else (sessions, skills, settings, credentials, plugin snapshots …) can be copied as-is.</p><p>If you really need to copy the whole tree verbatim, use <code>robocopy &lt;old&gt; &lt;new&gt; /E /SL</code> (<code>/SL</code> copies the links themselves instead of what they point at).</p><p>If you only want to <b>rebuild a fresh home directory</b>, you do not need to copy the whole old home at all — just copy <code>.credentials.yaml</code> (plus <code>$DSH_HOME/profiles/web/cordis.patch.yml</code> if you want to keep your preferences); DSH generates the rest by itself on the next start.</p>',
     confirm_home_change: 'Change the home dir to {0}?\n\nIf this is a move (copying the old home dir contents to the new location), remember to delete {1} after the copy so DSH rebuilds it on the next start — starting with the copied tree fails.\n\nSave anyway?',
     // ---- Preferences: package sources (registry) — auto-read, written only on click ----
     lbl_registry: 'Package sources (npm / pnpm)',
@@ -597,6 +600,7 @@
     uninstall_status_kept: 'kept',
     uninstall_status_failed: 'failed to remove',
     uninstall_status_absent: 'was not there',
+    uninstall_status_skipped: 'not done (the folder could not be determined — leftovers may remain)',
     uninstall_status_npmrc_removed: 'removed (that line was written by this app)',
     uninstall_status_npmrc_restored: 'restored to its pre-install value',
     uninstall_status_npmrc_unchanged: 'left untouched (already the same as before the install)',

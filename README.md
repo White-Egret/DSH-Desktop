@@ -254,7 +254,7 @@ While the *DSH home dir* field in Preferences is being edited (typed into or pic
 - Ordinary copy tools (Explorer drag-and-drop, `xcopy`, **robocopy without `/SL`**) do not preserve those links and **flatten them into a pile of empty directories** — what lands at the new location looks complete and is guaranteed to fail on start.
 - **The correct move**: after copying the old home dir's contents into the new location, **delete `<new home>\profiles\node_modules` entirely** and let DSH rebuild it on the next start (the rebuild matches the original state: junctions pointing back at the install directory). Everything else (sessions, skills, settings, credentials, plugin snapshots, logs) can be copied as-is.
 - To copy the whole tree verbatim after all, use `robocopy <old> <new> /E /SL` (`/SL` copies the links themselves instead of what they point at).
-- **If you only want to rebuild a fresh home directory**, you do not need to copy the whole old home at all — just copy `.credentials.yaml` (plus `settings.yaml` if you want to keep your preferences); DSH generates the rest by itself on the next start.
+- **If you only want to rebuild a fresh home directory**, you do not need to copy the whole old home at all — just copy `.credentials.yaml` (plus `$DSH_HOME/profiles/web/cordis.patch.yml` if you want to keep your preferences); DSH generates the rest by itself on the next start.
 - **Back up first**: after the move, keep the old home dir around for a few days and archive it only once daily mode is confirmed healthy.
 
 ### Python environment
@@ -484,6 +484,12 @@ npm uninstall -g @deepseek-ai/dsh
 ```
 
 This works because the wizard records the chosen folder as npm's global directory (the `prefix=` line in your user-level `~/.npmrc`, see [Choosing where DSH gets installed](#choosing-where-dsh-gets-installed)), so npm looks in the same place DSH was installed into. Note that this route does **not** reclaim the emptied `@deepseek-ai` folder or put the `prefix=` line back (npm has no idea who wrote it) — use the in-app entry point if you want the leftovers handled too.
+
+**The cleanup does not depend on DSH living in a folder of your own choosing.** It works out which folder to tidy from where `dsh.cmd` actually is, and uses npm's current global directory and the `prefix=` line in `~/.npmrc` only as fallbacks — so installing into **npm's default global directory** (what the wizard leaves behind) reclaims that emptied `@deepseek-ai` folder just the same. If none of the three clues can be read (e.g. `dsh.cmd` is gone and npm will not start), the result list says so with a "not done" row and the reason goes to the log, rather than claiming the cleanup happened.
+
+**pnpm is cleaned up along with its own installation layout.** pnpm is not necessarily in npm's global directory: the wizard's one-click step runs `npm install -g pnpm` (lands in npm's global directory), while corepack and pnpm's own standalone installer put the scripts under `PNPM_HOME` (on Windows commonly `…\nodejs\pnpm\`). Both are recognised (`pnpm` / `pnpm.cmd` / `pnpm.CMD` / `pnpm.ps1` / `pnpm.exe`, looked for in the directory root *and* in the same-named subdirectory), and the **scripts plus `node_modules\pnpm` and `node_modules\.bin\pnpm*` are all removed**. Note that the `PNPM_HOME` directory itself is **not** deleted (it may hold corepack and other tools), that removing files from system folders such as `C:\Program Files\nodejs` may need administrator rights, and that a failure lists exactly which file could not be removed and why.
+
+Whether pnpm actually went away is judged on disk, not on the exit code: `npm uninstall -g` also exits 0 when the package was never in that folder (its output is just `up to date`), so what gets verified is that **the whole set of scripts and the package directory are gone** — npm missing a `pnpm.ps1` is not reported as a success.
 
 If you installed DSH **before** that behaviour existed, npm's answer and DSH's actual folder may still differ. Either point npm at the right folder once and uninstall:
 

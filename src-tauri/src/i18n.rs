@@ -350,12 +350,18 @@ pub fn t(key: &str) -> &'static str {
         "log_uninstall_fail" => if en { "[uninstall] npm uninstall failed: {0}" } else { "[uninstall] npm 卸载失败：{0}" },
         // 退出码 0 但东西还在（`npm uninstall -g --prefix X <包>` 在 X 里没装这个包时照样返回 0）
         "log_uninstall_no_effect" => if en { "[uninstall] npm reported success but the package is still present in {0} (npm exits 0 for \"nothing to remove\" too). npm said: {1}" } else { "[uninstall] npm 报告成功，但包仍在 {0} 里（npm 对「没有可删的东西」同样返回 0）。npm 的输出：{1}" },
-        // 收尾删空目录失败：这是「界面说删干净了、磁盘上还留着空目录」唯一能留下的证据
-        "log_uninstall_dir_remove_fail" => if en { "[uninstall] The empty folder {0} could not be removed (it is empty, so something else is holding it — a scanner, an indexer, or an open Explorer window). You can delete it by hand." } else { "[uninstall] 空目录 {0} 未能删除（它确实是空的，所以是有别的东西占着它 —— 杀软/索引器/打开的资源管理器窗口）。可以手动删除。" },
+        // 收尾删空目录失败：这是「界面说删干净了、磁盘上还留着空目录」唯一能留下的证据。
+        // {1} = 系统给的具体原因（被占用 / 权限 / 其实非空）。没有它就只有一句笼统的「失败」，
+        // 而 GUI 程序没有控制台，那种日志等于没有线索（上一次真机现场就是这样）。
+        "log_uninstall_dir_remove_fail" => if en { "[uninstall] The folder {0} could not be removed (3 attempts): {1}" } else { "[uninstall] 目录 {0} 试了 3 次仍未删除：{1}" },
         "log_uninstall_pnpm_ok" => if en { "[uninstall] pnpm global package removed." } else { "[uninstall] pnpm 全局包已卸载。" },
         "log_uninstall_pnpm_fail" => if en { "[uninstall] pnpm uninstall failed: {0}" } else { "[uninstall] pnpm 卸载失败：{0}" },
         // pnpm 不在我们试过的全局目录里（真机上它可能装在 Node 自己的安装目录）
         "log_uninstall_pnpm_elsewhere" => if en { "[uninstall] pnpm is not in the npm global directory this app manages; it was found at {0} instead, so it was left alone." } else { "[uninstall] pnpm 不在本程序管理的 npm 全局目录里：实际找到的是 {0}，因此没有动它。" },
+        // 所有候选目录都没有 pnpm.cmd：它根本不是 npm 全局装的（例如 corepack / 独立安装器）
+        "log_uninstall_pnpm_not_found" => if en { "[uninstall] pnpm is not installed in any npm global directory on this machine (not even Node's own folder), so there was nothing to uninstall. npm said: {0}" } else { "[uninstall] pnpm 不在本机任何一个 npm 全局目录里（连 Node 自身的安装目录里也没有），因此没有可卸载的东西。npm 的输出：{0}" },
+        // 找到了、也试过删，但还在（多半需要管理员权限）
+        "log_uninstall_pnpm_giveup" => if en { "[uninstall] Could not remove pnpm, which is at {0} (every npm global directory on this machine was tried). It may need administrator rights, or it was installed by something other than npm. npm said: {1}" } else { "[uninstall] 未能卸载 pnpm，它的位置是 {0}（本机所有 npm 全局目录都试过了）。可能该目录需要管理员权限，或它不是 npm 装的。npm 的输出：{1}" },
 
         // ---------- 引导安装 pnpm（Node 就绪后补装 / 向导「缺少 pnpm」一步） ----------
         "setup_pnpm_npm_missing" => if en { "npm.cmd was not found, so pnpm cannot be installed. Install Node.js first." } else { "未找到 npm.cmd，无法安装 pnpm。请先安装 Node.js。" },

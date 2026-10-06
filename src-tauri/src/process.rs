@@ -5485,6 +5485,11 @@ pub struct UninstallItem {
     pub path: String,
     /// removed = 已删除 / kept = 有意保留 / failed = 删除失败 / absent = 本来就没有
     pub status: String,
+    /// 失败时的**具体原因**（系统给的错误文案），成功/保留时为空串。
+    /// 为什么要有它：真机上出现过「收尾报失败、却查不出为什么」，而 GUI 程序没有控制台、
+    /// `eprintln!` 等于没说 —— 原因必须一路带回日志。
+    #[serde(default)]
+    pub detail: String,
 }
 
 /// 卸载结果。刻意不返回「人话」而返回结构化数据：文案要跟着界面语言走，
@@ -5539,19 +5544,32 @@ fn dir_is_empty_or_absent(dir: &Path) -> bool {
 /// 「判断时是空的、删除时已经不是」这类两段式逻辑的漏洞。
 /// 不存在 → None（清单里不必出现）；非空 → Some("kept")；删成功/失败 → removed/failed。
 ///
-/// `remove_dir` 的 `Ok(())` **不足以证明它没了**：真机现场出现过「界面按成功处理、
-/// 目录却还在」的情况（`%TEMP%` 类路径上偶发，杀软/索引器短暂持有句柄也会这样）。
-/// 所以删完再确认一次存在性，只有确认不在才算 removed —— 宁可报「删除失败」，
-/// 也不能报一个「已删除」而磁盘上还留着（那是最难被用户察觉的谎报）。
-fn remove_dir_if_empty(dir: &Path) -> Option<&'static str> {
+/// 为什么带重试：真机连续两次出现「收尾报告已删、目录却还在」。`remove_dir`（底层是
+/// `RemoveDirectoryW`）在 Windows 上会因**瞬时占用**失败 —— 杀软扫描、索引器、资源管理器
+/// 正打开着那个空目录，都会让句柄短暂压住它（这类占用通常只有几十毫秒）。三次、逐次加长的
+/// 重试足以吃掉这种抖动，而**真正删不掉**的情况（权限、目录其实非空）会在三次后如实报 failed，
+/// 并且把系统错误码带回给日志 —— 上一次现场最大的问题就是「失败了但什么都没说」。
+fn remove_dir_if_empty(dir: &Path) -> Option<(&'static str, Option<String>)> {
     if !dir.is_dir() {
         return None;
     }
     if !dir_is_empty_or_absent(dir) {
-        return Some("kept");
+        return Some(("kept", None));
     }
-    let removed = std::fs::remove_dir(dir).is_ok() && !dir.exists();
-    Some(if removed { "removed" } else { "failed" })
+    let mut last_err: Option<String> = None;
+    for attempt in 0..3u32 {
+        match std::fs::remove_dir(dir) {
+            // 删完再确认一次存在性：`Ok(())` 本身不足以证明它没了
+            Ok(()) if !dir.exists() => return Some(("removed", None)),
+            Ok(()) => last_err = None,
+            Err(e) => last_err = Some(e.to_string()),
+        }
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(120 * (attempt as u64 + 1)));
+        }
+    }
+    // 失败时把**具体原因**交回调用方写进日志（GUI 程序没有控制台，eprintln 等于没说）
+    Some(("failed", last_err))
 }
 
 /// 包名最后一段（`@deepseek-ai/dsh` → `dsh`）：拼全局目录里的落点用。
@@ -5620,10 +5638,12 @@ fn run_npm_uninstall(
 fn cleanup_after_uninstall(app: &AppHandle, dir: &Path) -> Vec<UninstallItem> {
     let items = cleanup_after_uninstall_items(dir);
     for it in items.iter().filter(|i| i.status == "failed") {
+        // 带上系统给的具体原因（`detail`）：上次现场只有一句笼统的「删除失败」，
+        // 等于没有线索。有错误码/文案才能判断是权限、占用还是别的原因。
         emit_log(
             app,
             "update",
-            i18n::fmt("log_uninstall_dir_remove_fail", &[&it.path]),
+            i18n::fmt("log_uninstall_dir_remove_fail", &[&it.path, &it.detail]),
         );
     }
     items
@@ -5642,32 +5662,35 @@ fn cleanup_after_uninstall_items(dir: &Path) -> Vec<UninstallItem> {
         if !p.is_file() {
             continue;
         }
-        let (status, path) = match std::fs::remove_file(&p) {
-            Ok(()) => ("removed", p),
-            Err(_) => ("failed", p),
+        let (status, detail) = match std::fs::remove_file(&p) {
+            Ok(()) => ("removed", String::new()),
+            Err(e) => ("failed", e.to_string()),
         };
         items.push(UninstallItem {
             kind: "shims".to_string(),
-            path: path.to_string_lossy().to_string(),
+            path: p.to_string_lossy().to_string(),
             status: status.to_string(),
+            detail,
         });
     }
 
     // ② 空掉的 scope 目录（npm 不会回收它 —— 这就是那个「残留空目录」）
-    if let Some(s) = remove_dir_if_empty(&scope) {
+    if let Some((status, detail)) = remove_dir_if_empty(&scope) {
         items.push(UninstallItem {
             kind: "scope".to_string(),
             path: scope.to_string_lossy().to_string(),
-            status: s.to_string(),
+            status: status.to_string(),
+            detail: detail.unwrap_or_default(),
         });
     }
 
     // ③ `node_modules` 自己（只有在它**彻底空掉**时才删；有别人的包就保留）
-    if let Some(s) = remove_dir_if_empty(&npm_node_modules) {
+    if let Some((status, detail)) = remove_dir_if_empty(&npm_node_modules) {
         items.push(UninstallItem {
             kind: "node_modules".to_string(),
             path: npm_node_modules.to_string_lossy().to_string(),
-            status: s.to_string(),
+            status: status.to_string(),
+            detail: detail.unwrap_or_default(),
         });
     }
     items
@@ -5792,6 +5815,7 @@ fn uninstall_dsh_inner(app: &AppHandle) -> Result<UninstallReport, String> {
         kind: "npmrc".to_string(),
         path: npmrc_path.map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
         status: npmrc_status,
+        detail: String::new(),
     });
 
     // DSH 家目录：**有意保留**（会话、配置、凭据都在里面），但要在结果里明说，
@@ -5800,6 +5824,7 @@ fn uninstall_dsh_inner(app: &AppHandle) -> Result<UninstallReport, String> {
         kind: "home".to_string(),
         path: cfg.dsh_home_dir.clone(),
         status: "kept".to_string(),
+        detail: String::new(),
     });
 
     // 清掉指向已删程序的路径并把状态归位（检测结果会自然变成「未找到 DSH」）
@@ -5844,11 +5869,19 @@ pub async fn uninstall_pnpm(app: AppHandle, dir: Option<String>) -> Result<Unins
 ///   ① 前端带回来的目录（刚卸载 DSH 的那个 —— 正常路径上就是它）
 ///   ② `dsh_path` 还能推导出来的目录（防御性：万一前端没带）
 ///   ③ npm 自己解析出的全局目录
-///   ④ npm 在 Windows 上的默认全局目录
+///   ④ **node 自身所在目录** —— 这一条是 2026-10-06 真机补上的：向导的「引导安装 pnpm」
+///      跑的是 `npm install -g pnpm`（**不带 `--prefix`**，见 install_pnpm_blocking），
+///      于是 pnpm 落在「npm 当时的默认全局目录」里；如果那台机器后来才配 `prefix=`，
+///      pnpm 就留在 node 目录下（真机现场：`C:\Program Files\nodejs\pnpm.CMD`）。
+///      少了这条候选，界面就会把「pnpm 明明装着、只是不在 DSH 的目录里」报成
+///      「请照你当初安装它的方式卸载」——对用户毫无帮助。
+///   ⑤ npm 在 Windows 上的默认全局目录
 ///
-/// 为什么要一串候选：pnpm 未必住在 DSH 的全局目录里（真机上它可能装在 Node 自己的安装
-/// 目录、或用户以前用别的 prefix 装的）。只试一个目录，就会出现「npm 说没装这个包、
-/// 退出码 0、界面报成功」这种假成功 —— 而挨个候选去**看文件系统**是廉价的（不跑 npm）。
+/// 为什么要一串候选：pnpm 未必住在 DSH 的全局目录里。只试一个目录，就会出现
+/// 「npm 说没装这个包、退出码 0、界面报成功」这种假成功 —— 而挨个候选去**看文件系统**
+/// 是廉价的（不跑 npm），只有真躺着 `pnpm.cmd` 的那个才会拿去卸载。
+///
+/// 顺序即优先级：用户明确带回来的目录（刚卸 DSH 用的那个）排最前，其余按「谁更可能是它家」排。
 fn pnpm_candidate_dirs(cfg: &Config, hint: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |v: String| {
@@ -5868,6 +5901,11 @@ fn pnpm_candidate_dirs(cfg: &Config, hint: Option<&str>) -> Vec<String> {
     }
     if let Some(p) = detect::effective_npm_prefix() {
         push(p);
+    }
+    if let Some(node) = detect::find_node_exe() {
+        if let Some(d) = node.parent() {
+            push(d.to_string_lossy().to_string());
+        }
     }
     if let Some(base) = std::env::var("APPDATA").ok() {
         push(Path::new(&base).join("npm").to_string_lossy().to_string());
@@ -5910,17 +5948,22 @@ fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<Uninstal
     set_status(app, "idle", None);
 
     let Some(dir_used) = used else {
-        // 没删掉。要分清两种现实，别混成一句「失败」：
-        //   - 候选里根本没有 pnpm（它装在别处）→ 告诉用户它实际在哪
-        //   - 试过了但没删成 → 给 npm 的输出
+        // 没删掉。三种现实必须分开说，混成一句「失败」用户没法行动：
+        //   ① 所有候选目录里都没有 `pnpm.cmd` → 它根本不是 npm 全局装的，或装在别的地方
+        //   ② 找到了、也试着删了，但**还在**（多半要管理员权限）→ 给出它在哪 + npm 的话
+        //   ③ 找到了、删掉了，但检测仍能看见它 → 同 ②，交给用户手动处理
         let detected = detect::find_pnpm_cmd().map(|p| p.to_string_lossy().to_string());
         // 按**引用**匹配（`Some(ref p)`）：`detected` 后面还要用来填 UninstallItem 的 path，
-        // 按值匹配会把它移走，后面 `detected.clone()` 就成了「借用已部分移出的值」（CI 实测）。
+        // 按值匹配会把它移走（CI 上就是这里报的 E0382）。
         let (status, msg) = match detected {
             Some(ref p) => (
                 "still_elsewhere",
                 // as_str()：让数组元素保持 `&&str` 的统一形态（同 CI 挂过三次的那个坑）
-                i18n::fmt("log_uninstall_pnpm_elsewhere", &[&p.as_str()]),
+                i18n::fmt("log_uninstall_pnpm_giveup", &[&p.as_str(), &last_out]),
+            ),
+            None if candidates.is_empty() => (
+                "failed",
+                i18n::fmt("log_uninstall_pnpm_not_found", &[&last_out]),
             ),
             None => ("failed", i18n::fmt("log_uninstall_pnpm_fail", &[&last_out])),
         };
@@ -5935,6 +5978,7 @@ fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<Uninstal
                 kind: "package".to_string(),
                 path: detected.unwrap_or_default(),
                 status: status.to_string(),
+                detail: String::new(),
             }],
         });
     };

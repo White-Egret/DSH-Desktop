@@ -254,7 +254,7 @@ While the *DSH home dir* field in Preferences is being edited (typed into or pic
 - Ordinary copy tools (Explorer drag-and-drop, `xcopy`, **robocopy without `/SL`**) do not preserve those links and **flatten them into a pile of empty directories** — what lands at the new location looks complete and is guaranteed to fail on start.
 - **The correct move**: after copying the old home dir's contents into the new location, **delete `<new home>\profiles\node_modules` entirely** and let DSH rebuild it on the next start (the rebuild matches the original state: junctions pointing back at the install directory). Everything else (sessions, skills, settings, credentials, plugin snapshots, logs) can be copied as-is.
 - To copy the whole tree verbatim after all, use `robocopy <old> <new> /E /SL` (`/SL` copies the links themselves instead of what they point at).
-- **If you only want to rebuild a fresh home directory**, you do not need to copy the whole old home at all — just copy `.credentials.yaml` (plus `$DSH_HOME/profiles/web/cordis.patch.yml` if you want to keep your preferences); DSH generates the rest by itself on the next start.
+- **If you only want to rebuild a fresh home directory**, you do not need to copy the whole old home at all — just copy `.credentials.yaml` (plus `$DSH_HOME/profiles/web/cordis.patch.yml` if you want to keep your settings); DSH generates the rest by itself on the next start.
 - **Back up first**: after the move, keep the old home dir around for a few days and archive it only once daily mode is confirmed healthy.
 
 ### Python environment

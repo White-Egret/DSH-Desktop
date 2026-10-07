@@ -1,0 +1,15 @@
+{
+  "name": "@local/dsh-desktop-python-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH Desktop —— Python 能力桥接宿主插件（spawn dsh_bridge.runtime，把 manifest 里的工具注册进 ctx.tools）",
+  "exports": {
+    ".": "./index.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

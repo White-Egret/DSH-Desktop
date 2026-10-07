@@ -1482,6 +1482,22 @@ pub fn remember_node_min_ack(app: &AppHandle, min_version: &str) -> Result<(), S
     write_config_key(app, "node_min_ack", min_version)
 }
 
+/// 读 config.json 里的一个字符串键是否「有值」。
+///
+/// 与 `write_config_key` 成对使用（Python 桥接的 pending 标记就是这么存的）：
+/// **判「有值」而不是判「键存在」**，因为清除标记是写空串而不是删键 ——
+/// 走同一个写入路径（原子替换、读改写合并）才不会漏掉别的设置。
+pub(crate) fn read_config_flag(app: &AppHandle, key: &str) -> bool {
+    let path = config_path(app);
+    let Ok(s) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&s)
+        .ok()
+        .and_then(|v| v.get(key).and_then(|x| x.as_str()).map(|t| !t.trim().is_empty()))
+        .unwrap_or(false)
+}
+
 /// 记下工具栏模式偏好（调用方先用 `normalize_toolbar_mode` 归一化）。
 /// 由快捷键 Ctrl+Shift+H 直接切换模式时调用：那条路径没有设置页表单可提交，
 /// 只该动这一个键（首选项「保存」那条路仍走 save_config 整体提交）。

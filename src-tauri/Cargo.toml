@@ -47,6 +47,11 @@ windows-sys = { version = "0.59", features = [
     # WM_SETTINGCHANGE（见 process::win::broadcast_environment_change）；没有这一广播，
     # 用户新开的终端要等重新登录才认这个目录。
     "Win32_UI_WindowsAndMessaging",
+    # 卸载 pnpm 时删 `C:\Program Files\nodejs` 下的文件需要管理员权限：用 ShellExecuteExW
+    # 的 "runas" 动词弹一次正规 UAC，而不是让用户自己去开管理员终端（见 process.rs 的
+    # `uninstall_pnpm_elevated`）。ShellExecuteEx 属于 Shell / UI 两层。
+    "Win32_UI_Shell",
+    "Win32_System_Com",
 ] }
 
 [profile.release]

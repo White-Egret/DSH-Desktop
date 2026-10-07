@@ -1,5 +1,5 @@
 use crate::config::{self, Config};
-use crate::{detect, i18n, logger};
+use crate::{detect, i18n, logger, py_bridge};
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Read};
 use std::net::{SocketAddr, TcpStream};
@@ -419,6 +419,21 @@ pub(crate) fn set_status(app: &AppHandle, status: &str, message: Option<String>)
         "dsh-status",
         StatusEvent { status: status.to_string(), pid, port, message, safe_mode },
     );
+    // DSH 首次进入「运行中」的这一刻：如果 Python 桥接还挂着 pending 标记，
+    // 就地把它注册进 profile（见 py_bridge::activate_pending 的时序纪律）。
+    // 挂在这里而不是「安装时」是因为：安装那一刻 profile 可能还不存在、
+    // 或正被运行中的 DSH 持有，两边同时初始化同一个 profile 会互相踩。
+    //
+    // 刻意丢到**独立线程**：`dsh plugin add` 是一次 pnpm 安装（可能几十秒到几分钟），
+    // 而 set_status 在 DSH 启动链上（就绪后紧接着就 open_dsh_webview），
+    // 在这里同步等会把页面打开一起拖住。pending 为空时 activate_pending 立即返回，
+    // 但那个判断也不该占用启动线程。
+    if status == "running" {
+        let app2 = app.clone();
+        std::thread::spawn(move || {
+            crate::py_bridge::activate_pending(&app2);
+        });
+    }
 }
 
 pub(crate) fn current_status(app: &AppHandle) -> String {
@@ -746,7 +761,10 @@ pub(crate) fn command_for(program: &str, args: &[String]) -> Result<Command, Str
 }
 
 /// 带超时地运行 <program> <args...> 并捕获输出（用于版本查询等小输出命令）
-fn run_cmd_capture(
+///
+/// 对 py_bridge 可见：它要用同一条路跑 `dsh plugin --profile … add …`
+/// （那条命令的输出必须能读到 —— 失败原因几乎总在那几行里）。
+pub(crate) fn run_cmd_capture(
     program: &str,
     args: &[String],
     cwd: &str,
@@ -3094,7 +3112,11 @@ pub async fn detect_environment(_app: AppHandle) -> Result<detect::EnvDetection,
 
 // ---------- 首次运行引导安装（要求七；不内置 Node/DSH，只在线引导官方安装包） ----------
 
-fn setup_progress(app: &AppHandle, phase: &str, msg: &str) {
+/// 发一条阶段性进度（前端 + desktop.log）。
+///
+/// 对 py_bridge 可见：桥接的「释放 → 注册」是基本安装的**后续阶段**，
+/// 必须复用同一条通道，否则设置页的进度区会停在 pip 那一步不动。
+pub(crate) fn setup_progress(app: &AppHandle, phase: &str, msg: &str) {
     let _ = app.emit(
         "setup-status",
         SetupStatus { phase: phase.to_string(), message: msg.to_string() },
@@ -3344,8 +3366,15 @@ pub async fn setup_install_pnpm(app: AppHandle) -> Result<(), String> {
 // pip 的逐行输出走 `python-log`。与首装向导**共用 setup_busy**：同一时刻只允许一个
 // 安装任务，所以向导不会和 Python 安装抢进度区，撞上时前端拿到 err_setup_busy 即可。
 
-/// 基本安装的 8 个包。**顺序与拼写必须与前端 `py_packages_html` 的文案一致**（改这里就同步改 i18n.js）。
-const PY_BASIC_PKGS: [&str; 8] = [
+/// 基本安装的 9 个包。**顺序与拼写必须与前端 `py_packages_html` 的文案一致**（改这里就同步改 i18n.js）。
+///
+/// `markitdown[all]` 是微软的「任意文档 → Markdown」库（docx / pptx / xlsx / xls / pdf /
+/// html / 音频转写 / outlook / azure-doc-intel … 各 extras 的汇总），也是桥接工具
+/// `convert_file_to_markdown` 的底座。注意 `[all]` 在 argv 里是**单个参数**：
+/// 我们不经 shell 直接把字符串丢给 CreateProcess，所以既不需要引号也不该加引号
+/// （加了 pip 会去找一个名字里带引号的包）。同理它要求 Python ≥ 3.10，见 detect.rs。
+const PY_BASIC_PKGS: [&str; 9] = [
+    "markitdown[all]",
     "python-docx",
     "python-pptx",
     "openpyxl",
@@ -3356,6 +3385,14 @@ const PY_BASIC_PKGS: [&str; 8] = [
     "typing_extensions",
 ];
 
+/// 桥接运行时：**单独一个常量、同一次 pip 装完**（不另起一条命令）。
+///
+/// 之所以与办公包分开成常量而不是并进 PY_BASIC_PKGS：它的作用不是「给 AI 用的库」，
+/// 而是「把那些库挂成 DSH 工具的运行时」。日志与错误文案要能分开说清是哪一部分挂了
+/// （`dsh-python-bridge` 装不上 = 桥接不可用，不等于办公库没装上），而
+/// `pip_install_blocking` 只接受一组包，所以这里用 `basic_install_pkgs()` 拼出并集。
+const PY_BRIDGE_PKGS: [&str; 1] = ["dsh-python-bridge"];
+
 /// 数据分析扩展包（同样与前端文案同源）
 const PY_EXTRA_PKGS: [&str; 5] = ["numpy", "pandas", "python-dateutil", "tzdata", "six"];
 
@@ -3363,8 +3400,23 @@ const PY_EXTRA_PKGS: [&str; 5] = ["numpy", "pandas", "python-dateutil", "tzdata"
 /// XlsxWriter → xlsxwriter、Pillow → PIL —— 与包名不是一回事）。
 /// 状态行回答的是「这些库现在 import 得了吗」，而不是「pip list 里有没有」：
 /// 在别的虚拟环境里装过、或文件损坏，都必须以真正能 import 为准。
-const PY_BASIC_MODULES: &str = "docx pptx openpyxl xlsxwriter lxml PIL et_xmlfile typing_extensions";
+///
+/// `markitdown` 走**包名同名**（`[all]` 只是 pip 的 extras 语法，导入名就是 `markitdown`）；
+/// `dsh_bridge` 同理 —— 这两个正是「基本安装」之后 AI 能不能调起工具的前提，
+/// 所以它们缺了也要在状态行上体现出来。
+const PY_BASIC_MODULES: &str = "markitdown dsh_bridge docx pptx openpyxl xlsxwriter lxml PIL et_xmlfile typing_extensions";
 const PY_EXTRA_MODULES: &str = "numpy pandas dateutil tzdata six";
+
+/// 基本安装实际要装的那一组包（办公库 + 桥接运行时），供 pip 与文案共用。
+///
+/// 返回 Vec 而不是常量数组：`PY_BASIC_PKGS` 与 `PY_BRIDGE_PKGS` 各自保持独立语义，
+/// 而真正下发给 pip 的是**并集**。每次调用重新拼一份（10 个字符串，可忽略），
+/// 换来的是「加包时不会漏掉某条路径」。
+fn basic_install_pkgs() -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = PY_BASIC_PKGS.to_vec();
+    v.extend_from_slice(&PY_BRIDGE_PKGS);
+    v
+}
 
 /// 官方安装包的体积粗筛（真机 3.14.7 amd64 ≈ 32MB）。真正的完整性判断在下面那次
 /// SHA-256 比对，这里只是防「截断的下载 / 一个 HTML 错误页被当成安装包」。
@@ -3534,7 +3586,7 @@ fn spawn_python_task(
     Ok(())
 }
 
-/// 基本安装的主体：本体（缺才装）→ 办公文档读写包。
+/// 基本安装的主体：本体（缺才装）→ 办公文档 + markitdown → 桥接包（释放）→ 注册激活。
 fn python_basic_install_blocking(
     app: &AppHandle,
     install_dir: Option<&str>,
@@ -3542,8 +3594,10 @@ fn python_basic_install_blocking(
     setup_progress(app, "install", i18n::t("setup_py_detect"));
     let py = match detect::find_python() {
         Some(py) => {
-            // 已有可用的 Python（≥ 3.8）就跳过本体 —— 再装一份只会留下两个解释器、
-            // 两份 PATH，而用户也说不清到底用的是哪个。
+            // 已有可用的 Python（≥ detect::PYTHON_MIN_VERSION，即 3.10）就跳过本体 ——
+            // 再装一份只会留下两个解释器、两份 PATH，而用户也说不清到底用的是哪个。
+            // 「够新」由 find_python 内部的 python_version_usable 把关：3.8/3.9 会被
+            // 判成「没有可用 Python」，于是走下面装新本体那条路（日志里会说明原因）。
             let line = i18n::fmt(
                 "setup_py_skip",
                 &[
@@ -3559,8 +3613,15 @@ fn python_basic_install_blocking(
             detect::find_python().ok_or_else(|| i18n::t("setup_py_missing").to_string())?
         }
     };
-    setup_progress(app, "install", &i18n::fmt("setup_py_pip_start", &[&PY_BASIC_PKGS.join(" ")]));
-    pip_install_blocking(app, &py, &PY_BASIC_PKGS)
+    let pkgs = basic_install_pkgs();
+    setup_progress(app, "install", &i18n::fmt("setup_py_pip_start", &[&pkgs.join(" ")]));
+    pip_install_blocking(app, &py, &pkgs)?;
+
+    // pip 成功之后才是桥接：先释放代码，再尝试就地激活。失败**不回滚 pip**
+    // （那只会把已经装好的库也变成「没装」），而是降级成「待激活」标记 + 一句人话，
+    // 用户下次进入 DSH 时会自动补上（见 py_bridge::activate_pending 的时序纪律）。
+    let notes = py_bridge::deploy_after_install(app, &py)?;
+    Ok(notes)
 }
 
 /// `python -m pip install <包...>`：逐行把 pip 的输出送到 `python-log`（进度区里看得见），
@@ -5503,6 +5564,13 @@ pub struct UninstallReport {
     /// npm 的原始输出（前端只用它给出错提示与「查看日志」的依据）
     pub output: String,
     pub items: Vec<UninstallItem>,
+    /// **需要管理员权限**才能删掉的那些路径（`C:\Program Files\...` 之类）。
+    ///
+    /// 为什么单独一个字段而不是塞进 items：前端要据此**换一个按钮**（「以管理员身份重试」
+    /// 取代无用的「重试」），而不是多显示一行失败 —— 同一批路径逐条列出来只会让人
+    /// 以为要挨个点。空数组 = 没有这类路径（`serde(default)` 让旧调用点不必改）。
+    #[serde(default)]
+    pub needs_elevation: Vec<String>,
 }
 
 /// npm 的全局目录里，**只有这个 scope 目录**是我们有权在空掉之后回收的
@@ -5923,6 +5991,9 @@ fn uninstall_dsh_inner(app: &AppHandle) -> Result<UninstallReport, String> {
             dir: target.clone().unwrap_or_default(),
             output: out,
             items: Vec::new(),
+            // DSH 自己那一步从不留下「需要管理员权限」的路径：npm 全局目录通常是用户可写的，
+            // 写不进的情况会作为 npm 的失败原样报出（而不是在这里要求提权）。
+            needs_elevation: Vec::new(),
         });
     }
 
@@ -6004,6 +6075,7 @@ fn uninstall_dsh_inner(app: &AppHandle) -> Result<UninstallReport, String> {
         dir: target.unwrap_or_default(),
         output: out,
         items,
+        needs_elevation: Vec::new(),
     })
 }
 
@@ -6122,17 +6194,22 @@ fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<Uninstal
     let mut last_out = String::new();
     let mut used: Option<PnpmLocation> = None;
     let mut items: Vec<UninstallItem> = Vec::new();
+    // 权限不足而删不掉的路径。只收**系统位置**里的那些（needs_elevation）：别处失败
+    // （占用、非空等）弹 UAC 也没用，那样只会白白吓用户一跳。
+    let mut denied: Vec<PathBuf> = Vec::new();
     for loc in &candidates {
         // 落点还在吗？（下一轮候选的判断要用）—— 不在就当它已处理过。
         if !loc.dir.join(&loc.file).is_file() {
             continue;
         }
-        let (out, removed_items) = remove_pnpm_at(app, &npm, loc, cache.as_deref());
+        let (out, removed_items, denied_here) =
+            remove_pnpm_at(app, &npm, loc, cache.as_deref());
         if !out.trim().is_empty() {
             logger::append_line(&logger::desktop_log_path(app), &out);
         }
         last_out = out;
         items.extend(removed_items);
+        denied.extend(denied_here.into_iter().filter(|p| needs_elevation(p)));
         if !pnpm_still_present(loc) {
             used = Some(loc.clone());
             break;
@@ -6176,6 +6253,8 @@ fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<Uninstal
             output: last_out,
             // 用 items 把「它其实在哪」带回给界面（前端按 kind/status 渲染成一行人话）
             items: all,
+            // 权限不足时**非空** —— 前端据此把「重试」换成「以管理员身份重试」并走 UAC。
+            needs_elevation: denied.iter().map(|p| p.to_string_lossy().to_string()).collect(),
         });
     };
 
@@ -6186,6 +6265,8 @@ fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<Uninstal
         dir: loc_used.dir.to_string_lossy().to_string(),
         output: last_out,
         items,
+        // 成功 = 整组脚本与包目录都已不在（pnpm_still_present 核过），所以这里必为空。
+        needs_elevation: Vec::new(),
     })
 }
 
@@ -6229,12 +6310,17 @@ fn pnpm_still_present(loc: &PnpmLocation) -> bool {
 /// **不返回 Err**：删不掉单个文件不是「这一步做不下去」，而是「这一项 failed」—— 事实由
 /// `items` 如实带回去，调用方据此决定整体成功与否（`pnpm_still_present`）。npm 自己那条命令
 /// 失败（超时 / 起不来）同样只作为输出文本记下：后面还有补删要做。
+///
+/// 返回值第三项 `denied` = **因权限不足而删不掉**的那些路径（`ErrorKind::PermissionDenied`）。
+/// 它与「文件正被占用」必须分开：占用重试就有用，权限不足则只能靠提权 ——
+/// 典型就是 `C:\Program Files\nodejs` 下的 pnpm（Node 的 MSI 当初能装进去，正是因为
+/// 它走了 UAC 提权，而这一步没有，见 [`needs_elevation`]）。上层拿它决定要不要弹 UAC。
 fn remove_pnpm_at(
     app: &AppHandle,
     npm: &str,
     loc: &PnpmLocation,
     cache: Option<&str>,
-) -> (String, Vec<UninstallItem>) {
+) -> (String, Vec<UninstallItem>, Vec<PathBuf>) {
     let dir_s = loc.dir.to_string_lossy().to_string();
     let mut items: Vec<UninstallItem> = Vec::new();
     let mut out = String::new();
@@ -6249,27 +6335,39 @@ fn remove_pnpm_at(
 
     // 无论哪种布局，都把「删完还在的文件」逐个补掉（npm 漏删 / 非 npm 装）。
     // 只删**本程序认定的 pnpm 文件名**，绝不对目录做递归删除。
+    //
+    // ⚠ 必须按**规范化后的路径**去重（Windows 大小写不敏感）：`pnpm.cmd` 与 `pnpm.CMD`
+    // 指向同一个文件，真机现场（2026-10-07）里同一个文件因此被报了两次
+    // 「拒绝访问」，紧接着第二个候选目录又把它整组重报一遍 —— 用户看到 8 条几乎一样的
+    // 报错，真实原因只有一条（权限不足）。
     let mut leftovers: Vec<PathBuf> = Vec::new();
-    for name in PNPM_SCRIPT_NAMES {
-        for base in [loc.dir.clone(), loc.dir.join("pnpm")] {
-            let p = base.join(name);
-            if p.is_file() {
-                leftovers.push(p);
-            }
+    let mut seen: Vec<String> = Vec::new();
+    let mut add = |p: PathBuf, leftovers: &mut Vec<PathBuf>, seen: &mut Vec<String>| {
+        if !p.exists() {
+            return;
         }
-    }
-    let pkg_dir = global_pkg_dir(&dir_s, "pnpm");
-    if pkg_dir.exists() {
-        leftovers.push(pkg_dir);
-    }
-    // `node_modules\.bin` 里的 pnpm 转发脚本（独立安装版也会有）
-    for name in ["pnpm", "pnpm.cmd", "pnpm.ps1"] {
-        let p = loc.dir.join("node_modules").join(".bin").join(name);
-        if p.is_file() {
+        let key = p.to_string_lossy().to_lowercase();
+        if !seen.contains(&key) {
+            seen.push(key);
             leftovers.push(p);
         }
+    };
+    for name in PNPM_SCRIPT_NAMES {
+        for base in [loc.dir.clone(), loc.dir.join("pnpm")] {
+            add(base.join(name), &mut leftovers, &mut seen);
+        }
+    }
+    add(global_pkg_dir(&dir_s, "pnpm"), &mut leftovers, &mut seen);
+    // `node_modules\.bin` 里的 pnpm 转发脚本（独立安装版也会有）
+    for name in ["pnpm", "pnpm.cmd", "pnpm.ps1"] {
+        add(
+            loc.dir.join("node_modules").join(".bin").join(name),
+            &mut leftovers,
+            &mut seen,
+        );
     }
 
+    let mut denied: Vec<String> = Vec::new();
     for p in leftovers {
         let kind = if p.is_dir() { "package" } else { "shims" }.to_string();
         let path = p.to_string_lossy().to_string();
@@ -6281,6 +6379,14 @@ fn remove_pnpm_at(
         let status = match res {
             Ok(()) => "removed",
             Err(e) => {
+                // os error 5 = ERROR_ACCESS_DENIED。这与「文件正被占用」不同：
+                // 占用是暂时的（重试有意义），权限不足是**这条路径根本不该由当前用户删**
+                // （典型就是 `C:\Program Files\nodejs` 下的 pnpm —— Node 的 MSI 能装进来是
+                // 因为它走了 UAC 提权，我们这步没有，见 `needs_elevation`）。
+                // 收集起来交给上层决定要不要弹 UAC，而不是就地报一串「拒绝访问」。
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    denied.push(path.clone());
+                }
                 emit_log(
                     app,
                     "update",
@@ -6310,7 +6416,143 @@ fn remove_pnpm_at(
         }
     }
 
-    (out, items)
+    (out, items, denied)
+}
+
+/// 这个路径是不是**当前用户不该直接写**的系统位置（`C:\Program Files` 及其之下）。
+///
+/// 为什么要专门判它：pnpm 由 corepack / 官方安装器装进 `C:\Program Files\nodejs` 时，
+/// 当前用户**没有删除权**（真机现场 2026-10-07：四个文件全是 `os error 5`）。这时继续
+/// 弹失败没有意义 —— 要么提权删，要么如实告诉用户「它需要管理员权限」并把命令给他。
+/// 只认 `ProgramFiles` 这一个环境变量，不做更广的推断：判错的代价是**弹一次没用的 UAC**。
+///
+/// 与 `config.rs` 那条「本程序刻意不提权」的纪律不冲突：那里说的是**后台任务**
+/// 不该被 UAC 弹窗卡住，而这里是一次**用户主动点击**的收尾动作 —— 与 Node 安装时
+/// msiexec 弹 UAC 是同一个前提（用户在场、看得见、能取消）。
+fn needs_elevation(path: &Path) -> bool {
+    let Some(root) = std::env::var_os("ProgramFiles") else {
+        return false;
+    };
+    let root = root.to_string_lossy().to_lowercase().replace('/', "\\");
+    let p = path
+        .to_string_lossy()
+        .to_lowercase()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_string();
+    // 必须是它的**真子目录**：光「在同一层」不算（Program Files 本身通常也要管理员，
+    // 但把它算进来会让一条普通路径也去要权限）。
+    p.len() > root.len() && p.starts_with(&(root + "\\"))
+}
+
+/// 以**管理员权限**重试卸载 pnpm（用户点了「以管理员身份重试」之后走这里）。
+///
+/// 为什么单独一条命令而不是给 `uninstall_pnpm` 加个 `elevate: bool`：
+/// 提权路径的语义完全不同 —— 它不跑 npm、只删那几个**已经确定**的文件，
+/// 而且必然弹一次 UAC。混进主流程会让「什么时候弹窗」取决于内部状态，
+/// 用户就再也无法预期了。这里是一个**用户明确点出来的**动作。
+///
+/// `paths` 由前端原样带回来（就是上一次失败时 `needs_elevation` 里那些路径）。
+/// 后端**不信任**入参：过一遍 [`crate::elevate::is_safe_target`] 白名单才动手 ——
+/// 提权之后删文件是不受限的，这里是最后一道闸。
+#[tauri::command]
+pub async fn uninstall_pnpm_elevated(app: AppHandle, paths: Vec<String>) -> Result<UninstallReport, String> {
+    if crate::safe::is_active(&app) {
+        return Err(i18n::t("err_safe_active_op").to_string());
+    }
+    let state = app.state::<AppState>();
+    if state.updating.swap(true, Ordering::SeqCst) {
+        return Err(i18n::t("err_task_busy").to_string());
+    }
+    let result = uninstall_pnpm_elevated_inner(&app, paths);
+    state.updating.store(false, Ordering::SeqCst);
+    result
+}
+
+fn uninstall_pnpm_elevated_inner(
+    app: &AppHandle,
+    paths: Vec<String>,
+) -> Result<UninstallReport, String> {
+    let mut items: Vec<UninstallItem> = Vec::new();
+    // 白名单在**提权之前**先查一遍，给出可读的错误，而不是提权完才发现路径不对。
+    if !paths.iter().all(|p| crate::elevate::is_safe_target(p)) {
+        return Err(i18n::t("err_uninstall_pnpm_bad_target").to_string());
+    }
+
+    set_status(app, "updating", None);
+    emit_log(app, "update", i18n::t("log_uninstall_pnpm_elevating").to_string());
+
+    let outcome = crate::elevate::remove_paths_elevated(&paths);
+    set_status(app, "idle", None);
+
+    // 三态必须分开（混起来就是「报成功、其实没删」）：
+    //   None      = 没能提权（用户在 UAC 上点了「否」，或 ShellExecute 失败）
+    //   空结果     = 提权了但脚本没写回结果（超时）
+    //   有结果     = 逐条如实列出
+    let Some(out) = outcome else {
+        emit_log(app, "update", i18n::t("log_uninstall_pnpm_elevate_denied").to_string());
+        return Ok(UninstallReport {
+            success: false,
+            package_name: "pnpm".to_string(),
+            dir: String::new(),
+            output: String::new(),
+            items: Vec::new(),
+            needs_elevation: paths,
+        });
+    };
+
+    for p in &out.removed {
+        items.push(UninstallItem {
+            kind: "shims".to_string(),
+            path: p.clone(),
+            status: "removed".to_string(),
+            detail: String::new(),
+        });
+    }
+    for (p, why) in &out.failed {
+        emit_log(
+            app,
+            "update",
+            // as_str()：参数表被统一成 `&dyn Display`，元素必须是 Sized；
+            // `&String` 解引用得到的 `&str` 满足，但写成 `p`（`&String`）就会报 E0277
+            // ——与本项目别处同一类坑（CI 上已犯过多次），这里显式收成 `&str`。
+            i18n::fmt(
+                "log_uninstall_pnpm_file_fail",
+                &[&p.as_str(), &why.as_str()],
+            ),
+        );
+        items.push(UninstallItem {
+            kind: "shims".to_string(),
+            path: p.clone(),
+            status: "failed".to_string(),
+            detail: why.clone(),
+        });
+    }
+
+    // 成功判据仍是磁盘：提权脚本可能只删掉一部分（某个文件正被别的进程占用）。
+    // 这里重新跑一遍完整探测 —— 脚本删过之后布局可能变了（同名子目录空掉）。
+    detect::invalidate_cache();
+    let still = detect::find_pnpm_cmd();
+    let done = still.is_none();
+    if done {
+        emit_log(app, "update", i18n::t("log_uninstall_pnpm_ok").to_string());
+    } else {
+        emit_log(
+            app,
+            "update",
+            i18n::fmt("log_uninstall_pnpm_giveup", &[&still.unwrap().to_string_lossy(), &String::new()]),
+        );
+    }
+
+    Ok(UninstallReport {
+        success: done,
+        package_name: "pnpm".to_string(),
+        dir: String::new(),
+        output: String::new(),
+        items,
+        // 提权之后还删不掉的，不再是「需要提权」—— 那条路已经走过了，如实留空。
+        needs_elevation: Vec::new(),
+    })
 }
 
 /// 完成首次运行引导：把当前（含自动检测补全的）配置写入 %APPDATA%\com.dsh.desktop\config.json。

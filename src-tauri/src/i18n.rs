@@ -361,6 +361,11 @@ pub fn t(key: &str) -> &'static str {
         "log_uninstall_cleanup_skipped" => if en { "[uninstall] Could not work out which folder to tidy up in (dsh.cmd's location, npm's global directory and the prefix= line in ~/.npmrc were all unavailable), so the emptied @deepseek-ai folder may still be there." } else { "[uninstall] 没能确定要在哪个目录做收尾（dsh.cmd 所在目录、npm 解析出的全局目录、~/.npmrc 里的 prefix= 三条线索都不可用），残留的空 @deepseek-ai 目录可能仍在。" },
         // 单个 pnpm 文件删除失败（方案 B 里要删 PNPM_HOME 下的脚本，多半需要管理员权限）
         "log_uninstall_pnpm_file_fail" => if en { "[uninstall] Could not remove {0}: {1}" } else { "[uninstall] 未能删除 {0}：{1}" },
+        // 提权链路：用户点「以管理员身份重试」之后的三种结局都必须说清楚。
+        // 「用户点了否」尤其不能含糊 —— 那是用户的决定，要让他知道可以随时再试。
+        "log_uninstall_pnpm_elevating" => if en { "[uninstall] Requesting administrator rights to remove the pnpm files from a system folder — please confirm the UAC prompt." } else { "[uninstall] 正在请求管理员权限，以删除系统目录里的 pnpm 文件 —— 请在 UAC 提示中确认。" },
+        "log_uninstall_pnpm_elevate_denied" => if en { "[uninstall] Administrator rights were not granted (the UAC prompt was declined, or is unavailable), so nothing was removed. You can try again at any time." } else { "[uninstall] 未获得管理员权限（UAC 提示被拒绝，或不可用），因此没有删除任何文件。你可以随时重试。" },
+        "err_uninstall_pnpm_bad_target" => if en { "Refusing to delete those paths with administrator rights: they are not recognisable pnpm files. This is a bug in DSH Desktop — please report it." } else { "拒绝以管理员权限删除这些路径：它们不是可识别的 pnpm 文件。这是 DSH Desktop 的缺陷，请反馈。" },
         "log_uninstall_pnpm_ok" => if en { "[uninstall] pnpm global package removed." } else { "[uninstall] pnpm 全局包已卸载。" },
         "log_uninstall_pnpm_fail" => if en { "[uninstall] pnpm uninstall failed: {0}" } else { "[uninstall] pnpm 卸载失败：{0}" },
         // pnpm 不在我们试过的全局目录里（真机上它可能装在 Node 自己的安装目录）
@@ -423,6 +428,22 @@ pub fn t(key: &str) -> &'static str {
         "setup_py_result_line" => if en { "[setup] Python setup {0}: {1}" } else { "[setup] Python 环境{0}：{1}" },
         // 安装线程 panic 时的兜底文案：不发这一条，前端的两颗按钮会永远停在「安装中」
         "setup_py_panicked" => if en { "The install task hit an internal error (panic) and was aborted; the busy state has been released so you can retry. Details are in desktop.log." } else { "安装任务内部出错（panic），已中止并释放「安装中」状态，可重试。详情见 desktop.log。" },
+
+        // —— Python 能力桥接（markitdown / 办公库 → DSH 工具；见 py_bridge.rs） ——
+        // 「释放/注册」这两条是**基本安装的后续阶段**：走同一条 setup-status 通道，
+        // 设置页进度区才会从 pip 那一步继续往下走。
+        "py_bridge_released" => if en { "[setup] Released the Python capability bridge code to {0}" } else { "[setup] 已把 Python 能力桥接代码释放到 {0}" },
+        "py_bridge_bundle_released" => if en { "[setup] Released the registration bundle to {0}" } else { "[setup] 已把注册用插件包释放到 {0}" },
+        "py_bridge_registered" => if en { "Python capability bridge registered into profile \"{0}\". Restart DSH to load the new tools (they appear as convert_file_to_markdown and friends)." } else { "Python 能力桥接已注册进 profile「{0}」。重启 DSH 后新工具才会生效（会出现 convert_file_to_markdown 等工具）。" },
+        "py_bridge_deferred" => if en { "DSH is currently running, so the bridge was not registered yet — it will be activated automatically the next time you enter DSH. (interpreter: {0})" } else { "DSH 正在运行，桥接暂未注册 —— 将在你下次进入 DSH 时自动激活。（解释器：{0}）" },
+        "py_bridge_register_fail" => if en { "Could not register the Python bridge: {0}. It will be retried the next time DSH starts (interpreter: {1})." } else { "注册 Python 能力桥接失败：{0}。将在下次启动 DSH 时自动重试（解释器：{1}）。" },
+        "py_bridge_bad_profile" => if en { "Refusing to use profile \"{0}\": it is either the reserved \"desktop\" profile or not a valid profile name." } else { "拒绝使用 profile「{0}」：它要么是保留的「desktop」，要么不是合法的 profile 名。" },
+        "py_bridge_write_fail" => if en { "Cannot write {0}: {1}" } else { "无法写入 {0}：{1}" },
+        // 状态行（前端只显示 message，不自己拼文案）
+        "py_bridge_not_installed" => if en { "Not installed: click \"Basic install\" first." } else { "尚未安装：请先点「基本安装」。" },
+        "py_bridge_needs_release" => if en { "The Python libraries are installed; the capability bridge code has not been deployed yet." } else { "Python 库已装好，但能力桥接代码还没有部署。" },
+        "py_bridge_pending_activate" => if en { "Bridge code deployed; waiting to be activated (it activates automatically when you enter DSH)." } else { "桥接代码已部署，等待激活（进入 DSH 时会自动激活）。" },
+        "py_bridge_active" => if en { "Active: the AI can already call convert_file_to_markdown and the other Python tools." } else { "已激活：AI 现在就能调用 convert_file_to_markdown 等 Python 工具。" },
 
         // ---------- 安全模式（独立纯净家目录 %USERPROFILE%\.dsh-safe，端口 3081） ----------
         // 门禁 / 预检

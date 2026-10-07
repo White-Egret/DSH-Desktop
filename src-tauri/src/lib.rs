@@ -1,8 +1,10 @@
 mod config;
 mod detect;
+mod elevate;
 mod i18n;
 mod logger;
 mod process;
+mod py_bridge;
 mod safe;
 mod secret;
 mod window_state;
@@ -102,10 +104,16 @@ pub fn run(launched_by_autostart: bool) {
             // 我们写进 ~/.npmrc 的 prefix=）+ 事后追问是否顺带卸载 pnpm
             process::uninstall_dsh,
             process::uninstall_pnpm,
+            // 权限不足时的补救：弹一次正规 UAC，把那几个删不掉的 pnpm 文件提权删掉
+            process::uninstall_pnpm_elevated,
             // 首选项「Python 环境」块：只读状态 + 基本安装 + 数据分析扩展包
             process::python_status,
             process::setup_install_python,
             process::setup_install_python_extra,
+            // Python 能力桥接：查状态 / 立即部署并注册 / 只释放待激活标记（重试用）
+            py_bridge::bridge_status,
+            py_bridge::deploy_python_bridge,
+            py_bridge::mark_bridge_pending,
             process::finish_setup,
             process::set_language,
             // 首次运行向导的「Node 版本过低」告警：保留旧版本并继续（只写 node_min_ack 一个键）

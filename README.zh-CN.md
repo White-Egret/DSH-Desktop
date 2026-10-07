@@ -232,7 +232,7 @@ pnpm 安装命令示例:     npm install -g pnpm
 | 开机自动启动 | 关 | 即时生效，写 HKCU\...\Run，无需管理员 |
 | npm 缓存位置 | 空（不动 npm 配置） | 写进 npm 自己的 `~/.npmrc`（`cache=` 一行），所以终端里的 npm 也跟着用；见下方「npm 缓存位置」 |
 | 包源 registry | 只读提示，**点按钮才改** | 状态行比对 npm 与 pnpm 在 DSH 工作目录下各自生效的源，不同才亮按钮；只动 pnpm、不碰 npm 的配置；见下方「包源 registry 对齐」 |
-| Python 环境 | 默认不装 | 状态行 + **基本安装 / 数据分析扩展包** 两颗按钮；见下方「Python 环境」 |
+| Python 环境 | 默认不装 | 状态行 + **基本安装 / 数据分析扩展包** 两颗按钮，外加一行把装好的库挂成 AI 工具的能力桥接；见下方「Python 环境」 |
 | 界面语言 | `zh`（中文） | `zh` / `en` 可选；见下方「界面语言」 |
 | 外观 | `system`（跟随系统） | `light` / `dark` / `system` 可选；见下方「外观」；老配置首次加载时自动继承 DSH 现有主题 |
 
@@ -254,12 +254,37 @@ pnpm 安装命令示例:     npm install -g pnpm
 
 生成 Office 文档（`.docx` / `.pptx` / `.xlsx`）与做数据分析都要用到 Python，所以首选项在「npm 缓存位置 / 包源 registry」两块下方给了一个 **Python 环境**块：
 
-- **状态行** —— 本机有没有可用的 Python（≥ 3.8）、版本与路径，以及两组推荐包装没装。判断用 `importlib.util.find_spec` 真去 import 而不是看 `pip list`：装了但用不了的算没装；Python 2 与 Microsoft Store 那个「点了去应用商店」的 `python.exe` 执行别名都算没有。
-- **基本安装** —— 本机已有可用解释器就**跳过本体**；否则从 python.org 下载最新稳定版 CPython（版本解析自下载页，失败时回落到内置的固定版本），**先从该版本的官方发布页取 SHA-256 校验通过才执行**（拿不到哈希就不装，与 Node.js 那条路同一条纪律），然后用 `/passive InstallAllUsers=0 PrependPath=1 Include_test=0` 跑官方安装程序 —— 装给当前用户、不弹 UAC、自写 PATH、自带进度窗口，最后执行 `pip install python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile typing_extensions`。
+- **状态行** —— 本机有没有可用的 Python（≥ 3.10）、版本与路径，以及两组推荐包装没装。判断用 `importlib.util.find_spec` 真去 import 而不是看 `pip list`：装了但用不了的算没装；Python 2 与 Microsoft Store 那个「点了去应用商店」的 `python.exe` 执行别名都算没有。
+- **基本安装** —— 本机已有可用解释器就**跳过本体**；否则从 python.org 下载最新稳定版 CPython（版本解析自下载页，失败时回落到内置的固定版本），**先从该版本的官方发布页取 SHA-256 校验通过才执行**（拿不到哈希就不装，与 Node.js 那条路同一条纪律），然后用 `/passive InstallAllUsers=0 PrependPath=1 Include_test=0` 跑官方安装程序 —— 装给当前用户、不弹 UAC、自写 PATH、自带进度窗口，最后执行 `pip install markitdown[all] python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile typing_extensions dsh-python-bridge`。
 - **数据分析扩展包** —— 在基本包装完之后再加 `numpy pandas python-dateutil tzdata six`。
 - **安装位置** —— 只在还没装 Python 本体时出现。留空 = Python 官方默认；填上（或点「浏览」）可装到如 `D:\Python314`。它以 `TargetDir=…` 交给官方安装程序，**装完核对落点**：安装器报成功却没把 `python.exe` 放进指定目录的，会如实报错而不是报成功。`Program Files` **连同其子目录会被当场拒绝** —— 本程序是「装给当前用户、不弹 UAC」的，那个权限本来就写不进去；与其等到下载与哈希校验全过之后才抛一句「退出码 5」，不如现在就把规则说清楚。
 
 面板里实时显示进度（下载百分比、安装程序退出、`pip` 的逐行输出），与首次运行向导共用同一把「同一时刻只跑一个」的锁，每一步都会写进 `desktop.log`。
+
+#### Python 版本下限为什么是 3.10 而不是 3.8
+
+基本安装清单里有两个包硬性要求 **≥ 3.10**：`markitdown`（PyPI 0.1.8，`Requires-Python >=3.10,<3.15`）与桥接运行时 `dsh-python-bridge`（`>=3.10`）。若下限还停在 3.8，「本机已有 Python 就跳过本体」会把 3.8/3.9 的机器带进一次**注定失败**的 pip 安装，而失败点落在 pip 的依赖解析里 —— 那句报错用户读不出能做什么。所以 `detect::PYTHON_MIN_VERSION` 取 `3.10.0`：老解释器一律判「没有可用的 Python」，改走「装新本体」那条路，并在日志里说明原因；这条边界的两侧由 `detect::parses_python_version_and_its_floor` 的单测钉住。
+
+`markitdown[all]` 是以**单个 argv 元素**交给 pip 的 —— 子进程不经 shell 直接 spawn，所以不需要引号，而加引号反而会让 pip 去找一个名字里带引号的包。它的 Azure、音频转写等 extras 需要凭据或外部程序（ffmpeg），这些路径**优雅降级**（返回一句能看懂的话，不崩），纯文档格式不受影响；`markitdown_capabilities` 能报出当前到底哪些转换器可用。
+
+### Python 能力桥接（AI 真正能调用的部分）
+
+**装上库 ≠ AI 能调用它。** 智能体跑在 Node 端的 DSH harness 进程里，不在本程序的 Rust 进程里；而内嵌的 DSH 页面按设计**拿不到任何 Tauri IPC 能力**（`capabilities/default.json` 明文禁止），所以这里没有捷径 —— 把两者连起来的是一个**跑在 DSH 内部的插件**。注册了哪些工具见下面「AI 能调到什么」，为什么选这条路而不是别的见设计说明。
+
+「基本安装」结束后，程序会 ① 把桥接源码释放到 `%APPDATA%\com.dsh.desktop\py-bridge\`，② 把一个 Cordis **bundle** 释放到 `%APPDATA%\com.dsh.desktop\py-bridge-bundle\`，③ 用 `dsh plugin --profile <实测 profile> add <bundle>` 注册它。profile 从环境变量 / `dsh --dump-config` 读；保留的 **`desktop`** profile 会被提前拒绝（CLI 对它直接报错），也**从不**手写 profile 的 `package.json` / `cordis.patch.yml`。
+
+**AI 能调到什么**（11 个工具，单进程）：`convert_file_to_markdown`、`convert_files_to_markdown`、`markitdown_capabilities`、`read_excel_data`、`create_styled_excel`、`read_docx_text`、`generate_word_report`、`read_pptx_outline`、`add_resized_image_to_pptx`、`get_python_environment_info`、`execute_python_sandbox`。
+
+- **单进程多工具。** `dsh_bridge.runtime` 只 import 一个入口模块，各工具模块在 import 期用 `@tool` 装饰器注册。共享同一个 MarkItDown 实例与同一个解释器正是要点所在 —— 另一个选择是每个库一个进程。
+- **只认本机文件。** 转换走 `MarkItDown().convert_local(...)`，每个路径都过一遍拒绝 `http(s)://` 的校验。一个能收 URL 的入口就是 SSRF 与远程内容注入的现成原语。
+- **长正文不过 stdio。** 超过 `max_chars` 就把全文写进文件、只回 `{path, chars, lines, preview}`；DataFrame 只回 `head(20)` 加形状与列名。几 MB 的工具结果是最快把会话撑坏的方式。
+- **沙箱边界**（`execute_python_sandbox`）：导入白名单 + 受限 builtins。`os` / `sys` / `subprocess` / `socket` / `shutil` / `ctypes` / `importlib` / `pickle` / 网络类模块一律拒绝，`eval` / `exec` / `compile` / `__import__` 与下划线属性访问同样拒绝 —— 不挡下划线属性的话，`getattr(x, "__class__")` 能摸到 `__subclasses__`，沙箱当场就没了。`pandas` / `numpy` / `scipy` / `matplotlib` / `sklearn` **在白名单里但不强制安装**：没装时报的是普通 `ModuleNotFoundError`（「装一下就行」），与「被策略拒绝」读起来完全不同。异常统一变成 `{ok: false, error}`，桥接进程必须扛过每一条。
+- **能力发现。** 一段按实际环境生成的提示词段落会列出当前装了哪些库 —— 用户日后自己装了 `pandas`，它会自动出现，不必改代码重新发版。
+- **生命周期。** Python 子进程由**插件**拉起而不是本程序，所以 DSH 一关它就没了 —— 不留孤儿进程，这边也不需要动 Job Object。看门狗按指数退避重启（最多 5 次）。
+
+**首次安装 vs. DSH 已在运行。** `dsh plugin` 自己会初始化不存在的 profile，但它不能与 DSH 的首次启动在同一个 profile 上抢跑。所以：DSH **没在监听**时立即注册；**正在跑**时只写一个持久化的 `python_bridge_pending` 标记，由 `py_bridge::activate_pending`（挂在状态汇总报出 `running` 的那一处）在下次进入 DSH 时注册。这一步失败**绝不回滚 pip** —— 已经装好的库不该被说成「没装」，而是降级成「稍后自动激活」。
+
+**排障。** 按钮下方那行状态会报出阶段（`not-installed` / `needs-release` / `pending-activate` / `active`）；「部署 / 重新部署」只重跑「释放 + 注册」，不必再走一遍 pip。桥接侧的失败（缺 `dsh_bridge`、协议版本不匹配）由插件记进日志并回显在提示里。宿主与 `dsh-python-bridge` 版本不一致会报 `protocol-mismatch`（`-32006`），而不是「静默一个工具都没有」。新注册的插件需要**重启 DSH** 才会加载。
 
 ### npm 缓存位置
 

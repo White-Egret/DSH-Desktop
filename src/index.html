@@ -249,6 +249,16 @@
             <button id="btn-python-extra" class="btn" data-i18n="btn_py_extra">数据分析扩展包</button>
           </div>
           <div class="hint" data-i18n-html="py_packages_html">基本安装：先安装最新稳定版 Python（系统已装则跳过本体），再安装 python-docx / python-pptx / openpyxl / XlsxWriter / lxml / Pillow / et_xmlfile / typing_extensions；需要数据分析的，可在基本安装完成后再点「数据分析扩展包」安装 numpy / pandas / python-dateutil / tzdata / six。</div>
+          <!-- 能力桥接：装好的库本身 AI 调不到，要靠它挂成 DSH 的工具。
+               状态由 bridge_status 后端命令给（文案也由后端按当前语言生成，
+               这里只放兜底文本）；那颗按钮让用户能重试部署而不必重跑整次安装。 -->
+          <div class="py-bridge-row">
+            <div class="row">
+              <span class="py-bridge-label" data-i18n="py_bridge_label">AI 调用能力（Python 能力桥接）</span>
+              <button id="btn-py-bridge" class="btn small" data-i18n="py_bridge_deploy">部署 / 重新部署能力桥接</button>
+            </div>
+            <div id="py-bridge-status" class="py-status" data-i18n="py_bridge_checking">正在检测能力桥接状态…</div>
+          </div>
           <div id="python-progress" class="py-progress hidden">
             <div class="py-progress-head">
               <div class="spinner small"></div>
@@ -425,6 +435,8 @@
           <div class="upd-backup-note" data-i18n="uninstall_pnpm_keep_note">
             选择「保留」也不会影响其它任何东西 —— pnpm 还是个通用的包管理器，你可能在别处用它。
           </div>
+          <!-- 权限不足时显示：说明「以管理员身份重试」会弹一次 UAC（与当初装 Node 时一样） -->
+          <div class="hint hidden" id="uninstall-pnpm-elevate-note"></div>
           <div class="hint hidden" id="uninstall-pnpm-fail" data-i18n="uninstall_pnpm_fail">
             卸载 pnpm 未成功。可以稍后在终端里自行执行上面的命令（完整输出已写入日志）。
           </div>

@@ -435,10 +435,15 @@ pub fn quick_version(exe: &Path, timeout_secs: u64) -> Option<String> {
 
 // ---------- Python 检测（首选项「Python 环境」块 + 安装后核对） ----------
 
-/// 最低可用的 Python：3.8（再老的解释器装不上今天这批办公 / 数据分析包）。
-/// 「系统已装 Python 就跳过本体安装」只对**够新**的安装成立 —— 装着 Python 2.7 的机器
-/// 必须继续往下装，否则后面每一条 pip install 都会在用户看不懂的地方失败。
-pub const PYTHON_MIN_VERSION: &str = "3.8.0";
+/// 最低可用的 Python：3.10。
+///
+/// 为什么从 3.8 抬到 3.10：基本安装清单里的两个新成员都硬性要求 ≥ 3.10 ——
+/// `markitdown`（PyPI 0.1.8，Requires-Python >=3.10,<3.15）与桥接运行时
+/// `dsh-python-bridge`（0.0.1，Requires-Python >=3.10）。
+/// 门槛若还停在 3.8，「系统已装 Python 就跳过本体安装」就会在 3.8/3.9 机器上
+/// 把用户带进一个**必然失败**的 pip 安装：报错来自 pip 的 Requires-Python 解析，
+/// 而不是用户能看懂的一句话。所以老解释器一律判「不够用」，走「装新本体」这条路。
+pub const PYTHON_MIN_VERSION: &str = "3.10.0";
 
 /// 引导安装回退用的固定版本：python.org 下载页解析失败（离线、改版、被墙）时用它。
 /// 与 `NODE_LTS_VERSION` 同一角色 —— 探测失败不该让安装整体卡住。
@@ -562,14 +567,14 @@ fn python_dirs_under(root: &Path) -> Vec<PathBuf> {
     v
 }
 
-/// 定位一个**可用**的 Python（≥ 3.8）。查找顺序与 find_node_exe 同一套理由：
+/// 定位一个**可用**的 Python（≥ `PYTHON_MIN_VERSION`）。查找顺序与 find_node_exe 同一套理由：
 ///   1. `where python.exe` / `python3.exe`（= 本进程环境的 PATH，与用户终端一致）；
 ///   2. 注册表 PATH 里的目录 —— Python 安装器刚写完 PATH 时，本进程环境还是旧快照；
 ///   3. 常见安装根目录（上一步的 2 还没覆盖到的自定义 / 未写 PATH 的安装）；
 ///   4. 最后才是 `py.exe` 启动器（`py -3`）。
 ///
-/// 每个候选都要**真跑一次 `--version` 并核对 ≥ 3.8** 才算数 —— 这一步同时挡掉三类
-/// 「文件在但用不了」：Store 执行别名、Python 2、半残安装。所以这里会有 1~N 次
+/// 每个候选都要**真跑一次 `--version` 并核对 ≥ 下限** 才算数 —— 这一步同时挡掉三类
+/// 「文件在但用不了」：Store 执行别名、Python 2、够老但装不了 markitdown 的旧版。所以这里会有 1~N 次
 /// 子进程调用，最坏情况（每步都失败）也就几秒，而它只在打开首选项 / 装完之后跑。
 pub fn find_python() -> Option<PythonExe> {
     // 第 1 步收**全部**命中而不是第一个：PATH 里的 WindowsApps 执行别名是个真文件，
@@ -1779,11 +1784,14 @@ mod tests {
         assert_eq!(parse_python_version("python is not recognized"), None);
         assert_eq!(parse_python_version("Python 2.7.18"), Some("2.7.18".to_string()));
         // 但「读得出来」不等于「够用」：版本下限是独立判断
-        assert!(python_version_usable("3.8.0"));
+        assert!(python_version_usable("3.10.0"));
         assert!(python_version_usable("3.14.7"));
         assert!(python_version_usable("3.14"));
         assert!(!python_version_usable("2.7.18"));
-        assert!(!python_version_usable("3.7.9"));
+        // 3.9/3.8 是这次抬高门槛的直接原因：markitdown 与 dsh-python-bridge
+        // 都要求 >= 3.10，判「够用」会让 pip 必然失败（Requires-Python 不满足）
+        assert!(!python_version_usable("3.9.13"));
+        assert!(!python_version_usable("3.8.10"));
         assert!(!python_version_usable("junk"));
         // 版本号会拼进 URL，白名单必须挡住路径片段与空段
         assert!(is_safe_python_version("3.14.7"));

@@ -1,0 +1,18 @@
+# DSH Desktop —— Python 能力桥接：Cordis 组合补丁（生成文件，请勿手工编辑）
+#
+# 只插入一个 Host 行（没有 Client 行，所以内嵌的 DSH WebView 不会多出任何 UI），
+# displayName 让它在插件清单里有个能看懂的名字。
+#
+# pythonPath / entryModule / cwd 三项刻意**留空**：这三个值由桌面端在「基本安装」
+# 之后按本机实际情况写进 config（见 py_bridge.rs::write_bundle_config）。
+# 留空时插件不会崩，而是安静地不注册任何工具 —— 「没装桥接」不该让 DSH 起不来。
+- insert:
+    - id: dsh-desktop-python-bridge
+      name: '@local/dsh-desktop-python-bridge'
+      displayName: Python 能力桥接（DSH Desktop）
+      config:
+        pythonPath: ''
+        entryModule: bridge_entry
+        bridgeDir: ''
+        cwd: ''
+        failOnStartupError: false

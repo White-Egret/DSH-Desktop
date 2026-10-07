@@ -760,6 +760,12 @@ async function init() {
   await listen('setup-result', (e) => onSetupResult(e.payload));
   // 首选项「Python 安装」的逐行输出（pip 的实时输出；由后端 spawn_log_reader 转发）
   await listen('python-log', (e) => appendPythonLog(e.payload.line));
+  // 能力桥接部署完成（手动点「部署」按钮那条路发出来的）
+  await listen('py-bridge', (e) => {
+    const msg = String(e.payload || '');
+    if (msg) { setPythonProgress(true, msg); appendPythonLog(msg); }
+    refreshBridgeStatus();
+  });
   // 安全模式：进入/退出/闪退（safe-mode-change）与修复验证结果（safe-verify）
   await listen('safe-mode-change', (e) => onSafeModeChange(e.payload));
   await listen('safe-verify', (e) => onSafeVerify(e.payload));
@@ -1130,6 +1136,9 @@ async function refreshPythonStatus() {
     const dirRow = $('python-dir-row');
     if (dirRow) dirRow.classList.remove('hidden');
   }
+  // 桥接状态与 Python 状态是两条独立的探测，跟着一起刷：用户在设置页做的一切
+  // 「装 / 部署」动作都会改它其中之一
+  refreshBridgeStatus();
 }
 
 function renderPythonStatus(s) {
@@ -1249,8 +1258,51 @@ function onPythonResult(p) {
   setPythonSpinner(false);
   appendPythonLog(msg);
   toast(msg, !p.success);
-  // 装完 Python 本体 / 装完包之后，状态行与「安装位置」的显隐都要跟着变
+  // 装完 Python 本体 / 装完包之后，状态行与「安装位置」的显隐都要跟着变；
+  // 桥接状态同样会变（从「待部署」变成「已注册 / 待激活」），所以一起刷新
   refreshPythonStatus();
+  refreshBridgeStatus();
+}
+
+// ---------- 首选项：Python 能力桥接（把装好的库挂成 AI 工具） ----------
+//
+// 状态文案**由后端生成**（Rust 侧按当前语言给出），前端不自己拼 —— 这样
+// 「已激活 / 待激活 / 未安装」这几句话只有一处定义，不会和后端的判定条件走偏。
+// 前端只负责把 message 显示出来，以及按 phase 决定那颗按钮该不该亮。
+async function refreshBridgeStatus() {
+  const el = $('py-bridge-status');
+  if (!el) return;
+  try {
+    const s = await invoke('bridge_status');
+    el.textContent = s.message || '';
+    // 没装 Python 时不让点「部署」：那必然失败，先去点基本安装
+    const btn = $('btn-py-bridge');
+    if (btn) btn.disabled = pythonTask.active || s.phase === 'not-installed';
+  } catch (e) {
+    // 问不到就如实说一句，别让这一行空着像卡住了
+    el.textContent = t('toast_py_status_fail', e);
+    const btn = $('btn-py-bridge');
+    if (btn) btn.disabled = true;
+  }
+}
+
+/// 「部署 / 重新部署能力桥接」：不重跑整次 pip 安装，只重做「释放 + 注册」，
+/// 供用户在激活失败后单独重试用。
+async function runBridgeDeploy() {
+  const btn = $('btn-py-bridge');
+  if (btn) btn.disabled = true;
+  setPythonProgress(true, t('py_bridge_deploy'));
+  try {
+    await invoke('deploy_python_bridge');
+    toast(t('py_bridge_deployed'));
+  } catch (e) {
+    const msg = t('py_bridge_deploy_fail', e);
+    setPythonProgress(true, msg);
+    appendPythonLog(msg);
+    toast(msg, true);
+  } finally {
+    refreshBridgeStatus();
+  }
 }
 
 async function saveSettings() {
@@ -1758,6 +1810,10 @@ function openPnpmPrompt() {
   $('uninstall-pnpm-fail').classList.add('hidden');
   $('btn-uninstall-pnpm-yes').disabled = false;
   $('btn-uninstall-pnpm-no').disabled = false;
+  // 每次卸载流程开始时清空上一轮的提权状态：那些路径属于上一次尝试，
+  // 留着会让「以管理员身份重试」删已经不存在的文件（更糟的是删掉同名的新文件）。
+  pnpmElevatePaths = [];
+  showElevationPath(null);
   $('uninstall-pnpm-cmd').textContent = uninstallPnpmCommand();
   showModal('uninstall-pnpm-modal');
 }
@@ -1812,8 +1868,74 @@ async function doUninstallPnpm() {
       $('uninstall-pnpm-fail').classList.remove('hidden');
       $('btn-uninstall-pnpm-yes').disabled = false;
       $('btn-uninstall-pnpm-no').disabled = false;
+      // 需要管理员权限时，把「一并卸载 pnpm」**换成**「以管理员身份重试」：
+      // 原按钮会再跑一遍 npm 然后报同一个失败（真机现场：4 个文件全是 os error 5，
+      // 而 npm 对着系统目录只会回一句 up to date）。换掉它，而不是在下面再加一个按钮。
+      showElevationPath(rep);
       toast(t('toast_uninstall_fail', pnpmFailDetail(rep)), true);
     }
+  } catch (err) {
+    uninstalling = false;
+    $('uninstall-pnpm-fail').classList.remove('hidden');
+    $('btn-uninstall-pnpm-yes').disabled = false;
+    $('btn-uninstall-pnpm-no').disabled = false;
+    toast(t('toast_uninstall_fail', err), true);
+  }
+}
+
+/// 上一次失败留下「需要管理员权限」的路径（提权重试要用）。
+let pnpmElevatePaths = [];
+
+/// 权限不足 → 把按钮换成「以管理员身份重试」，并说明将要发生什么。
+///
+/// 不做成「多一个按钮」：两个按钮摆在一起，用户会先点原来那个、再撞一次同样的墙。
+/// 换掉之后，界面上唯一合理的下一步就是提权（或者「保留 pnpm」）。
+function showElevationPath(rep) {
+  const paths = (rep && rep.needs_elevation) || [];
+  pnpmElevatePaths = paths.slice();
+  const btn = $('btn-uninstall-pnpm-yes');
+  if (!paths.length) {
+    // 没有提权路径就恢复原按钮（上一次失败可能只是文件被占用，重试是有意义的）
+    btn.textContent = t('btn_uninstall_pnpm_yes');
+    btn.classList.remove('primary');
+    btn.disabled = false;
+    $('uninstall-pnpm-elevate-note').classList.add('hidden');
+    return;
+  }
+  btn.textContent = t('btn_uninstall_pnpm_elevate');
+  btn.disabled = false;
+  $('uninstall-pnpm-elevate-note').classList.remove('hidden');
+  $('uninstall-pnpm-elevate-note').textContent = t(
+    'uninstall_pnpm_elevate_note',
+    paths.length
+  );
+}
+
+/// 以管理员身份重试卸载 pnpm（会弹一次 UAC）。
+///
+/// 路径原样带回去：那是上一次失败时后端确认过的、确实需要提权的那几个文件。
+/// 后端还会再过一遍自己的白名单 —— 前端传什么都不能直接变成「以管理员权限删这个路径」。
+async function doUninstallPnpmElevated() {
+  if (uninstalling) return;
+  if (!pnpmElevatePaths.length) return;
+  uninstalling = true;
+  $('btn-uninstall-pnpm-yes').disabled = true;
+  $('btn-uninstall-pnpm-no').disabled = true;
+  $('uninstall-pnpm-fail').classList.add('hidden');
+  try {
+    const rep = await invoke('uninstall_pnpm_elevated', { paths: pnpmElevatePaths });
+    uninstalling = false;
+    if (rep && rep.success) {
+      pnpmElevatePaths = [];
+      showUninstallFinal(true, rep);
+      return;
+    }
+    // 提权之后仍然没删掉（用户点了「否」、或脚本没写回结果）：如实说，并让他能再试一次。
+    pnpmElevatePaths = (rep && rep.needs_elevation) || pnpmElevatePaths;
+    $('uninstall-pnpm-fail').classList.remove('hidden');
+    $('btn-uninstall-pnpm-yes').disabled = false;
+    $('btn-uninstall-pnpm-no').disabled = false;
+    toast(t('toast_uninstall_fail', pnpmFailDetail(rep) || t('uninstall_pnpm_elevate_failed')), true);
   } catch (err) {
     uninstalling = false;
     $('uninstall-pnpm-fail').classList.remove('hidden');
@@ -2409,6 +2531,8 @@ function bindUI() {
   // ---- 首选项：Python 建议安装块（状态行由 openSettings 拉取，这里只管两个按钮）----
   $('btn-python-basic').onclick = () => runPythonInstall('basic');
   $('btn-python-extra').onclick = () => runPythonInstall('extra');
+  // 能力桥接：单独一颗部署按钮（不重跑 pip 安装，只重做「释放 + 注册」）
+  $('btn-py-bridge').onclick = () => runBridgeDeploy();
 
   // 检测全局包名
   $('btn-detect-package').onclick = async () => {
@@ -2446,7 +2570,12 @@ function bindUI() {
   };
   $('btn-uninstall-confirm').onclick = () => doUninstallDsh();
   // 追问：答「是」= 顺带卸载 pnpm；答「否」= 直接进最终结果页（并给出日后的手动命令）
-  $('btn-uninstall-pnpm-yes').onclick = () => doUninstallPnpm();
+  $('btn-uninstall-pnpm-yes').onclick = () => {
+    // 同一个按钮在两种语义之间切换：有提权路径时是「以管理员身份重试」，否则是普通重试。
+    // 切换由 showElevationPath 在每次失败后统一设置，这里只负责分派 —— 两处判断会漂移。
+    if (pnpmElevatePaths.length) doUninstallPnpmElevated();
+    else doUninstallPnpm();
+  };
   $('btn-uninstall-pnpm-no').onclick = () => {
     if (uninstalling) return;
     showUninstallFinal(false);

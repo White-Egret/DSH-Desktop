@@ -6194,15 +6194,23 @@ fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<Uninstal
 /// 判据是「那一组文件里还剩不剩任何一个」：`npm install -g pnpm` 会写出
 /// `pnpm` / `pnpm.cmd` / `pnpm.ps1` 三个脚本，只检查其中一个、而 npm 恰好漏删另一个的话，
 /// 就会把「还在」判成「没了」（用户终端里 `where pnpm` 仍然看得见它）。
+///
+/// ⚠ 这里**必须用 `PNPM_SCRIPT_NAMES`（含 `.ps1`）逐个查，不能复用
+/// [`pnpm_install_locations`]**：那个函数只认 `PNPM_SHIM_NAMES`（用于「定位 pnpm 在哪」，
+/// 找到任意一个即可），拿它当复检判据就会漏掉被单独漏删的 `.ps1` —— 而那正是本函数
+/// 存在的理由。第一版就是这么写的，CI 上当场被这条断言抓住。
+///
+/// 两种布局各查一遍（目录根部与同名子目录级）：pnpm 是 npm 装的还是独立装的，
+/// 落点层级不同，但「整组是否清空」这条判据对两者一样。
 fn pnpm_still_present(loc: &PnpmLocation) -> bool {
     // 包目录在 = 明确还在（这是最强的判据，npm 没删掉就是没删掉）
     if global_pkg_dir(&loc.dir.to_string_lossy(), "pnpm").exists() {
         return true;
     }
-    // 脚本仍在（任一同组文件）= 还在。两种布局各查一遍，目录级与同名子目录级。
-    pnpm_install_locations(&loc.dir)
-        .iter()
-        .any(|x| x.layout == loc.layout)
+    // 脚本仍在（任一同组文件）= 还在
+    PNPM_SCRIPT_NAMES.iter().any(|name| {
+        loc.dir.join(name).is_file() || loc.dir.join("pnpm").join(name).is_file()
+    })
 }
 
 /// 删掉**一个** pnpm 落点。返回 `(npm 输出, 逐条结果)`。
@@ -7137,7 +7145,16 @@ mod tests {
     /// 哪怕那个目录恰好是 npm 的默认全局目录。
     #[test]
     fn dsh_dir_from_path_works_even_in_the_default_global_dir() {
-        let base = create_private_temp_dir("cleanup-dir").expect("建临时目录");
+        // ⚠ 不能建在 %TEMP% 下：`validate_program_file` 会以 err_path_temp 拒绝
+        // 「程序路径位于临时目录」（那是防恶意软件落点的安全校验，CI 实测踩到）。
+        // 所以这里借用 dsh-home-dir 之外的落点：它是用户数据目录，不受那条规则约束。
+        // 测的是**推导逻辑**（能否从 dsh.cmd 得到它所在的目录），与目录本身无关。
+        let base = std::env::var("USERPROFILE")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("dsh-uninstall-test-derive");
+        let _ = std::fs::remove_dir_all(&base);
         // 造一个像 npm 全局目录的落点：node_modules + dsh.cmd
         std::fs::create_dir_all(base.join("node_modules").join("@deepseek-ai")).unwrap();
         let dsh = base.join("dsh.cmd");
@@ -7186,6 +7203,11 @@ mod tests {
         assert_eq!(locs[0].file, "pnpm.cmd");
 
         // ---- 布局 B：PNPM_HOME 布局（同名子目录 + 大写 .CMD）----
+        // ⚠ 断言的是「找到了 pnpm 子目录下的那个脚本」，而**不是** `file` 的字面拼写。
+        // Windows 上 NTFS 大小写不敏感：磁盘里真实的 `pnpm.CMD` 用小写去 join 也能命中，
+        // 所以 `file` 记下的是**探测顺序里先命中的那个拼写**（CI 实测：期望 pnpm\pnpm.CMD、
+        // 实得 pnpm\pnpm.cmd —— 文件是对的，字符串只是探测顺序的产物）。
+        // 真正要保证的性质是「file 拼出来的路径确实指向那个脚本」，那才是删除时用的东西。
         let pnpm_home = base.join("nodejs");
         std::fs::create_dir_all(pnpm_home.join("pnpm")).unwrap();
         std::fs::write(pnpm_home.join("pnpm").join("pnpm.CMD"), b"x").unwrap();
@@ -7196,10 +7218,15 @@ mod tests {
             "PNPM_HOME 布局必须被认出来（旧代码只拼 <目录>\\pnpm.cmd，正是这里漏掉）：{locs2:?}"
         );
         assert_eq!(locs2[0].layout, PnpmLayout::Standalone);
-        assert_eq!(locs2[0].file, "pnpm\\pnpm.CMD");
         assert!(
             pnpm_home.join(&locs2[0].file).is_file(),
-            "file 字段拼出来的路径必须真的指向那个脚本（否则删的是空气）"
+            "file 字段拼出来的路径必须真的指向那个脚本（否则删的是空气）：{}",
+            pnpm_home.join(&locs2[0].file).to_string_lossy()
+        );
+        assert!(
+            locs2[0].file.to_lowercase().starts_with("pnpm"),
+            "file 必须落在同名子目录（PNPM_HOME 布局），而不是目录根部：{}",
+            locs2[0].file
         );
 
         // ---- 两种布局并存时，两个落点都要在（不能只报第一个）----

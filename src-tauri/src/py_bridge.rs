@@ -212,7 +212,11 @@ pub async fn bridge_status(app: AppHandle) -> Result<BridgeStatus, String> {
         .map_err(|e| e.to_string())
 }
 
-fn bridge_status_blocking(app: &AppHandle) -> Result<BridgeStatus, String> {
+/// 只读探测。**不返回 Result**：与 python_status_blocking 同一条纪律 —— 这一行是
+/// 首选项里的状态，不是报错入口。任何一步探测不到都退化成「未装 / 未注册」的
+/// 事实，而不是抛错（抛错会让整行空着，像卡住了）。真正的失败发生在写操作
+/// （deploy_python_bridge / mark_bridge_pending）上，那两个仍然返回 Result。
+fn bridge_status_blocking(app: &AppHandle) -> BridgeStatus {
     let cfg_dir = config::config_dir(app);
     let bd = bridge_dir(&cfg_dir);
     let bun = bundle_dir(&cfg_dir);
@@ -226,7 +230,7 @@ fn bridge_status_blocking(app: &AppHandle) -> Result<BridgeStatus, String> {
     let pending = config::read_config_flag(app, PENDING_KEY);
     let phase = bridge_phase(py.is_some(), released, registered || pending);
     let message = bridge_phase_message(phase);
-    Ok(BridgeStatus {
+    BridgeStatus {
         phase: phase.as_str().to_string(),
         released,
         registered,
@@ -236,10 +240,10 @@ fn bridge_status_blocking(app: &AppHandle) -> Result<BridgeStatus, String> {
             .unwrap_or_default(),
         bridge_dir: bd.to_string_lossy().to_string(),
         bundle_dir: bun.to_string_lossy().to_string(),
-        profile: profile.clone().unwrap_or_default(),
+        profile: profile.unwrap_or_default(),
         pending,
         message,
-    })
+    }
 }
 
 /// 各阶段的人话说明（前端直接显示，不自己拼）。

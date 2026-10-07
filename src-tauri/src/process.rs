@@ -6344,7 +6344,9 @@ fn remove_pnpm_at(
     // 报错，真实原因只有一条（权限不足）。
     let mut leftovers: Vec<PathBuf> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
-    let mut add = |p: PathBuf, leftovers: &mut Vec<PathBuf>, seen: &mut Vec<String>| {
+    // 闭包本身不需要 mut（它只调用 seen 的不可变方法，真正被改的是两个 &mut 参数）——
+    // 写成 `let mut add` 会报 unused_mut。
+    let add = |p: PathBuf, leftovers: &mut Vec<PathBuf>, seen: &mut Vec<String>| {
         if !p.exists() {
             return;
         }

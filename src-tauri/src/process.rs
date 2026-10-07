@@ -6194,9 +6194,11 @@ fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<Uninstal
     let mut last_out = String::new();
     let mut used: Option<PnpmLocation> = None;
     let mut items: Vec<UninstallItem> = Vec::new();
-    // 权限不足而删不掉的路径。只收**系统位置**里的那些（needs_elevation）：别处失败
-    // （占用、非空等）弹 UAC 也没用，那样只会白白吓用户一跳。
-    let mut denied: Vec<PathBuf> = Vec::new();
+    // 权限不足而删不掉的路径（存字符串：它们最终要进 UninstallReport 的
+    // needs_elevation，那是 Vec<String>，中途转成 PathBuf 只会平白多一次转换）。
+    // 只收**系统位置**里的那些（needs_elevation）：别处失败（占用、非空等）弹 UAC
+    // 也没用，那样只会白白吓用户一跳。
+    let mut denied: Vec<String> = Vec::new();
     for loc in &candidates {
         // 落点还在吗？（下一轮候选的判断要用）—— 不在就当它已处理过。
         if !loc.dir.join(&loc.file).is_file() {
@@ -6209,7 +6211,7 @@ fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<Uninstal
         }
         last_out = out;
         items.extend(removed_items);
-        denied.extend(denied_here.into_iter().filter(|p| needs_elevation(p)));
+        denied.extend(denied_here.into_iter().filter(|p| needs_elevation(Path::new(p))));
         if !pnpm_still_present(loc) {
             used = Some(loc.clone());
             break;
@@ -6254,7 +6256,7 @@ fn uninstall_pnpm_inner(app: &AppHandle, dir: Option<String>) -> Result<Uninstal
             // 用 items 把「它其实在哪」带回给界面（前端按 kind/status 渲染成一行人话）
             items: all,
             // 权限不足时**非空** —— 前端据此把「重试」换成「以管理员身份重试」并走 UAC。
-            needs_elevation: denied.iter().map(|p| p.to_string_lossy().to_string()).collect(),
+            needs_elevation: denied,
         });
     };
 
@@ -6320,7 +6322,7 @@ fn remove_pnpm_at(
     npm: &str,
     loc: &PnpmLocation,
     cache: Option<&str>,
-) -> (String, Vec<UninstallItem>, Vec<PathBuf>) {
+) -> (String, Vec<UninstallItem>, Vec<String>) {
     let dir_s = loc.dir.to_string_lossy().to_string();
     let mut items: Vec<UninstallItem> = Vec::new();
     let mut out = String::new();

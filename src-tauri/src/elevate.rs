@@ -217,8 +217,17 @@ fn random_suffix(counter: u32) -> String {
 mod win {
     use super::*;
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::SEE_MASK_NOCLOSEPROCESS;
-    use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW, SWC_NORMAL};
+    // 这几个符号的真实位置（windows-sys 0.59 / CI 实测踩到）：
+    //   - `ShellExecuteExW` 与 `SHELLEXECUTEINFOW` 在 `Win32::UI::Shell`，但后者**额外**
+    //     需要 `Win32_System_Registry` feature（结构体带 hkeyClass 字段，被条件编译）；
+    //   - `SEE_MASK_NOCLOSEPROCESS` 也在 `Win32::UI::Shell`，**不在** Foundation；
+    //   - `SWC_NORMAL` **不存在**（SW_SHOWNORMAL 没有对应的 windows-sys 常量），
+    //     所以 nShow 直接用整数 1，见下面的 SW_SHOWNORMAL。
+    use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
+
+    /// `SW_SHOWNORMAL`：以「正常窗口」方式显示。
+    /// 不能用 `SWC_NORMAL`（不存在），这个值与 Win32 的 SW_SHOWNORMAL 相同。
+    const SW_SHOWNORMAL: i32 = 1;
 
     fn wide(s: &str) -> Vec<u16> {
         std::ffi::OsStr::new(s)
@@ -249,11 +258,14 @@ mod win {
         ));
         let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
         info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
-        info.fMask = SEE_MASK_NOCLOSEPROCESS;
+        // 刻意**不**设 SEE_MASK_NOCLOSEPROCESS：整个流程不等待进程结束 ——
+        // 我们轮询结果文件（那才是真正可靠的完成信号），而 runas 派生的是提权进程，
+        // 拿到它的句柄也没有可等的东西。
+        info.fMask = 0;
         info.lpVerb = verb.as_ptr();
         info.lpFile = file.as_ptr();
         info.lpParameters = params.as_ptr();
-        info.nShow = SWC_NORMAL.0 as i32;
+        info.nShow = SW_SHOWNORMAL;
         info.hwnd = std::ptr::null_mut();
 
         let prev = std::env::var_os("DSH_ELEVATE_RESULT");
@@ -262,7 +274,7 @@ mod win {
         // 与 nShow；三个 wide() 缓冲区在整个调用期间都在作用域内活着。
         // hwnd 传 null —— 提权进程与本进程没有窗口属主关系，给错的 hwnd 会让 UAC 对话框
         // 找不到前台窗口（真机上就表现为「UAC 弹在别的窗口后面」）。
-        let ok = unsafe { ShellExecuteExW(&mut info) }.as_bool();
+        let ok = unsafe { ShellExecuteExW(&mut info) } != 0;
         match prev {
             Some(v) => std::env::set_var("DSH_ELEVATE_RESULT", v),
             None => std::env::remove_var("DSH_ELEVATE_RESULT"),

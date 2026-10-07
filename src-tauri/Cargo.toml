@@ -51,7 +51,9 @@ windows-sys = { version = "0.59", features = [
     # 的 "runas" 动词弹一次正规 UAC，而不是让用户自己去开管理员终端（见 process.rs 的
     # `uninstall_pnpm_elevated`）。ShellExecuteEx 属于 Shell / UI 两层。
     "Win32_UI_Shell",
-    "Win32_System_Com",
+    # SHELLEXECUTEINFOW 带 hkeyClass 字段，windows-sys 把它按条件编译，
+    # 没有这个 feature 时整个结构体连同 ShellExecuteExW 都会被 cfg 掉（CI 实测）。
+    "Win32_System_Registry",
 ] }
 
 [profile.release]

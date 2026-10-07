@@ -39,7 +39,7 @@ use crate::{config, detect, i18n, logger};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 /// 桥接产物目录名（放在**应用数据区**，不是 DSH 家目录 —— 见模块文档）
 const BRIDGE_DIR_NAME: &str = "py-bridge";
@@ -205,7 +205,7 @@ pub struct BridgeStatus {
 }
 
 #[tauri::command]
-pub fn bridge_status(app: AppHandle) -> Result<BridgeStatus, String> {
+pub async fn bridge_status(app: AppHandle) -> Result<BridgeStatus, String> {
     // 探测要起子进程（跑 dsh --dump-config），下到阻塞线程池
     tauri::async_runtime::spawn_blocking(move || bridge_status_blocking(&app))
         .await
@@ -437,7 +437,7 @@ fn write_files(dir: &Path, files: &[(&str, &str)]) -> Result<(), String> {
 fn write_bundle_config(bun: &Path, python_path: &str, bd: &Path) -> Result<(), String> {
     let patch = bun.join("cordis.patch.yml");
     let Ok(text) = std::fs::read_to_string(&patch) else {
-        return Err(i18n::fmt("py_bridge_write_fail", &[&patch.to_string_lossy(), "missing"]));
+        return Err(i18n::fmt("py_bridge_write_fail", &[&patch.to_string_lossy(), &"missing"]));
     };
     // YAML 里单引号串里的单引号要写两遍（这是 YAML 的转义规则，不是我们自创的）
     let py = python_path.replace('\'', "''");
@@ -482,7 +482,7 @@ fn register_bundle(app: &AppHandle, profile: &str, bun: &Path) -> Result<(), Str
             } else {
                 // 把 dsh 的输出尾部带上：失败原因几乎总在那几行里
                 let tail: String = out.lines().rev().take(6).collect::<Vec<_>>().join(" / ");
-                Err(i18n::fmt("py_bridge_register_fail", &[&tail, ""]))
+                Err(i18n::fmt("py_bridge_register_fail", &[&tail, &""]))
             }
         },
     )
@@ -528,29 +528,33 @@ fn quote_cmd_arg(arg: &str) -> String {
 ///
 /// 判定依据是 profile 的 `node_modules` 下有没有 `@local/dsh-desktop-python-bridge`
 /// —— 那是 reconcile 之后 bundle 的落点。只读，不调 pnpm（快得多，也不会触发任何副作用）。
+///
+/// 查的是**实际生效的那个 profile**：有 `DSH_PROFILE_DIR` 就用它（它是宿主进程
+/// 真正在跑的那个 profile 的目录），否则退到 `<DSH_HOME>\profiles\<name>`。
+/// 刻意不缓存 —— 环境变量可能在运行期变（安全模式会换 home），缓存会把上一次
+/// 的结论带到下一次状态查询里，而界面上的「已激活」必须对应当下。
 fn bundle_registered(profile: &str) -> bool {
-    let Some(home) = dsh_home_from_profile(profile) else {
-        return false;
+    let dir = match profile_dir_from_env() {
+        Some(d) => d,
+        None => match std::env::var("DSH_HOME").ok().filter(|s| !s.trim().is_empty()) {
+            Some(home) => PathBuf::from(home).join("profiles").join(profile),
+            None => return false,
+        },
     };
-    home.join("profiles")
-        .join(profile)
-        .join("node_modules")
+    dir.join("node_modules")
         .join("@local")
         .join("dsh-desktop-python-bridge")
         .join("package.json")
         .is_file()
 }
 
-/// profile → 其家目录。优先 `DSH_PROFILE_DIR`（宿主进程环境里一定有），
-/// 其次 `$DSH_HOME/profiles/<p>`。
-fn dsh_home_from_profile(profile: &str) -> Option<PathBuf> {
-    if let Some(d) = std::env::var("DSH_PROFILE_DIR").ok().filter(|s| !s.trim().is_empty()) {
-        return Some(PathBuf::from(d));
-    }
-    let home = std::env::var("DSH_HOME")
+/// `DSH_PROFILE_DIR` 直接给的就是 profile 目录本身（`<home>\profiles\<name>`），
+/// 不需要再拼 `profiles/<name>`。
+fn profile_dir_from_env() -> Option<PathBuf> {
+    std::env::var("DSH_PROFILE_DIR")
         .ok()
-        .filter(|s| !s.trim().is_empty())?;
-    Some(PathBuf::from(home))
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
 }
 
 /// profile 名的实测值。

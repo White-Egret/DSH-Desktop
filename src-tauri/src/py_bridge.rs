@@ -726,17 +726,31 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("dsh-bridge-test-{}", std::process::id()));
         let bd = tmp.join("py-bridge");
         let bun = tmp.join("py-bridge-bundle");
-        // 连跑两次：第二次必须成功且不产生半份文件
-        for _ in 0..2 {
+        // 连跑两次：第二次必须成功且不产生半份文件。
+        // 判据是「落盘内容与编译进来的源码**逐字相同**」——而不是去找某个标记串：
+        // 标记串只存在于一部分文件里（例如只有 utils.py 提到 py-bridge），拿它当
+        // 断言会误判成「内容不对」，却查不出真正的截断/覆盖失败。
+        for round in 1..=2 {
             release_sources(&bd, &bun).expect("release_sources");
-            for (name, _) in BRIDGE_FILES {
+            for (name, body) in BRIDGE_FILES {
                 let p = bd.join(name);
-                assert!(p.is_file(), "{name} 未写出");
-                assert!(!p.to_string_lossy().ends_with(".tmp"), "{name} 留下了临时文件");
-                assert!(std::fs::read_to_string(&p).unwrap().contains("py-bridge"), "{name} 内容不对");
+                assert!(p.is_file(), "第 {round} 轮：{name} 未写出");
+                let got = std::fs::read_to_string(&p).unwrap();
+                assert_eq!(got, *body, "第 {round} 轮：{name} 内容与源码不一致");
             }
-            assert!(bun.join("index.js").is_file());
-            assert!(bun.join("package.json").is_file());
+            for (name, body) in BUNDLE_FILES {
+                let p = bun.join(name);
+                assert!(p.is_file(), "第 {round} 轮：{name} 未写出");
+                let got = std::fs::read_to_string(&p).unwrap();
+                assert_eq!(got, *body, "第 {round} 轮：{name} 内容与源码不一致");
+            }
+            // 半份文件的特征是「临时文件还在」：写完必须已改名到位
+            for (name, _) in BRIDGE_FILES {
+                assert!(
+                    !bd.join(format!("{name}.{}.tmp", std::process::id())).exists(),
+                    "第 {round} 轮：{name} 留下了临时文件"
+                );
+            }
         }
         let _ = std::fs::remove_dir_all(&tmp);
     }

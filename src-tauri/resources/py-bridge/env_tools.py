@@ -137,7 +137,13 @@ def _capabilities_section_placeholder():
 
 
 def capability_prompt_text() -> str:
-    """按当前环境生成能力发现提示词（宿主可用它覆盖静态兜底段）。
+    """按当前环境生成能力发现提示词。**这段文案的唯一所有者是 Python 侧。**
+
+    宿主（index.js）不自己拼这段文字，而是调本函数拿 —— 两边各写一份必然漂移：
+    白名单变了、措辞改了，提示词却还在说旧话，模型就会照着错的信息行事。
+
+    为什么放在 Python 而不是 JS：`importlib.metadata` 只有 Python 拿得到，
+    而「哪些库装了」正是这段文案的核心内容。
 
     拼出来的东西只有几百字，却能显著减少「模型不知道 pandas 能用」这类误判，
     而且**随用户安装的库自动变化** —— 这正是能力发现机制在这里的价值。
@@ -156,5 +162,28 @@ def capability_prompt_text() -> str:
         "需要这些工具覆盖不到的逻辑时用 execute_python_sandbox：把结果赋给 `result`，"
         "沙箱禁止 os / sys / subprocess / 网络 / 文件读写，"
         "但放行常见标准库与已安装的数据分析库。\n"
+        "拿不准当前环境时，先调 get_python_environment_info 查一次，不要凭猜测使用库名。\n"
         "所有工具返回超长正文时只给摘要 + 文件路径；需要全文请用文件读取工具打开该文件。"
     )
+
+
+@dsh_bridge.tool(
+    name="describe_python_capabilities",
+    description=(
+        "返回一段**按当前环境实时生成**的能力说明文本（已装哪些库、工具清单、"
+        "沙箱约定、输出截断规则），可直接作为系统提示词使用。"
+        "宿主在每次组装提示词时调用它，所以用户日后装了新库，这段说明会自动更新，"
+        "不需要重启 DSH。人类用户一般不需要直接调它 —— 由 DSH 自动使用。"
+    ),
+    parameters={"type": "object", "properties": {}},
+)
+def describe_python_capabilities() -> dict:
+    """宿主取能力发现文案的入口。
+
+    刻意做成一个**工具**而不是塞进 initialize 的 manifest：manifest 在握手时定下，
+    是快照；工具调用可以发生在任何时刻，才能真正做到「随环境变化」。
+    """
+    try:
+        return {"ok": True, "text": capability_prompt_text()}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}

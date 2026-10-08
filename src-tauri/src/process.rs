@@ -1461,7 +1461,10 @@ pub(crate) fn start_internal(app: &AppHandle) -> Result<(), String> {
     let st = current_status(app);
     if matches!(
         st.as_str(),
-        "starting" | "running" | "running-external" | "stopping" | "updating"
+        // `elevating`（提权删除 pnpm，正在等 UAC）与其它几个一样属于「有任务在跑」：
+        // 那条路上进程可能正持有权限去删系统目录，此时启动 DSH 会与之并发。
+        // 漏掉它的症状是「提权过程中点启动居然成功了」，然后两边一起改状态。
+        "starting" | "running" | "running-external" | "stopping" | "updating" | "elevating"
     ) {
         return Err(i18n::fmt("err_status_locked", &[&st]));
     }
@@ -6459,8 +6462,17 @@ fn needs_elevation(path: &Path) -> bool {
 /// `paths` 由前端原样带回来（就是上一次失败时 `needs_elevation` 里那些路径）。
 /// 后端**不信任**入参：过一遍 [`crate::elevate::is_safe_target`] 白名单才动手 ——
 /// 提权之后删文件是不受限的，这里是最后一道闸。
+///
+/// ⚠ 必须 `spawn_blocking`：**这是本项目里唯一一处要等用户交互的命令** —— UAC 对话框
+/// 可能停在那儿几十秒，用户还要选「是 / 否」。直接在 async fn 里同步轮询会把
+/// Tauri 的命令执行线程占住，前端整条 IPC 一起卡死（真机表现：弹窗上的按钮点了没反应、
+/// 进度条不动，看起来像程序死了）。下到阻塞线程池后，主循环继续跑，
+/// 「正在请求管理员权限…」那条日志也才能实时进日志面板。
 #[tauri::command]
-pub async fn uninstall_pnpm_elevated(app: AppHandle, paths: Vec<String>) -> Result<UninstallReport, String> {
+pub async fn uninstall_pnpm_elevated(
+    app: AppHandle,
+    paths: Vec<String>,
+) -> Result<UninstallReport, String> {
     if crate::safe::is_active(&app) {
         return Err(i18n::t("err_safe_active_op").to_string());
     }
@@ -6468,7 +6480,12 @@ pub async fn uninstall_pnpm_elevated(app: AppHandle, paths: Vec<String>) -> Resu
     if state.updating.swap(true, Ordering::SeqCst) {
         return Err(i18n::t("err_task_busy").to_string());
     }
-    let result = uninstall_pnpm_elevated_inner(&app, paths);
+    let app2 = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        uninstall_pnpm_elevated_inner(&app2, paths)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     state.updating.store(false, Ordering::SeqCst);
     result
 }
@@ -6483,7 +6500,7 @@ fn uninstall_pnpm_elevated_inner(
         return Err(i18n::t("err_uninstall_pnpm_bad_target").to_string());
     }
 
-    set_status(app, "updating", None);
+    set_status(app, "elevating", None);
     emit_log(app, "update", i18n::t("log_uninstall_pnpm_elevating").to_string());
 
     let outcome = crate::elevate::remove_paths_elevated(&paths);

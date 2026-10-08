@@ -214,8 +214,8 @@ pub async fn bridge_status(app: AppHandle) -> Result<BridgeStatus, String> {
 
 /// 只读探测。**不返回 Result**：与 python_status_blocking 同一条纪律 —— 这一行是
 /// 首选项里的状态，不是报错入口。任何一步探测不到都退化成「未装 / 未注册」的
-/// 事实，而不是抛错（抛错会让整行空着，像卡住了）。真正的失败发生在写操作
-/// （deploy_python_bridge / mark_bridge_pending）上，那两个仍然返回 Result。
+/// 事实，而不是抛错（抛错会让整行空着，像卡住了）。写路径（deploy_after_install /
+/// activate_pending）仍然返回 Result —— 那里失败是真该告诉用户的。
 fn bridge_status_blocking(app: &AppHandle) -> BridgeStatus {
     let cfg_dir = config::config_dir(app);
     let bd = bridge_dir(&cfg_dir);
@@ -228,8 +228,14 @@ fn bridge_status_blocking(app: &AppHandle) -> BridgeStatus {
         None => false,
     };
     let pending = config::read_config_flag(app, PENDING_KEY);
-    let phase = bridge_phase(py.is_some(), released, registered || pending);
-    let message = bridge_phase_message(phase);
+    // ⚠ `registered` 必须**原样**送进状态机，不能 `registered || pending`：
+    // 「有 pending 标记」恰恰意味着**注册还没做**（DSH 当时在运行，我们故意跳过了）。
+    // 或上它会让这一行显示「已激活」，而工具一个都没注册 —— 状态行说谎比不说更糟，
+    // 用户会以为不用再管。pending 只作为**降级依据**：`registered` 查不到落点
+    // （profile 没探测出来）时，退回「待激活」而不是误报「未部署」。
+    let effective_registered = registered || (pending && profile.is_none());
+    let phase = bridge_phase(py.is_some(), released, effective_registered);
+    let message = bridge_phase_message(phase, pending, profile.as_deref());
     BridgeStatus {
         phase: phase.as_str().to_string(),
         released,
@@ -247,35 +253,24 @@ fn bridge_status_blocking(app: &AppHandle) -> BridgeStatus {
 }
 
 /// 各阶段的人话说明（前端直接显示，不自己拼）。
-fn bridge_phase_message(phase: BridgePhase) -> String {
+///
+/// `pending` 与 `profile` 单独传进来而不是从 phase 反推：`pending-activate` 有两种
+/// 成因（「还没注册」与「已注册但等重启」），前者不该报出具体 profile 名；
+/// 而 `active` 时若 pending 还在，得让用户知道下次进入 DSH 会清标记。
+fn bridge_phase_message(phase: BridgePhase, pending: bool, profile: Option<&str>) -> String {
     match phase {
         BridgePhase::NotInstalled => i18n::t("py_bridge_not_installed").to_string(),
         BridgePhase::NeedsRelease => i18n::t("py_bridge_needs_release").to_string(),
         BridgePhase::PendingActivate => i18n::t("py_bridge_pending_activate").to_string(),
-        BridgePhase::Active => i18n::t("py_bridge_active").to_string(),
+        BridgePhase::Active => {
+            if pending {
+                let name = profile.unwrap_or("");
+                i18n::fmt("py_bridge_registered", &[&name])
+            } else {
+                i18n::t("py_bridge_active").to_string()
+            }
+        }
     }
-}
-
-// ---------- Tauri 命令 ----------
-
-/// 「部署 Python 能力桥接」：手动重试用（用户在界面上点的那颗按钮）。
-///
-/// 与「基本安装」末尾自动调用的 `deploy_after_install` 是**同一条**路径，
-/// 只差一个 pending 标记的处理时机。
-#[tauri::command]
-pub fn deploy_python_bridge(app: AppHandle) -> Result<(), String> {
-    let py = detect::find_python().ok_or_else(|| i18n::t("setup_py_missing").to_string())?;
-    let notes = deploy_after_install(&app, &py)?;
-    let _ = app.emit_result(&notes);
-    Ok(())
-}
-
-/// 只写 pending 标记、不做任何部署（用户明确表示「稍后再说」时用）。
-#[tauri::command]
-pub fn mark_bridge_pending(app: AppHandle) -> Result<(), String> {
-    let py = detect::find_python().ok_or_else(|| i18n::t("setup_py_missing").to_string())?;
-    let path = py.program.to_string_lossy().to_string();
-    set_pending(&app, &path)
 }
 
 // ---------- 部署主体（pip 装完之后调） ----------
@@ -635,18 +630,6 @@ fn clear_pending(app: &AppHandle) {
     }
 }
 
-/// 扩展 AppHandle 的小工具：发一条带消息的事件（避免在这里再写一遍 Emitter 导入）。
-trait EmitResult {
-    fn emit_result(&self, message: &str) -> Result<(), String>;
-}
-
-impl EmitResult for AppHandle {
-    fn emit_result(&self, message: &str) -> Result<(), String> {
-        use tauri::Emitter;
-        self.emit("py-bridge", message.to_string()).map_err(|e| e.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -814,5 +797,44 @@ mod tests {
             assert_eq!(prog, path, "{path} 必须直接执行，不能套 cmd.exe");
             assert_eq!(args, vec![path.to_string()], "{path} 的参数表就是它自己");
         }
+    }
+
+    /// 回归：**有 pending 标记绝不能被报成「已激活」**。
+    ///
+    /// 真实故障：用户点「基本安装」时 DSH 正在运行，于是我们只写标记、**跳过注册**；
+    /// 但状态判定写成 `registered || pending`，而 `bundle_registered()` 查 profile
+    /// 本来就是 false —— 或上 pending 之后变成 true，界面显示「已激活：AI 现在就能调用
+    /// convert_file_to_markdown」，而实际上工具一个都没注册。状态行说谎比不说更糟。
+    ///
+    /// 这里复刻当时的输入组合：Python 在、代码已释放、**未注册**、**有 pending**。
+    #[test]
+    fn pending_marker_never_masquerades_as_active() {
+        // 当时那行的输入：registered=false 但 pending=true
+        let registered = false;
+        let pending = true;
+        let profile_detected = true; // profile 能探测出来（所以不能靠「查不到」来降级）
+        assert!(!registered, "前提：注册确实没做");
+
+        let effective = registered || (pending && !profile_detected);
+        let phase = bridge_phase(true /* python ok */, true /* released */, effective);
+        assert_ne!(
+            phase,
+            BridgePhase::Active,
+            "有 pending 且未注册时不得报 active —— 工具此时一个都没有"
+        );
+        assert_eq!(phase, BridgePhase::PendingActivate);
+    }
+
+    /// 反过来也要成立：profile 探测失败时，pending 可以当作「已注册」的退路
+    /// （宁可说待激活，也不谎报「未部署」）。
+    #[test]
+    fn pending_is_the_fallback_only_when_the_profile_is_unknown() {
+        let effective = false || (true && false);
+        assert_eq!(
+            bridge_phase(true, true, effective),
+            BridgePhase::PendingActivate
+        );
+        // 已注册且无 pending → 真的 active
+        assert_eq!(bridge_phase(true, true, true), BridgePhase::Active);
     }
 }

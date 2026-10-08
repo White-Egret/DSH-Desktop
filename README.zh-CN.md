@@ -273,18 +273,20 @@ pnpm 安装命令示例:     npm install -g pnpm
 
 「基本安装」结束后，程序会 ① 把桥接源码释放到 `%APPDATA%\com.dsh.desktop\py-bridge\`，② 把一个 Cordis **bundle** 释放到 `%APPDATA%\com.dsh.desktop\py-bridge-bundle\`，③ 用 `dsh plugin --profile <实测 profile> add <bundle>` 注册它。profile 从环境变量 / `dsh --dump-config` 读；保留的 **`desktop`** profile 会被提前拒绝（CLI 对它直接报错），也**从不**手写 profile 的 `package.json` / `cordis.patch.yml`。
 
-**AI 能调到什么**（11 个工具，单进程）：`convert_file_to_markdown`、`convert_files_to_markdown`、`markitdown_capabilities`、`read_excel_data`、`create_styled_excel`、`read_docx_text`、`generate_word_report`、`read_pptx_outline`、`add_resized_image_to_pptx`、`get_python_environment_info`、`execute_python_sandbox`。
+**AI 能调到什么**（12 个工具，单进程）：`convert_file_to_markdown`、`convert_files_to_markdown`、`markitdown_capabilities`、`read_excel_data`、`create_styled_excel`、`read_docx_text`、`generate_word_report`、`read_pptx_outline`、`add_resized_image_to_pptx`、`get_python_environment_info`、`describe_python_capabilities`、`execute_python_sandbox`。
 
 - **单进程多工具。** `dsh_bridge.runtime` 只 import 一个入口模块，各工具模块在 import 期用 `@tool` 装饰器注册。共享同一个 MarkItDown 实例与同一个解释器正是要点所在 —— 另一个选择是每个库一个进程。
 - **只认本机文件。** 转换走 `MarkItDown().convert_local(...)`，每个路径都过一遍拒绝 `http(s)://` 的校验。一个能收 URL 的入口就是 SSRF 与远程内容注入的现成原语。
 - **长正文不过 stdio。** 超过 `max_chars` 就把全文写进文件、只回 `{path, chars, lines, preview}`；DataFrame 只回 `head(20)` 加形状与列名。几 MB 的工具结果是最快把会话撑坏的方式。
 - **沙箱边界**（`execute_python_sandbox`）：导入白名单 + 受限 builtins。`os` / `sys` / `subprocess` / `socket` / `shutil` / `ctypes` / `importlib` / `pickle` / 网络类模块一律拒绝，`eval` / `exec` / `compile` / `__import__` 与下划线属性访问同样拒绝 —— 不挡下划线属性的话，`getattr(x, "__class__")` 能摸到 `__subclasses__`，沙箱当场就没了。`pandas` / `numpy` / `scipy` / `matplotlib` / `sklearn` **在白名单里但不强制安装**：没装时报的是普通 `ModuleNotFoundError`（「装一下就行」），与「被策略拒绝」读起来完全不同。异常统一变成 `{ok: false, error}`，桥接进程必须扛过每一条。
-- **能力发现。** 一段按实际环境生成的提示词段落会列出当前装了哪些库 —— 用户日后自己装了 `pandas`，它会自动出现，不必改代码重新发版。
+- **能力发现。** 一段提示词段落列出当前实际装了哪些库。它的 `text` 是**提供函数**（`(context) => string`，每次组装提示词时重新求值）而不是静态文本，文本本身由 Python 侧生成（`describe_python_capabilities`），所以白名单与提示词不会各说各话。用户日后自己装了 `pandas`，**不用重启 DSH、也不用重载插件**，这段说明自动就多出 pandas。
 - **生命周期。** Python 子进程由**插件**拉起而不是本程序，所以 DSH 一关它就没了 —— 不留孤儿进程，这边也不需要动 Job Object。看门狗按指数退避重启（最多 5 次）。
 
 **首次安装 vs. DSH 已在运行。** `dsh plugin` 自己会初始化不存在的 profile，但它不能与 DSH 的首次启动在同一个 profile 上抢跑。所以：DSH **没在监听**时立即注册；**正在跑**时只写一个持久化的 `python_bridge_pending` 标记，由 `py_bridge::activate_pending`（挂在状态汇总报出 `running` 的那一处）在下次进入 DSH 时注册。这一步失败**绝不回滚 pip** —— 已经装好的库不该被说成「没装」，而是降级成「稍后自动激活」。
 
-**排障。** 按钮下方那行状态会报出阶段（`not-installed` / `needs-release` / `pending-activate` / `active`）；「部署 / 重新部署」只重跑「释放 + 注册」，不必再走一遍 pip。桥接侧的失败（缺 `dsh_bridge`、协议版本不匹配）由插件记进日志并回显在提示里。宿主与 `dsh-python-bridge` 版本不一致会报 `protocol-mismatch`（`-32006`），而不是「静默一个工具都没有」。新注册的插件需要**重启 DSH** 才会加载。
+**排障。** 按钮下方那行状态会报出阶段（`not-installed` / `needs-release` / `pending-activate` / `active`），**这一行没有手动部署按钮** —— 释放与注册一律由「进入 DSH 时自动激活」承担：DSH 没在跑时安装末尾就地装好，正在跑则挂标记等下次进入。注册失败会在下次进入 DSH 时自动重试，不必手动干预；细节看 `desktop.log` 里的 `[py-bridge]` 行。桥接侧的失败（缺 `dsh_bridge`、协议版本不匹配）由插件记进日志并回显在提示里。宿主与 `dsh-python-bridge` 版本不一致会报 `protocol-mismatch`（`-32006`），而不是「静默一个工具都没有」。新注册的插件需要**重启 DSH** 才会加载。
+
+> **曾经有过一颗「部署 / 重新部署」按钮，现已移除**：它做的事与自动激活完全重叠，留着只会让人误以为「装完还得再点一下」。更糟的是，状态行一旦说谎（`pending` 标记被当成了「已注册」，而实际一个工具都没注册），那颗按钮的存在会让人更不会怀疑 —— 界面上多一个可点的东西，就多一份「到底该点哪个」的心智负担。
 
 ### npm 缓存位置
 

@@ -22,6 +22,8 @@ const CLIENT_VERSION = '0.0.1'
 const MAX_RESTARTS = 5
 const HANDSHAKE_TIMEOUT_MS = 60_000
 const CALL_TIMEOUT_MS = 10 * 60_000
+/** 能力发现提示词段落的注册名：必须全 profile 唯一，重复注册会 throw */
+const PROMPT_SECTION = 'dsh-desktop-python-bridge-capabilities'
 
 /** runtime 把「没装 / 版本不匹配」这类问题映射成的错误码（见 dsh_bridge/_errors.py）。 */
 const CODE_TIMEOUT = -32001
@@ -202,11 +204,24 @@ export function apply(ctx, config = {}) {
   let starting = null
   /** @type {Array<{ description: string, parameters: object }>} */
   const manifestTools = []
+  /**
+   * 能力发现提示词的**已渲染快照**（start() 里预热）。
+   *
+   * 为什么存字符串而不是每次现取：section 的 `text` provider 是**同步**的
+   * （`(context) => string`），没法在里面 await 一次 JSON-RPC；而提示词组装
+   * 每轮都调，每次现取就等于每轮多起一个子进程。
+   * 所以在握手完成后那次 start() 里预热一次，写时刷新（见下方 assign）。
+   */
+  let capabilityText = ''
 
   const log = (level, message) => {
     // 走插件自己的 logger：这些行会进 DSH 日志，用户能在排障时看到桥接的状态
     ctx.logger?.[level === 'ERROR' ? 'error' : 'warn']?.(`[py-bridge] ${message}`)
   }
+
+  // 进程重启后旧快照作废：那一瞬间最可能「环境变了」（重启原因常是崩溃），
+  // 而且留着旧文本会在桥接未就绪时继续对外宣称一批其实不可用的库。
+  const resetCapabilities = () => { capabilityText = '' }
 
   /**
    * spawn 子进程并完成 initialize 握手。
@@ -238,6 +253,7 @@ export function apply(ctx, config = {}) {
       conn = new BridgeConnection(child, {
         onLog: log,
         onExit: (code, signal) => {
+          resetCapabilities()
           if (disposed) return
           restart()
           if (code !== 0) log('ERROR', `桥接进程退出（code=${code} signal=${signal}）`)
@@ -269,6 +285,21 @@ export function apply(ctx, config = {}) {
       restartCount = 0
       log('INFO', `握手完成：server ${result?.serverInfo?.name} ${result?.serverInfo?.version}，` +
         `${manifestTools.length} 个工具已就绪`)
+
+      // 顺手取一次能力发现文案，把 section provider **预热**好
+      // （provider 是同步的，不能在里面 await；缓存也免得每次组装提示词都起子进程）。
+      // 文本由 **Python 侧** 生成（describe_python_capabilities）—— 两边各写一份
+      // 必然漂移：白名单变了而提示词还在说旧话，模型就会照错的信息行事。
+      // 失败不影响工具注册 —— 那才是主线功能。
+      try {
+        const res = await conn.request('describe_python_capabilities', {}, 60_000)
+        capabilityText = res?.ok && typeof res.text === 'string' ? res.text : ''
+        if (!capabilityText) log('WARN', '能力发现：Python 侧没返回文案（不影响工具）')
+        else log('INFO', `能力发现：已写入 ${capabilityText.split('\n').length} 行环境说明`)
+      } catch (e) {
+        capabilityText = ''
+        log('WARN', `能力发现：取文案失败（不影响工具）：${e.message}`)
+      }
     })()
 
     try {
@@ -329,6 +360,7 @@ export function apply(ctx, config = {}) {
     start()
       .then(() => {
         if (disposed) return
+        registerCapabilities()
         unregister = registerAll()
       })
       .catch((e) => log('ERROR', `启动失败：${e.message}`))
@@ -341,7 +373,44 @@ export function apply(ctx, config = {}) {
       }
       return () => { for (const d of disposers) { try { d() } catch { /* 已卸载 */ } } }
     }
+
+    /**
+     * 能力发现：把「当前环境装了哪些库」写进系统提示词。
+     *
+     * `text` 传的是**函数**而不是字符串 —— `PromptSection.text` 支持
+     * `(context) => string`，每次组装提示词时求值（见 dsh-system-prompt 的
+     * PromptSection 类型）。所以用户日后自己装了 pandas，这段会自动多出 pandas，
+     * **不需要重启 DSH、不需要重新注册插件**，兑现 README 里的承诺。
+     * 静态文本做不到这件事：它在 import 期就固定了。
+     *
+     * 求值里只有一次 JSON-RPC 往返（`get_python_environment_info`），且有缓存：
+     * 提示词组装每轮都会调，不能每次都起子进程。缓存在看门狗重启进程时清掉 ——
+     * 那才是「环境可能变了」的时机。
+     *
+     * `interpolate: false` 是必需的：这段文本含中文与括号，一旦某个库的描述里
+     * 出现 `{{`，默认插值会把它当成 prompt 变量并**抛错**（未知变量 = 组装失败）。
+     * 宁可原样渲染，也不要让一段说明文字把整个提示词搞挂。
+     */
+    function registerCapabilities() {
+      try {
+        ctx.systemPrompt.section({
+          name: PROMPT_SECTION,
+          order: 200,
+          interpolate: false,
+          // 读的是 start() 预热好的快照（同步可读）。
+          // 返回空串 = 这一段在组装时被丢掉（dsh-system-prompt 会 filter 掉空段），
+          // 正好是「桥接没起来就别声称有什么工具」的诚实做法。
+          text: () => capabilityText,
+        })
+      } catch (e) {
+        // 这一段只是**增强**：注册失败不该连累工具注册（工具才是主线功能）
+        log('WARN', `能力发现段落注册失败（不影响工具）：${e.message}`)
+      }
+    }
   })
 }
 
-export const inject = ['tools']
+// 注入 tools（注册桥接工具）与 systemPrompt（能力发现段落）。
+// 少了后者 apply() 里的 ctx.systemPrompt 可能是 undefined —— 那一段是**增强**，
+// 拿不到就只注册工具，不让可选功能拖垮主线。
+export const inject = ['tools', 'systemPrompt']

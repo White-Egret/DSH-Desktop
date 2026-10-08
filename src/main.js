@@ -36,6 +36,10 @@ const STATUS_META = {
   'error':            { key: 'st_error',       dot: 'red' },
   'port-busy':        { key: 'st_port_busy',   dot: 'orange' },
   'updating':         { key: 'st_updating',    dot: 'purple' },
+  // 提权删除：刻意**不**复用 updating —— 那个状态在界面上就是「正在更新 DSH，请勿关闭」，
+  // 而提权时等的是 UAC 对话框，两者毫无关系（真机现场：用户看到「正在更新 DSH？」，
+  // 以为点错了按钮）。
+  'elevating':        { key: 'st_elevating',   dot: 'purple' },
 };
 
 // ---------- 日志 ----------
@@ -347,7 +351,7 @@ function onStatus(p) {
   const line = $('stage-line');
   const hint = $('stage-hint');
   const busyPanel = $('port-busy-panel');
-  const showSpinner = ['starting', 'stopping', 'updating'].includes(p.status);
+  const showSpinner = ['starting', 'stopping', 'updating', 'elevating'].includes(p.status);
 
   $('spinner').classList.toggle('hidden', !showSpinner);
   line.classList.remove('error');
@@ -385,6 +389,13 @@ function onStatus(p) {
     case 'updating':
       line.textContent = t('stage_updating');
       hint.textContent = t('hint_updating');
+      hint.classList.remove('hidden');
+      break;
+    case 'elevating':
+      // 刻意**不**碰 update-progress：那是「更新 DSH」的进度面板，
+      // 提权等的是 UAC 对话框，混在一起会让用户以为在更新（真机现场）。
+      line.textContent = t('stage_elevating');
+      hint.textContent = t('hint_elevating');
       hint.classList.remove('hidden');
       break;
     case 'error':
@@ -760,12 +771,6 @@ async function init() {
   await listen('setup-result', (e) => onSetupResult(e.payload));
   // 首选项「Python 安装」的逐行输出（pip 的实时输出；由后端 spawn_log_reader 转发）
   await listen('python-log', (e) => appendPythonLog(e.payload.line));
-  // 能力桥接部署完成（手动点「部署」按钮那条路发出来的）
-  await listen('py-bridge', (e) => {
-    const msg = String(e.payload || '');
-    if (msg) { setPythonProgress(true, msg); appendPythonLog(msg); }
-    refreshBridgeStatus();
-  });
   // 安全模式：进入/退出/闪退（safe-mode-change）与修复验证结果（safe-verify）
   await listen('safe-mode-change', (e) => onSafeModeChange(e.payload));
   await listen('safe-verify', (e) => onSafeVerify(e.payload));
@@ -1268,40 +1273,17 @@ function onPythonResult(p) {
 //
 // 状态文案**由后端生成**（Rust 侧按当前语言给出），前端不自己拼 —— 这样
 // 「已激活 / 待激活 / 未安装」这几句话只有一处定义，不会和后端的判定条件走偏。
-// 前端只负责把 message 显示出来，以及按 phase 决定那颗按钮该不该亮。
+// 这一行**只有状态、没有动作**：激活一律由「进入 DSH」自动完成，所以前端
+// 除了显示什么可点的东西都没有 —— 也就不存在「该不该点这个按钮」的困惑。
 async function refreshBridgeStatus() {
   const el = $('py-bridge-status');
   if (!el) return;
   try {
     const s = await invoke('bridge_status');
     el.textContent = s.message || '';
-    // 没装 Python 时不让点「部署」：那必然失败，先去点基本安装
-    const btn = $('btn-py-bridge');
-    if (btn) btn.disabled = pythonTask.active || s.phase === 'not-installed';
   } catch (e) {
     // 问不到就如实说一句，别让这一行空着像卡住了
     el.textContent = t('toast_py_status_fail', e);
-    const btn = $('btn-py-bridge');
-    if (btn) btn.disabled = true;
-  }
-}
-
-/// 「部署 / 重新部署能力桥接」：不重跑整次 pip 安装，只重做「释放 + 注册」，
-/// 供用户在激活失败后单独重试用。
-async function runBridgeDeploy() {
-  const btn = $('btn-py-bridge');
-  if (btn) btn.disabled = true;
-  setPythonProgress(true, t('py_bridge_deploy'));
-  try {
-    await invoke('deploy_python_bridge');
-    toast(t('py_bridge_deployed'));
-  } catch (e) {
-    const msg = t('py_bridge_deploy_fail', e);
-    setPythonProgress(true, msg);
-    appendPythonLog(msg);
-    toast(msg, true);
-  } finally {
-    refreshBridgeStatus();
   }
 }
 
@@ -1923,6 +1905,10 @@ async function doUninstallPnpmElevated() {
   $('btn-uninstall-pnpm-no').disabled = true;
   $('uninstall-pnpm-fail').classList.add('hidden');
   try {
+    // 提权期间后端要等用户在 UAC 上做选择，可能十几秒。这段时间里按钮是灰的 ——
+    // 但**必须说清在等什么**，否则「灰着不动」看起来就像程序卡死了（真机现场）。
+    $('uninstall-pnpm-elevate-note').classList.remove('hidden');
+    $('uninstall-pnpm-elevate-note').textContent = t('uninstall_pnpm_elevate_waiting');
     const rep = await invoke('uninstall_pnpm_elevated', { paths: pnpmElevatePaths });
     uninstalling = false;
     if (rep && rep.success) {
@@ -2531,8 +2517,7 @@ function bindUI() {
   // ---- 首选项：Python 建议安装块（状态行由 openSettings 拉取，这里只管两个按钮）----
   $('btn-python-basic').onclick = () => runPythonInstall('basic');
   $('btn-python-extra').onclick = () => runPythonInstall('extra');
-  // 能力桥接：单独一颗部署按钮（不重跑 pip 安装，只重做「释放 + 注册」）
-  $('btn-py-bridge').onclick = () => runBridgeDeploy();
+  // 能力桥接**没有按钮**：释放 + 注册由「进入 DSH 时自动激活」承担，见 refreshBridgeStatus
 
   // 检测全局包名
   $('btn-detect-package').onclick = async () => {

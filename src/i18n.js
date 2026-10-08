@@ -18,6 +18,8 @@
     st_idle: '未运行', st_starting: '正在启动', st_running: '运行中',
     st_running_ext: '运行中（外部）', st_stopping: '正在停止', st_error: '启动失败',
     st_port_busy: '端口被占用', st_updating: '正在更新',
+    // 状态栏那个短标签：刻意不叫「正在更新」—— 提权时等的是 UAC 对话框（真机现场）
+    st_elevating: '请求管理员权限',
     // 状态区
     stage_init: '正在初始化…',
     stage_hint: '点击「日志」查看 DSH 的完整输出',
@@ -28,6 +30,10 @@
     stage_stopping: '正在停止 DSH…',
     stage_updating: '正在更新 DSH，请勿关闭程序…',
     hint_updating: '更新进度实时显示在下方；完整输出同时写入「日志」（来源标记为 update）',
+    // 提权删除：刻意与「正在更新 DSH」分成两套文案 —— 这里等的是 UAC 对话框，
+    // 复用更新那套会让用户以为点错了按钮（真机现场：界面显示「正在更新 DSH？」）。
+    stage_elevating: '正在请求管理员权限以删除 pnpm，请勿关闭程序…',
+    hint_elevating: '请在弹出的 Windows 管理员权限确认窗口中选择「是」；完整输出同时写入「日志」（来源标记为 update）',
     upd_prog_prepare: '正在停止当前 DSH 服务并启动 npm 更新…',
     stage_error_default: '启动失败，详见日志',
     hint_error: '点击「日志」查看 DSH 的完整输出；也可点击「启动」重试',
@@ -127,12 +133,9 @@
     toast_py_ok: 'Python 安装任务已完成',
     toast_py_fail: 'Python 安装任务失败',
     toast_py_status_fail: '检测 Python 失败: {0}',
-    // ---- Python 能力桥接：把装好的库挂成 AI 工具（文案由后端按当前语言生成，这里只放兜底） ----
+    // ---- Python 能力桥接：把装好的库挂成 AI 工具（状态文案由后端按当前语言生成） ----
     py_bridge_label: 'AI 调用能力（Python 能力桥接）',
     py_bridge_checking: '正在检测能力桥接状态…',
-    py_bridge_deploy: '部署 / 重新部署能力桥接',
-    py_bridge_deployed: '能力桥接已部署',
-    py_bridge_deploy_fail: '部署能力桥接失败：{0}',
     lbl_language: '语言 / Language（保存后立即生效，无需重启）',
     opt_lang_zh: '中文', opt_lang_en: 'English',
     lbl_appearance: '外观（保存后立即生效，桌面与 DSH 页面同步切换）',
@@ -264,6 +267,8 @@
     btn_uninstall_pnpm_elevate: '以管理员身份重试…',
     uninstall_pnpm_elevate_note: 'pnpm 装在系统目录里（C:\\Program Files 等），当前权限删不掉（当初 Node 能装进去，也是因为安装程序弹了一次 UAC 提权）。点下面的按钮会弹出一次 Windows 的管理员权限确认窗口 —— 只删除 pnpm 自己的那几个文件，不动该目录里的其它内容。',
     uninstall_pnpm_elevate_failed: '以管理员权限卸载 pnpm 未成功（可能取消了 UAC 提示，或文件正被其它进程占用）。',
+    // 提权进行中的说明：按钮灰着不动时必须说清在等什么，否则看起来像程序卡死（真机现场）
+    uninstall_pnpm_elevate_waiting: '正在等待你在 Windows 管理员权限确认窗口里选择「是」…… 若没看到那个窗口，请检查任务栏（它可能在后面）后再点一次上面的按钮。',
     btn_uninstall_close: '完成',
     uninstall_done_both: 'DSH 和 pnpm 已成功卸载。',
     uninstall_done_dsh_only: 'DSH 已成功卸载，日后如需卸载管理 DSH 插件用的 pnpm，可以在终端执行：',
@@ -399,6 +404,7 @@
     st_idle: 'Idle', st_starting: 'Starting', st_running: 'Running',
     st_running_ext: 'Running (external)', st_stopping: 'Stopping', st_error: 'Start failed',
     st_port_busy: 'Port busy', st_updating: 'Updating',
+    st_elevating: 'Requesting admin rights',
     stage_init: 'Initializing…',
     stage_hint: 'Click "Log" to see DSH\'s full output',
     stage_idle: 'DSH is not running — click "Start" in the toolbar',
@@ -408,6 +414,11 @@
     stage_stopping: 'Stopping DSH…',
     stage_updating: 'Updating DSH — do not close the app…',
     hint_updating: 'Progress streams below; full output is also written to the "Log" dialog (source tag: update)',
+    // Kept separate from the "Updating DSH" wording on purpose: what is being waited on
+    // here is the UAC prompt, and reusing the update wording makes users think they
+    // clicked the wrong button (real-machine report).
+    stage_elevating: 'Requesting administrator rights to remove pnpm — do not close the app…',
+    hint_elevating: 'Choose "Yes" in the Windows administrator prompt; full output is also written to the "Log" dialog (source tag: update)',
     upd_prog_prepare: 'Stopping the current DSH service and starting the npm update…',
     stage_error_default: 'Start failed — see the log',
     hint_error: 'Open "Log" for DSH\'s full output, or click "Start" to retry',
@@ -509,9 +520,6 @@
     // ---- Python capability bridge: exposes the installed libraries as AI tools ----
     py_bridge_label: 'AI-callable capabilities (Python capability bridge)',
     py_bridge_checking: 'Detecting the capability bridge…',
-    py_bridge_deploy: 'Deploy / redeploy the capability bridge',
-    py_bridge_deployed: 'The capability bridge has been deployed',
-    py_bridge_deploy_fail: 'Failed to deploy the capability bridge: {0}',
     lbl_language: '语言 / Language (applies immediately after saving; no restart needed)',
     opt_lang_zh: '中文', opt_lang_en: 'English',
     lbl_appearance: 'Appearance (applies immediately; Desktop and the DSH page switch together)',
@@ -632,6 +640,7 @@
     btn_uninstall_pnpm_elevate: 'Retry as administrator…',
     uninstall_pnpm_elevate_note: 'pnpm sits in a system folder (C:\\Program Files and the like) where the current account cannot delete it — Node got in there originally only because its installer asked for administrator rights via UAC. Clicking the button below shows a Windows administrator prompt; it removes only pnpm\'s own files and touches nothing else in that folder.',
     uninstall_pnpm_elevate_failed: 'Removing pnpm with administrator rights did not succeed (the UAC prompt may have been declined, or a file is in use).',
+    uninstall_pnpm_elevate_waiting: 'Waiting for you to choose "Yes" in the Windows administrator prompt… If you cannot see that window, check the taskbar (it may be behind other windows) and click the button above again.',
     btn_uninstall_close: 'Done',
     uninstall_done_both: 'DSH and pnpm were uninstalled successfully.',
     uninstall_done_dsh_only: 'DSH was uninstalled successfully. To also remove the pnpm that manages DSH plugins, run this in a terminal:',

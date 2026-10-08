@@ -110,10 +110,10 @@ pub fn run(launched_by_autostart: bool) {
             process::python_status,
             process::setup_install_python,
             process::setup_install_python_extra,
-            // Python 能力桥接：查状态 / 立即部署并注册 / 只释放待激活标记（重试用）
+            // Python 能力桥接：只读查状态（释放 + 注册由「进入 DSH 时自动激活」承担，
+            // 刻意不提供手动部署命令 —— 它与自动激活完全重叠，多一颗按钮只会
+            // 让人误以为「装完还得再点一下」）
             py_bridge::bridge_status,
-            py_bridge::deploy_python_bridge,
-            py_bridge::mark_bridge_pending,
             process::finish_setup,
             process::set_language,
             // 首次运行向导的「Node 版本过低」告警：保留旧版本并继续（只写 node_min_ack 一个键）

@@ -250,13 +250,14 @@
           </div>
           <div class="hint" data-i18n-html="py_packages_html">基本安装：先安装最新稳定版 Python（系统已装则跳过本体），再安装 python-docx / python-pptx / openpyxl / XlsxWriter / lxml / Pillow / et_xmlfile / typing_extensions；需要数据分析的，可在基本安装完成后再点「数据分析扩展包」安装 numpy / pandas / python-dateutil / tzdata / six。</div>
           <!-- 能力桥接：装好的库本身 AI 调不到，要靠它挂成 DSH 的工具。
-               状态由 bridge_status 后端命令给（文案也由后端按当前语言生成，
-               这里只放兜底文本）；那颗按钮让用户能重试部署而不必重跑整次安装。 -->
+               这里**只有状态、没有按钮**：释放 + 注册全部由「进入 DSH 时自动激活」承担
+               （DSH 没在跑时安装末尾就地注册，在跑则挂 pending 等下次进入）。
+               曾经有过一颗「部署 / 重新部署」按钮，但它做的事与自动激活完全重叠 ——
+               留着只会让人以为「装完还得再点一下」，而状态行一旦说谎（那正是它藏过的
+               故障）就更没人会怀疑了。状态由 bridge_status 后端命令给，
+               文案也由后端按当前语言生成，这里只放兜底文本。 -->
           <div class="py-bridge-row">
-            <div class="row">
-              <span class="py-bridge-label" data-i18n="py_bridge_label">AI 调用能力（Python 能力桥接）</span>
-              <button id="btn-py-bridge" class="btn small" data-i18n="py_bridge_deploy">部署 / 重新部署能力桥接</button>
-            </div>
+            <span class="py-bridge-label" data-i18n="py_bridge_label">AI 调用能力（Python 能力桥接）</span>
             <div id="py-bridge-status" class="py-status" data-i18n="py_bridge_checking">正在检测能力桥接状态…</div>
           </div>
           <div id="python-progress" class="py-progress hidden">

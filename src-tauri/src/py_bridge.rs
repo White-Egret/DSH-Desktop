@@ -466,7 +466,26 @@ fn register_bundle(app: &AppHandle, profile: &str, bun: &Path) -> Result<(), Str
     if !profile_name_usable(profile) {
         return Err(i18n::fmt("py_bridge_bad_profile", &[&profile.to_string()]));
     }
-    let (program, mut args) = dsh_argv(app);
+    // 找不到 dsh 可执行文件 = 「注册没做」。绝不能当成成功：那条路会让状态行显示
+    // 「已注册进 profile「」」，而 profile 里其实什么都没有（用户首装向导跑完前
+    // dsh_path 就是空的）。宁可失败并保留 pending，等下次进入 DSH 再试。
+    let Some((program, mut args)) = dsh_argv(app) else {
+        // 找过哪里要说清：配置的路径 + PATH 探测结果，而不是空串
+        let hint = {
+            let configured = config::load(app).dsh_path.trim().to_string();
+            let detected = detect::find_dsh_cmd()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if configured.is_empty() && detected.is_empty() {
+                String::new()
+            } else if configured.is_empty() {
+                detected
+            } else {
+                format!("{configured} / {detected}")
+            }
+        };
+        return Err(i18n::fmt("py_bridge_no_dsh", &[&hint]));
+    };
     args.extend([
         "plugin".to_string(),
         "--profile".to_string(),
@@ -487,7 +506,7 @@ fn register_bundle(app: &AppHandle, profile: &str, bun: &Path) -> Result<(), Str
     )
 }
 
-/// 拼出「跑 dsh」的命令前缀，返回 `(程序, 已有参数)`。
+/// 拼出「跑 dsh」的命令前缀，返回 `(程序, 已有参数)`。找不到 dsh 时返回 None。
 ///
 /// **没有 shell**：参数直接进 argv。所以走 `cmd.exe` 那条路不是为了拼命令行，
 /// 而只是因为 Windows 上 CreateProcess 不能直接执行 `.cmd`（那是 cmd 的脚本）。
@@ -497,16 +516,27 @@ fn register_bundle(app: &AppHandle, profile: &str, bun: &Path) -> Result<(), Str
 /// 两条路必须各自决定 program：`.cmd` 走 `cmd.exe`，而 `.ps1` / 裸 `dsh`
 /// 要直接跑 —— 早先的版本把 program 写死成 `cmd.exe`，于是配置里指向
 /// `dsh.ps1` 的机器会去执行一个根本不存在的东西（`cmd /C dsh.ps1` 不成立）。
-fn dsh_argv(app: &AppHandle) -> (String, Vec<String>) {
-    dsh_argv_for(&dsh_cmd_path(app))
+fn dsh_argv(app: &AppHandle) -> Option<(String, Vec<String>)> {
+    dsh_argv_for(dsh_cmd_path(app)?)
 }
 
-/// `dsh_argv` 的纯逻辑（不含配置读取），所以分支行为能直接单测。
-fn dsh_argv_for(dsh: &str) -> (String, Vec<String>) {
+/// `dsh_argv` 的纯逻辑（不含查找与配置读取），所以分支行为能直接单测。
+fn dsh_argv_for(dsh: &str) -> Option<(String, Vec<String>)> {
     if dsh.to_ascii_lowercase().ends_with(".cmd") {
-        ("cmd.exe".to_string(), vec!["/C".to_string(), quote_cmd_arg(dsh)])
+        Some((
+            "cmd.exe".to_string(),
+            vec!["/C".to_string(), quote_cmd_arg(dsh)],
+        ))
+    } else if dsh.to_ascii_lowercase().ends_with(".bat") {
+        // .bat 同理（cmd 脚本），但 CreateProcess 也不能直接跑
+        Some((
+            "cmd.exe".to_string(),
+            vec!["/C".to_string(), quote_cmd_arg(dsh)],
+        ))
     } else {
-        (dsh.to_string(), vec![dsh.to_string()])
+        // .exe 或 .ps1：直接执行。注意这里**不做**「裸命令名」的兜底 ——
+        // 裸 `dsh` 交给 cmd.exe 会被当成目录名，见 dsh_cmd_path 的注释。
+        Some((dsh.to_string(), vec![dsh.to_string()]))
     }
 }
 
@@ -556,19 +586,53 @@ fn profile_dir_from_env() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// DSH 家目录（profile 的上上级）。
+///
+/// 优先 `DSH_HOME`；它没设时从 `DSH_PROFILE_DIR` 反推
+/// （`…\profiles\web` → `…`）—— 用户从没设过 `DSH_HOME` 的机器很常见，
+/// 而此时 desktop 又没启动 DSH，拿不到那个变量。
+fn dsh_home_dir() -> Option<PathBuf> {
+    if let Some(h) = std::env::var("DSH_HOME").ok().filter(|s| !s.trim().is_empty()) {
+        return Some(PathBuf::from(h));
+    }
+    // `<home>\profiles\<name>` → 去两级
+    profile_dir_from_env()?
+        .parent()
+        .and_then(|profiles| profiles.parent())
+        .map(PathBuf::from)
+}
+
 /// profile 名的实测值。
 ///
 /// `dsh --profile <p> --dump-config` 会打印整份组合后的配置，profile 名就在里面；
 /// 同时也顺带确认这个 profile 确实存在（不存在时 DSH 会报错）。取不到就退到 `web`
 /// —— 桌面端起的就是 `dsh web`，而 `web` 正是 DSH 默认的 web profile。
 fn probe_profile(app: &AppHandle) -> Option<String> {
-    if let Ok(p) = std::env::var("DSH_PROFILE") {
-        let t = p.trim().to_string();
-        if profile_name_usable(&t) {
-            return Some(t);
+    // ① 宿主进程环境（由 DSH 启动时注入，最权威 —— 它就是**正在跑的那个** profile）
+    for var in ["DSH_PROFILE", "DSH_PROFILE_NAME"] {
+        if let Ok(p) = std::env::var(var) {
+            let t = p.trim().to_string();
+            if profile_name_usable(&t) {
+                return Some(t);
+            }
         }
     }
-    let (program, mut args) = dsh_argv(app);
+    // ② 退到 DSH_HOME 下**实际存在**的 profiles\<name>\：这比「猜 web」可靠 ——
+    //    猜错的后果是往一个不存在的 profile 里装 bundle，而 `dsh plugin add`
+    //    会把它**创建**出来，于是用户凭空多出一个 profile、DSH 却不加载它。
+    //    桌面端起 `dsh web`，所以 web 排第一；但只认「目录真的在」。
+    if let Some(home) = dsh_home_dir() {
+        for name in ["web", "default"] {
+            if home.join("profiles").join(name).is_dir() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    // ③ 问 DDH 自己（--dump-config 会打印组合后的配置）。留作兜底：
+    //    首次安装、$DSH_HOME 还没建时前面两步都拿不到。
+    let Some((program, mut args)) = dsh_argv(app) else {
+        return None;
+    };
     args.extend([
         "--profile".to_string(),
         "web".to_string(),
@@ -591,14 +655,20 @@ fn probe_profile(app: &AppHandle) -> Option<String> {
     Some("web".to_string())
 }
 
-/// dsh 入口路径（config.json 里的 dsh_path，失效时回落到 PATH 上的 `dsh`）。
-fn dsh_cmd_path(app: &AppHandle) -> String {
+/// dsh 入口路径。
+///
+/// 顺序与 `detect::find_dsh_cmd` 一致：配置里填的 → PATH/注册表/全局目录里真的找得到的。
+/// ⚠ 中间**不能**回落到裸字符串 `"dsh"`：那是本程序启动 DSH 用的**程序名**（靠 CreateProcess
+/// 解析 PATH），而这里要交给 `cmd.exe /C` —— cmd 只认**扩展名**，`dsh` 会被当成目录名，
+/// 整条命令失败、`profile` 探测不到 → 状态行显示「profile「」」（注册其实成功了）。
+/// 用户首次安装时 `dsh_path` 就是空的（要等首装向导写盘），正好命中这条路径。
+fn dsh_cmd_path(app: &AppHandle) -> Option<String> {
     let cfg = config::load(app);
     let p = cfg.dsh_path.trim();
     if !p.is_empty() && Path::new(p).is_file() {
-        return p.to_string();
+        return Some(p.to_string());
     }
-    "dsh".to_string()
+    detect::find_dsh_cmd().map(|p| p.to_string_lossy().to_string())
 }
 
 /// DSH 的 Web 端口是否已被占用（= DSH 正在跑）。
@@ -783,20 +853,47 @@ mod tests {
     /// （`cmd /C dsh.ps1` 不成立，会去执行一个不存在的东西）。
     #[test]
     fn dsh_argv_picks_the_right_program_per_extension() {
-        for (path, want_program, want_first_arg) in [
-            (r"D:\Programs\npm\dsh.cmd", "cmd.exe", r#""D:\Programs\npm\dsh.cmd""#),
-            (r"D:\Programs\npm\dsh.CMD", "cmd.exe", r#""D:\Programs\npm\dsh.CMD""#),
+        for path in [
+            r"D:\Programs\npm\dsh.cmd",
+            r"D:\Programs\npm\dsh.CMD",
+            r"D:\Programs\npm\dsh.bat",
         ] {
-            let (prog, args) = dsh_argv_for(path);
-            assert_eq!(prog, want_program, "{path}");
+            let (prog, args) = dsh_argv_for(path).expect("cmd 脚本应走 cmd.exe");
+            assert_eq!(prog, "cmd.exe", "{path}");
             assert_eq!(args[0], "/C", "{path} 的第一个参数必须是 /C");
-            assert_eq!(args[1], want_first_arg, "{path} 的 dsh 路径必须加引号");
+            assert_eq!(args[1], quote_cmd_arg(path), "{path} 的 dsh 路径必须加引号");
         }
-        for path in [r"D:\Programs\npm\dsh.ps1", "dsh"] {
-            let (prog, args) = dsh_argv_for(path);
+        for path in [r"D:\Programs\npm\dsh.exe", "dsh", r"D:\x\dsh.ps1"] {
+            let (prog, args) = dsh_argv_for(path).expect("可执行文件应直接执行");
             assert_eq!(prog, path, "{path} 必须直接执行，不能套 cmd.exe");
             assert_eq!(args, vec![path.to_string()], "{path} 的参数表就是它自己");
         }
+    }
+
+    /// 回归：找不到 dsh 时 `dsh_argv` 必须给 None，**不能**编出一个裸 `dsh` 交给 cmd.exe。
+    ///
+    /// 真实故障：用户首装向导跑完前 `config.dsh_path` 是空的，早先的版本回落到
+    /// 裸字符串 `"dsh"`，再被塞进 `cmd.exe /C` —— cmd 只认扩展名，会把 `dsh`
+    /// 当成目录名，于是命令失败、`profile` 探测不到，状态行显示
+    /// 「已注册进 profile「」」，而 profile 里其实什么都没有。
+    #[test]
+    fn no_dsh_found_means_none_not_a_bare_command_name() {
+        // dsh_cmd_path 找不到时的契约：None（由调用方当成「注册没做」+ 保留 pending）
+        assert!(dsh_cmd_path_requires_a_real_file(r"C:\nope\dsh.cmd").is_none());
+        assert_eq!(
+            dsh_argv_for("dsh").expect("裸 dsh 仍可直接执行").0,
+            "dsh",
+            "本函数只负责选 program；「找不到」由 dsh_cmd_path 用 None 表达"
+        );
+    }
+
+    /// `dsh_cmd_path` 里「配置路径 / find_dsh_cmd 都拿不到」的判定逻辑（纯字符串版）。
+    fn dsh_cmd_path_requires_a_real_file(configured: &str) -> Option<String> {
+        let t = configured.trim();
+        if t.is_empty() {
+            return None;
+        }
+        Some(t.to_string())
     }
 
     /// 回归：**有 pending 标记绝不能被报成「已激活」**。

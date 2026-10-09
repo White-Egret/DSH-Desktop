@@ -5541,7 +5541,12 @@ pub async fn setup_install_dsh(app: AppHandle, dir: Option<String>) -> Result<()
 // 这两件事只有 DSH Desktop 能做，因为它们只有 DSH Desktop 知道。
 
 /// 清理结果里的一项（`kind` 是给前端做图标的分类，`status` 是给前端本地化的一句话）。
-#[derive(Clone, Serialize)]
+///
+/// `Debug` 是给**测试**用的：断言失败时要把整份清单打出来（「空掉的 node_modules 应当被
+/// 回收：{items:?}」），没有它编译器会报 E0277 —— 而「编译不过」和「断言失败」相比，
+/// 贵得多（CI 上为了看一眼清单失败长什么样要重跑一次十几分钟的流水线）。
+/// 这个结构体字段全是 String，派生的 Debug 不含任何敏感内容（凭据从不进这里）。
+#[derive(Clone, Debug, Serialize)]
 pub struct UninstallItem {
     /// 项目分类：package | scope | shims | node_modules | npmrc | home
     pub kind: String,
@@ -5558,7 +5563,8 @@ pub struct UninstallItem {
 
 /// 卸载结果。刻意不返回「人话」而返回结构化数据：文案要跟着界面语言走，
 /// 而语言是前端的事（后端只在错误路径与日志里用 i18n）。
-#[derive(Clone, Serialize)]
+/// `Debug` 的用途同上（测试断言失败时打印整份报告）。
+#[derive(Clone, Debug, Serialize)]
 pub struct UninstallReport {
     pub success: bool,
     pub package_name: String,

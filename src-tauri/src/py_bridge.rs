@@ -486,12 +486,33 @@ fn register_bundle(app: &AppHandle, profile: &str, bun: &Path) -> Result<(), Str
         };
         return Err(i18n::fmt("py_bridge_no_dsh", &[&hint]));
     };
+    // `add` 的目标必须是 **tgz 的 file: 路径**，不能是 bundle 目录。
+    //
+    // 真机教训（2026-10-09，用户机器实测）：`dsh plugin add <目录>` 会被 pnpm
+    // 装成 `link:` 软链接。软链让 `Test-Path` 一度返回 True，但 DSH 启动时按
+    // bundle 名去解析**真实解包的包**，链接不在解析范围内，于是日志是
+    //   dsh: skipping profile bundle "@local/dsh-desktop-python-bridge":
+    //   cannot resolve ... from the dsh installation or D:\DSH\Home\profiles\web
+    // 症状就是「注册成功、Test-Path 为 True，但 AI 一个工具都看不到」。
+    // 改成先 `npm pack` 再 `add file:<tgz>` 之后，pnpm 输出
+    //   [WARN] Replaced "@local/..." ("link:...") with "file:...tgz" from a different source.
+    //   dependencies: + @local/dsh-desktop-python-bridge 1.0.0
+    // 这次是真解包，`Test-Path` 与依赖表两处都对上了。
+    //
+    // 文件名不能写死：`npm pack` 对 `@local/` scope 会把 `@` 和 `/` 换成 `-`，
+    // 产物是 `local-dsh-desktop-python-bridge-1.0.0.tgz`，而不是
+    // `dsh-desktop-python-bridge-1.0.0.tgz`。写死会去 add 一个不存在的文件。
+    let tgz = match pack_bundle(bun) {
+        Ok(p) => p,
+        Err(e) => return Err(i18n::fmt("py_bridge_pack_fail", &[&e])),
+    };
+    let file_spec = format!("file:{}", tgz.to_string_lossy().replace('\\', "/"));
     args.extend([
         "plugin".to_string(),
         "--profile".to_string(),
         profile.to_string(),
         "add".to_string(),
-        bun.to_string_lossy().to_string(),
+        file_spec,
     ]);
     crate::process::run_cmd_capture(&program, &args, "", Duration::from_secs(10 * 60)).and_then(
         |(ok, out)| {
@@ -509,12 +530,54 @@ fn register_bundle(app: &AppHandle, profile: &str, bun: &Path) -> Result<(), Str
     )
 }
 
+/// 在 bundle 目录里跑 `npm pack`，返回产出的 tgz 路径。
+///
+/// 为什么不是自己 zip：tgz 的目录结构、`package/` 前缀、完整性字段都对 npm 的
+/// 解析有影响，手搓一个「看起来一样」的包迟早会在某个角落不一致。用官方命令。
+///
+/// ⚠ Windows 上必须是 `npm.cmd`：系统默认的 PowerShell 执行策略常常是
+/// Restricted，会连 `npm.ps1` 一起禁掉（用户手动测时就撞上了：
+/// 「无法加载文件 C:\Program Files\nodejs\npm.ps1，因为在此系统上禁止运行脚本」）。
+/// Rust 的 `Command::new("npm")` 靠 PATHEXT 解析到 `.cmd`，本身不受该策略影响，
+/// 所以这里直接用现成的 `detect::find_npm_cmd()`——它已经处理了 PATH 顺序与
+/// 「node 同目录」这条退路，别再自己写一份 which。
+fn pack_bundle(bun: &Path) -> Result<PathBuf, String> {
+    let npm = detect::find_npm_cmd().ok_or_else(|| "npm.cmd not found".to_string())?;
+    // pack 的产物名从**输出**里取，不猜：`npm pack` 最后会打印一行纯文件名。
+    // 但 npm 也会打 notice / warning，所以扫全部 token 找一个 `.tgz` 结尾的。
+    let (ok, out) = crate::process::run_cmd_capture(
+        &npm.to_string_lossy(),
+        &["pack".to_string()],
+        &bun.to_string_lossy(),
+        Duration::from_secs(10 * 60),
+    )
+    .map_err(|e| e.to_string())?;
+    if !ok {
+        // 只回原始输出的尾部：调用方会用 py_bridge_pack_fail 包一层
+        let tail: String = out.lines().rev().take(6).collect::<Vec<_>>().join(" / ");
+        return Err(tail);
+    }
+    for token in out.split_whitespace().rev() {
+        let t = token.trim_matches(|c| c == '"' || c == '\'' || c == '`');
+        if !t.to_ascii_lowercase().ends_with(".tgz") {
+            continue;
+        }
+        let p = if Path::new(t).is_absolute() {
+            PathBuf::from(t)
+        } else {
+            bun.join(t)
+        };
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    Err(format!("npm pack 没有产出 tgz（输出：{}）", out.trim()))
+}
+
 /// 拼出「跑 dsh」的命令前缀，返回 `(程序, 已有参数)`。找不到 dsh 时返回 None。
 ///
 /// **没有 shell**：参数直接进 argv。所以走 `cmd.exe` 那条路不是为了拼命令行，
 /// 而只是因为 Windows 上 CreateProcess 不能直接执行 `.cmd`（那是 cmd 的脚本）。
-/// 那种情况下整条命令行由 cmd 自己解析，规则与批处理一致：引号内的路径是一个
-/// 整体 —— 不加引号的话，用户名里的空格会把 `D:\Users\John Doe\...` 拆成两个参数。
 ///
 /// 两条路必须各自决定 program：`.cmd` 走 `cmd.exe`，而 `.ps1` / 裸 `dsh`
 /// 要直接跑 —— 早先的版本把 program 写死成 `cmd.exe`，于是配置里指向
@@ -974,5 +1037,65 @@ mod tests {
         );
         // 已注册且无 pending → 真的 active
         assert_eq!(bridge_phase(true, true, true), BridgePhase::Active);
+    }
+
+    /// `add` 的目标必须是 **`file:` + tgz**，不能是 bundle 目录。
+    ///
+    /// 真机故障（2026-10-09）：`dsh plugin add <目录>` 被 pnpm 记成 `link:` 软链，
+    /// 于是 `node_modules\@local\...\index.js` 的 `Test-Path` 返回 True、状态行显示
+    /// 「已激活」，而 DSH 启动时按名字解析不到真包，日志里只有一行
+    /// `cannot resolve profile bundle ...`，AI 一个工具都没有。
+    /// 这条测试钉住「目录形态不许直接进 args」。
+    #[test]
+    fn register_target_is_a_file_url_to_a_tarball() {
+        let bun = Path::new(r"C:\Users\me\AppData\Roaming\com.dsh.desktop\py-bridge-bundle");
+        let tgz = bun.join("local-dsh-desktop-python-bridge-1.0.0.tgz");
+        // 复刻 register_bundle 里那一步的形变
+        let spec = format!("file:{}", tgz.to_string_lossy().replace('\\', "/"));
+        assert_eq!(
+            spec,
+            "file:C:/Users/me/AppData/Roaming/com.dsh.desktop/py-bridge-bundle/local-dsh-desktop-python-bridge-1.0.0.tgz"
+        );
+        // 反斜杠全换成斜杠：pnpm 的 file: 规格按 URL 解析，`\` 会被当成转义
+        assert!(!spec.contains('\\'), "file: 规格里不得残留反斜杠");
+        // 且必须是 .tgz，不是目录
+        assert!(spec.ends_with(".tgz"), "注册目标必须是 tar 包");
+        // 目录形态正是那个故障的源头，明确排除
+        assert_ne!(spec, format!("file:{}", bun.to_string_lossy()));
+    }
+
+    /// `npm pack` 对 `@local/` scope 的产物名：`@` 与 `/` 都会变成 `-`。
+    ///
+    /// 所以**不能**写死 `dsh-desktop-python-bridge-1.0.0.tgz` —— 那个文件不存在。
+    /// 这条测试记录真实输出，并断言解析逻辑从输出里取而不猜。
+    #[test]
+    fn pack_tarball_name_uses_pnpm_rewriting() {
+        // 用户机器上 `npm pack` 的真实输出行
+        let out = "npm notice filename: local-dsh-desktop-python-bridge-1.0.0.tgz\n\
+                   local-dsh-desktop-python-bridge-1.0.0.tgz";
+        let found = out
+            .split_whitespace()
+            .rev()
+            .map(|t| t.trim_matches(|c| c == '"' || c == '\'' || c == '`'))
+            .find(|t| t.to_ascii_lowercase().ends_with(".tgz"));
+        assert_eq!(found, Some("local-dsh-desktop-python-bridge-1.0.0.tgz"));
+        // scope 的 @ 与 / 都被换成了 -
+        assert!(found.unwrap().starts_with("local-"), "scope 前缀应被 npm 改写");
+    }
+
+    /// `.tgz` 识别必须大小写不敏感，且不能把 `.tgz.bak` 之类当成产物。
+    #[test]
+    fn tarball_token_matching_is_case_insensitive_and_suffix_exact() {
+        let pick = |s: &str| {
+            s.split_whitespace()
+                .rev()
+                .map(|t| t.trim_matches(|c| c == '"' || c == '\'' || c == '`'))
+                .find(|t| t.to_ascii_lowercase().ends_with(".tgz"))
+                .map(|t| t.to_string())
+        };
+        assert_eq!(pick("x.TGZ"), Some("x.TGZ".to_string()));
+        assert_eq!(pick("a b.tgz"), Some("b.tgz".to_string()));
+        assert_eq!(pick("pkg.tgz.bak"), None, "后缀必须正好是 .tgz");
+        assert_eq!(pick("no tarball here"), None);
     }
 }

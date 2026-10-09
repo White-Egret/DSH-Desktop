@@ -271,7 +271,19 @@ pnpm 安装命令示例:     npm install -g pnpm
 
 **装上库 ≠ AI 能调用它。** 智能体跑在 Node 端的 DSH harness 进程里，不在本程序的 Rust 进程里；而内嵌的 DSH 页面按设计**拿不到任何 Tauri IPC 能力**（`capabilities/default.json` 明文禁止），所以这里没有捷径 —— 把两者连起来的是一个**跑在 DSH 内部的插件**。注册了哪些工具见下面「AI 能调到什么」，为什么选这条路而不是别的见设计说明。
 
-「基本安装」结束后，程序会 ① 把桥接源码释放到 `%APPDATA%\com.dsh.desktop\py-bridge\`，② 把一个 Cordis **bundle** 释放到 `%APPDATA%\com.dsh.desktop\py-bridge-bundle\`，③ 用 `dsh plugin --profile <实测 profile> add <bundle>` 注册它。profile 从环境变量 / `dsh --dump-config` 读；保留的 **`desktop`** profile 会被提前拒绝（CLI 对它直接报错），也**从不**手写 profile 的 `package.json` / `cordis.patch.yml`。
+「基本安装」结束后，程序会 ① 把桥接源码释放到 `%APPDATA%\com.dsh.desktop\py-bridge\`，② 把一个 Cordis **bundle** 释放到 `%APPDATA%\com.dsh.desktop\py-bridge-bundle\`，③ 在该目录跑 `npm pack`，再用 `dsh plugin --profile <实测 profile> add file:<tgz>` 注册**这个 tar 包**。profile 从环境变量 / `dsh --dump-config` 读；保留的 **`desktop`** profile 会被提前拒绝（CLI 对它直接报错），也**从不**手写 profile 的 `package.json` / `cordis.patch.yml`。
+
+**为什么必须是 tar 包、不能是目录。** 直接注册目录会被 pnpm 记成一条 `link:` 软链接依赖。软链会让 `Test-Path "…\node_modules\@local\…\index.js"` 返回 `True`，看着一切正常 —— 但 DSH 是按名字去解析**真实解包**的包，软链不在它的解析范围内。这造成了整个项目里最难看的一次故障：状态行显示「已激活」、`Test-Path` 也是 `True`，而 AI 一个 Python 工具都看不到。真相只是 `dsh.log` 里的一行：
+
+```
+dsh: skipping profile bundle "@local/dsh-desktop-python-bridge":
+Error: dsh: cannot resolve profile bundle "@local/dsh-desktop-python-bridge"
+from the dsh installation or D:\DSH\Home\profiles\web
+```
+
+换成 `file:<tgz>` 之后 pnpm 会真解包，它自己的输出就是证据：`Replaced "@local/..." ("link:...") with "file:...tgz" from a different source.` 以及 `dependencies: + @local/dsh-desktop-python-bridge 1.0.0`。
+
+**不要把自己加进 preset。** 早先的版本还往 `standard` 的子插件列表里 insert 了一行，理由是「会话的工具表只来自它自己 preset 合成出来的那棵树」。这个判断是错的：`dsh-tools` 的 `view(scope)` 先取 `this.layers.global.tools.entries()`（即 **Host 根**），再逐个叠加祖先层。真机的 `--dump-config` 看得很清楚 —— `dsh-github`、`dsh-Wallpaper`、`@opencode2dsh/dsh-plugin` 都只存在于根层、任何 preset 里都没有它们，而它们的工具此刻正在会话里正常使用。根作用域的注册本来就会被继承，所以动 preset 纯属白费功夫，还会覆盖用户在 Web 编辑器里改过的配置。
 
 **AI 能调到什么**（12 个工具，单进程）：`convert_file_to_markdown`、`convert_files_to_markdown`、`markitdown_capabilities`、`read_excel_data`、`create_styled_excel`、`read_docx_text`、`generate_word_report`、`read_pptx_outline`、`add_resized_image_to_pptx`、`get_python_environment_info`、`describe_python_capabilities`、`execute_python_sandbox`。
 
@@ -285,6 +297,17 @@ pnpm 安装命令示例:     npm install -g pnpm
 **首次安装 vs. DSH 已在运行。** `dsh plugin` 自己会初始化不存在的 profile，但它不能与 DSH 的首次启动在同一个 profile 上抢跑。所以：DSH **没在监听**时立即注册；**正在跑**时只写一个持久化的 `python_bridge_pending` 标记，由 `py_bridge::activate_pending`（挂在状态汇总报出 `running` 的那一处）在下次进入 DSH 时注册。这一步失败**绝不回滚 pip** —— 已经装好的库不该被说成「没装」，而是降级成「稍后自动激活」。
 
 **排障。** 按钮下方那行状态会报出阶段（`not-installed` / `needs-release` / `pending-activate` / `active`），**这一行没有手动部署按钮** —— 释放与注册一律由「进入 DSH 时自动激活」承担：DSH 没在跑时安装末尾就地装好，正在跑则挂标记等下次进入。注册失败会在下次进入 DSH 时自动重试，不必手动干预；细节看 `desktop.log` 里的 `[py-bridge]` 行。桥接侧的失败（缺 `dsh_bridge`、协议版本不匹配）由插件记进日志并回显在提示里。宿主与 `dsh-python-bridge` 版本不一致会报 `protocol-mismatch`（`-32006`），而不是「静默一个工具都没有」。新注册的插件需要**重启 DSH** 才会加载。
+
+**「已激活」但 AI 看不到工具时，别信状态行，直接查这三个地方**（这是上面那次 link: 故障留下的排查纪律）：
+
+```powershell
+# 1. bundle 是不是**真解包**进了 profile（软链也会让这条返回 True，所以要连 2 一起看）
+Test-Path "D:\DSH\Home\profiles\web\node_modules\@local\dsh-desktop-python-bridge\index.js"
+# 2. 依赖表里写的是 file:...tgz 还是 link:（link: 就是没装上）
+Select-String -Path "D:\DSH\Home\profiles\web\package.json" -Pattern "python-bridge"
+# 3. DSH 自己怎么说（can not resolve = 第 2 条没修好）
+Select-String -Path "D:\DSH\Home\logs\dsh.log" -Pattern "python-bridge|did not activate|failed to import"
+```
 
 > **曾经有过一颗「部署 / 重新部署」按钮，现已移除**：它做的事与自动激活完全重叠，留着只会让人误以为「装完还得再点一下」。更糟的是，状态行一旦说谎（`pending` 标记被当成了「已注册」，而实际一个工具都没注册），那颗按钮的存在会让人更不会怀疑 —— 界面上多一个可点的东西，就多一份「到底该点哪个」的心智负担。
 

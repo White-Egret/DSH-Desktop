@@ -1,7 +1,18 @@
 # DSH Desktop —— Python 能力桥接：Cordis 组合补丁（生成文件，请勿手工编辑）
 #
-# 只插入一个 Host 行（没有 Client 行，所以内嵌的 DSH WebView 不会多出任何 UI），
-# displayName 让它在插件清单里有个能看懂的名字。
+# **只有一个 patch 块，而且不要往 preset 里加东西。**
+#
+# 曾经的错误判断（已撤销）：我以为 Web GUI 会话的工具表只来自它自己 preset
+# 合成出来的子树，所以往 `standard` 里 insert 了一行。`dsh-tools` 的
+# `view(scope)` 证伪了这一点 —— 它先取 `this.layers.global.tools.entries()`
+# （Host 根），再叠加每个祖先层。真机 `--dump-config` 上也看得很清楚：
+# `dsh-github` / `dsh-Wallpaper` / `@opencode2dsh/dsh-plugin` 都只在根层，
+# preset 列表里没有它们，而它们的工具此刻正在会话里正常使用。
+# 所以 Host 根的注册会被会话继承，动 preset 是多余的，还会覆盖用户在 Web
+# 编辑器里对 `standard` 的修改 —— 那是纯损失。
+#
+# 为什么没有 Client 行：本插件只在 Host 侧 spawn Python 进程，内嵌的 DSH
+# WebView 不需要多出任何 UI。displayName 让它在插件清单里有个能看懂的名字。
 #
 # pythonPath / entryModule / cwd 三项刻意**留空**：这三个值由桌面端在「基本安装」
 # 之后按本机实际情况写进 config（见 py_bridge.rs::write_bundle_config）。

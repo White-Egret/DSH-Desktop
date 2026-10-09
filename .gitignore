@@ -2,5 +2,6 @@ node_modules/
 src-tauri/target/
 src-tauri/gen/schemas/
 *.log
+*.tgz
 .DS_Store
 Thumbs.db

@@ -278,7 +278,19 @@ The floor is **3.10** because two packages in the basic list hard-require it: `m
 
 Installing a library does **not** make it callable by the AI. The agent runs in the Node-side DSH harness, not in this app's Rust process, and the embedded DSH page is by design granted **no** Tauri IPC capability — so there is deliberately no shortcut here. What connects the two is a plugin that runs inside DSH. See [Python capability bridge](#python-capability-bridge-the-ai-callable-part) below for the tools it registers, and the design notes for why this path was chosen over the alternatives.
 
-Once 基本安装 finishes, the app (1) releases the bridge sources into `%APPDATA%\com.dsh.desktop\py-bridge\`, (2) releases a small Cordis **bundle** into `%APPDATA%\com.dsh.desktop\py-bridge-bundle\`, and (3) registers it with `dsh plugin --profile <measured profile> add <bundle>`. The profile is read from the environment / `dsh --dump-config`; the reserved **`desktop`** profile is refused up front because the CLI rejects it outright, and neither the profile's `package.json` nor its `cordis.patch.yml` is ever hand-written.
+Once 基本安装 finishes, the app (1) releases the bridge sources into `%APPDATA%\com.dsh.desktop\py-bridge\`, (2) releases a small Cordis **bundle** into `%APPDATA%\com.dsh.desktop\py-bridge-bundle\`, and (3) runs `npm pack` in that bundle directory and registers the **tarball** with `dsh plugin --profile <measured profile> add file:<tgz>`. The profile is read from the environment / `dsh --dump-config`; the reserved **`desktop`** profile is refused up front because the CLI rejects it outright, and neither the profile's `package.json` nor its `cordis.patch.yml` is ever hand-written.
+
+**Why the tarball and not the directory.** Registering the directory itself makes pnpm record a `link:` symlink dependency. The symlink makes `Test-Path` on `node_modules\@local\...\index.js` return `True`, so the install looks perfect — but DSH resolves bundles by name against really-unpacked packages, and a symlink is outside that resolution. This produced the worst failure mode in the project's history: status line says *activated*, `Test-Path` says `True`, and the AI reports no Python tools at all. What had actually happened is one line in `dsh.log`:
+
+```
+dsh: skipping profile bundle "@local/dsh-desktop-python-bridge":
+Error: dsh: cannot resolve profile bundle "@local/dsh-desktop-python-bridge"
+from the dsh installation or D:\DSH\Home\profiles\web
+```
+
+With `file:<tgz>` pnpm unpacks for real, and its own output confirms it: `Replaced "@local/..." ("link:...") with "file:...tgz" from a different source.` then `dependencies: + @local/dsh-desktop-python-bridge 1.0.0`.
+
+**Do not add the plugin to a preset.** An earlier revision also inserted itself into `standard`'s child plugin list, on the theory that a session's tool table only ever comes from its own preset subtree. That is wrong. `dsh-tools`' `view(scope)` starts from `this.layers.global.tools.entries()` — the Host root — and then layers every ancestor on top. The real `--dump-config` shows it plainly: `dsh-github`, `dsh-Wallpaper` and `@opencode2dsh/dsh-plugin` exist only at the root, appear in no preset at all, and their tools work in sessions right now. Root-scope registration is inherited, so patching a preset is pure cost: it would overwrite whatever the user changed in the Web editor.
 
 **What the AI gets** (12 tools, one process): `convert_file_to_markdown`, `convert_files_to_markdown`, `markitdown_capabilities`, `read_excel_data`, `create_styled_excel`, `read_docx_text`, `generate_word_report`, `read_pptx_outline`, `add_resized_image_to_pptx`, `get_python_environment_info`, `describe_python_capabilities`, `execute_python_sandbox`.
 
@@ -287,7 +299,16 @@ Once 基本安装 finishes, the app (1) releases the bridge sources into `%APPDA
 - **Long bodies do not cross stdio.** Past `max_chars` the full text is written to a file and the tool returns `{path, chars, lines, preview}`; a DataFrame comes back as `head(20)` plus shape and columns. Multi-megabyte tool results are the fastest way to make a session unusable.
 - **Sandbox boundaries** (`execute_python_sandbox`): an import whitelist plus restricted builtins. `os` / `sys` / `subprocess` / `socket` / `shutil` / `ctypes` / `importlib` / `pickle` / network modules are refused, as are `eval` / `exec` / `compile` / `__import__` and underscore attribute access (without that last one, `getattr(x, "__class__")` reaches `__subclasses__` and the sandbox is gone). `pandas` / `numpy` / `scipy` / `matplotlib` / `sklearn` are whitelisted **but not required** — uninstalled, they raise an ordinary `ModuleNotFoundError` that says "install this", which is different from a policy refusal. Exceptions become `{ok: false, error}`; the bridge process must survive every one of them.
 - **Capability discovery.** A prompt section lists the libraries actually present. Its `text` is a **provider function** (`(context) => string`, re-evaluated on each prompt assembly) rather than static text, and the text itself is generated by Python (`describe_python_capabilities`) so the whitelist and the prompt cannot drift apart. A `pandas` the user installs later shows up without a DSH restart or a plugin reload.
-- **Lifecycle.** The Python child is spawned by the **plugin**, not by this app, so it dies with DSH — no orphan processes and no Job Object involvement on this side. A watchdog restarts it with exponential backoff (≤ 5 attempts).
+- **Lifecycle.** The Python child is spawned by the **plugin**, not by this app, so it dies with DSH — no orphan processes and no Job Object involvement on this side. A watchdog restarts it with exponential backoff (≤ 5 attempts). A freshly registered bundle needs a **DSH restart** to load at all, and the status line will say *activated* as soon as the bundle is registered — which is about the *bundle*, not about the tools. Those only exist once the plugin's `apply()` has actually run. When it cannot, `failOnStartupError: false` turns that into a single WARN line instead of a dead DSH, and the symptom is exactly "activated but no tools". Check these three, in order:
+
+```powershell
+# 1. Is the bundle REALLY unpacked into the profile? (a symlink also returns True — so check 2 as well)
+Test-Path "D:\DSH\Home\profiles\web\node_modules\@local\dsh-desktop-python-bridge\index.js"
+# 2. Is the dependency recorded as file:...tgz or as link:? (link: means it never installed)
+Select-String -Path "D:\DSH\Home\profiles\web\package.json" -Pattern "python-bridge"
+# 3. What DSH itself said (cannot resolve = fix #2)
+Select-String -Path "D:\DSH\Home\logs\dsh.log" -Pattern "python-bridge|did not activate|failed to import"
+```
 
 **First run vs. already running.** `dsh plugin` initializes a missing profile itself, but it must not race DSH's own first start on the same profile. So: when DSH is **not** listening, the bundle is registered immediately; when it **is** running, only a persistent `python_bridge_pending` marker is written, and `py_bridge::activate_pending` — hooked where the status funnel reports `running` — registers it on the next entry into DSH. Failure of this step never rolls back the pip install; it degrades to "will activate automatically".
 

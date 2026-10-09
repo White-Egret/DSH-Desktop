@@ -346,24 +346,35 @@ export function apply(ctx, config = {}) {
     }))
   }
 
-  // ctx.effect：插件停用/卸载时自动执行 —— 杀子进程、复位引用。
-  // 这条承诺是「DSH 关闭时 Python 桥接不残留」的落点。
-  return ctx.effect(() => {
-    disposed = true
-    if (conn) conn.kill()
-    conn = null
-    return () => {}
-  }).after(() => {
-    // 首启：立刻注册（此时 manifestTools 还是空的），
-    // 握手完成后用新 manifest 重新注册一次 —— 见下方 unregister/重新 register。
+  // ctx.effect：execute 的**返回值**就是清理函数，插件停用/卸载时由 Cordis 调用。
+  // ⚠ 真实 API：`ctx.effect()` 返回一个可调用、可 await 的 wrapper（见 cordis
+  //   lib/index.js 的 `effect(execute, label)`：1278 行 `return wrapper`，
+  //   1275 行只挂了 `.then`，**没有 `.after()`**）。我第一版写成
+  //   `ctx.effect(...).after(...)`，真机报
+  //   `TypeError: ctx.effect(...).after is not a function`，整个插件没激活 ——
+  //   教训又是「凭想象写 API」。dsh-tools 的 `tools.register()` 用的是
+  //   `this.layers.effect(this.ctx, (layer) => ...)`，同样只依赖返回值。
+  return ctx.effect(async () => {
+    // 首启：先握手（拿到 manifest），再把工具与能力发现段落注册上。
+    // 握手失败只记日志：`failOnStartupError: false` 的语义就是「桥接没起来
+    // 也不该让 DSH 起不来」，而 execute 抛错会让整个 entry 激活失败。
     let unregister = () => {}
-    start()
-      .then(() => {
-        if (disposed) return
-        registerCapabilities()
-        unregister = registerAll()
-      })
-      .catch((e) => log('ERROR', `启动失败：${e.message}`))
+    try {
+      await start()
+      if (disposed) return () => {}
+      registerCapabilities()
+      unregister = registerAll()
+    } catch (e) {
+      log('ERROR', `启动失败：${e.message}`)
+    }
+
+    // Cordis 在插件卸载时调用这个返回值 —— 「DSH 关闭时不残留 Python 进程」的落点。
+    return () => {
+      disposed = true
+      try { unregister() } catch { /* 已卸载 */ }
+      if (conn) conn.kill()
+      conn = null
+    }
 
     function registerAll() {
       const disposers = []

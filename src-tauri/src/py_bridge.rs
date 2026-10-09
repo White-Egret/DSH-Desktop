@@ -461,7 +461,7 @@ fn write_bundle_config(bun: &Path, python_path: &str, bd: &Path) -> Result<(), S
 /// **没有 shell**：参数直接进 argv。所以下面出现的 `cmd.exe /C` 不是为了拼命令行，
 /// 而只是因为 Windows 上 CreateProcess 不能直接执行 `.cmd`（那是 cmd 的脚本）。
 /// 那条路径下整个命令行由 cmd 自己解析，规则与批处理一致：引号内的路径是一个整体，
-/// 且 `%` / `^` / `&` / `|` 仍需转义（见 `quote_cmd_arg`）。
+/// 且 `%` / `^` / `&` / `|` 仍需转义 —— 但我们**不给命令名加引号**，见 dsh_argv_for。
 fn register_bundle(app: &AppHandle, profile: &str, bun: &Path) -> Result<(), String> {
     if !profile_name_usable(profile) {
         return Err(i18n::fmt("py_bridge_bad_profile", &[&profile.to_string()]));
@@ -498,9 +498,12 @@ fn register_bundle(app: &AppHandle, profile: &str, bun: &Path) -> Result<(), Str
             if ok {
                 Ok(())
             } else {
-                // 把 dsh 的输出尾部带上：失败原因几乎总在那几行里
+                // 只把 dsh 的**原始输出尾部**往上抛，**不要**在这里套文案：
+                // 调用方（deploy_after_install / activate_pending）会再用
+                // py_bridge_register_fail 包一次。两层都格式化的话，日志里就会出现
+                // 「失败：失败：…。将在…。将在…」这种套娃（真机日志原文）。
                 let tail: String = out.lines().rev().take(6).collect::<Vec<_>>().join(" / ");
-                Err(i18n::fmt("py_bridge_register_fail", &[&tail, &""]))
+                Err(tail)
             }
         },
     )
@@ -524,6 +527,14 @@ fn dsh_argv(app: &AppHandle) -> Option<(String, Vec<String>)> {
 }
 
 /// `dsh_argv` 的纯逻辑（不含查找与配置读取），所以分支行为能直接单测。
+///
+/// ⚠ `.cmd` / `.bat` 那条**不能给命令名加引号** —— 这是本模块踩过的最深的一个坑。
+/// cmd 的 `/C` 语义有两套：`/C <单个字符串>` 由 cmd 自己对整串做引号解析；`/C <cmd> <args...>`
+/// 则把后面每个参数**原样**传给 CreateProcess，由它重新按 Windows 规则转义一次。
+/// 我们走的是后者，于是传给 cmd 的命令名已经带了 Rust 的 `\"` 转义，cmd 把它当成
+/// 命令名的**一部分** → `'"D:\...\dsh.cmd"' 不是内部或外部命令`（真机日志原文）。
+/// 实测：`cmd /C "带空格的路径\x.cmd" a b`（分两个参数、不加引号）能正常跑通，
+/// 因为 CreateProcess 自己会加引号；所以这里**裸传路径名**才是对的。
 fn dsh_argv_for(dsh: &str) -> Option<(String, Vec<String>)> {
     // .cmd / .bat 都是 cmd 的脚本，CreateProcess 不能直接执行 → 交给 cmd.exe。
     // 合成一个条件而不是写两遍：两条分支产出完全相同，分开写只会诱使人只改一条。
@@ -531,7 +542,7 @@ fn dsh_argv_for(dsh: &str) -> Option<(String, Vec<String>)> {
     if lower.ends_with(".cmd") || lower.ends_with(".bat") {
         Some((
             "cmd.exe".to_string(),
-            vec!["/C".to_string(), quote_cmd_arg(dsh)],
+            vec!["/C".to_string(), dsh.to_string()],
         ))
     } else {
         // .exe / .ps1：直接执行。注意这里**不做**「裸命令名」的兜底 ——
@@ -540,18 +551,9 @@ fn dsh_argv_for(dsh: &str) -> Option<(String, Vec<String>)> {
     }
 }
 
-/// 给 `cmd.exe` 用的单个参数加引号。
-///
-/// 只用一层引号包住整串就已足够（cmd 不解析引号内的特殊字符），
-/// 所以这里**不**在引号内做 `\^\&` 那套双重转义 —— 那套规则在多层嵌套里会互相打架。
-/// 引号内的字面量 `"` 保留：用户路径里出现 `"` 本身非法，真出现了就让那条命令
-/// 失败并把报错带回来，而不是悄悄拼出一条不同的命令。
-fn quote_cmd_arg(arg: &str) -> String {
-    if arg.is_empty() {
-        return "\"\"".to_string();
-    }
-    format!("\"{arg}\"")
-}
+/// （这里曾经有一个 `quote_cmd_arg` 给 cmd 用的参数加引号 —— 已删除。
+//  它是错的：`cmd /C` 后面分参数传时，CreateProcess 会自己转义一次，
+//  我们再加的引号会被 cmd 当成命令名的一部分。实测见 dsh_argv_for 的注释。）
 
 /// bundle 是否已装进 profile。
 ///
@@ -851,13 +853,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// 回归：`.cmd` 的命令名**绝不能**被我们加引号。
+    ///
+    /// 真机故障（日志原文）：`'\"D:\Programs\npm\dsh.cmd\"' 不是内部或外部命令`。
+    /// 根因是 `cmd /C <cmd> <args...>` 这种「分参数」形式下，CreateProcess 会把
+    /// 每个参数按 Windows 规则**再转义一次**，我们预先包上的引号于是变成命令名
+    /// 的一部分。实测裸传（含空格）能跑通，因为 CreateProcess 自己会加引号。
     #[test]
-    fn cmd_args_are_quoted_so_spaces_survive() {
-        // 用户目录里有空格是常态（"John Doe"），不加引号 cmd 会把路径切成两半
-        assert_eq!(quote_cmd_arg(r"D:\Programs\npm\dsh.cmd"), r#""D:\Programs\npm\dsh.cmd""#);
-        assert_eq!(quote_cmd_arg(r"C:\Users\John Doe\dsh.cmd"), r#""C:\Users\John Doe\dsh.cmd""#);
-        // 空参数仍要占位，否则 cmd 会直接把它丢掉、后面的参数跟着错位
-        assert_eq!(quote_cmd_arg(""), "\"\"");
+    fn cmd_script_path_is_passed_unquoted() {
+        for path in [r"D:\Programs\npm\dsh.cmd", r"C:\Users\John Doe\dsh.cmd"] {
+            let (_, args) = dsh_argv_for(path).expect("cmd 脚本");
+            assert_eq!(args[1], path, "{path}：命令名不得加引号（CreateProcess 会自己转义）");
+            assert!(!args[1].contains('"'), "{path}：参数里不该出现引号");
+            assert!(!args[1].contains('\\'), "{path}：不该出现反斜杠转义");
+        }
     }
 
     /// `dsh_argv` 的分支是纯字符串判断，所以直接测它的输出形状。
@@ -873,7 +882,7 @@ mod tests {
             let (prog, args) = dsh_argv_for(path).expect("cmd 脚本应走 cmd.exe");
             assert_eq!(prog, "cmd.exe", "{path}");
             assert_eq!(args[0], "/C", "{path} 的第一个参数必须是 /C");
-            assert_eq!(args[1], quote_cmd_arg(path), "{path} 的 dsh 路径必须加引号");
+            assert_eq!(args[1], path, "{path} 的命令名原样传入，不加引号");
         }
         for path in [r"D:\Programs\npm\dsh.exe", "dsh", r"D:\x\dsh.ps1"] {
             let (prog, args) = dsh_argv_for(path).expect("可执行文件应直接执行");

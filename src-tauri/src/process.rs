@@ -5874,17 +5874,39 @@ fn log_uninstall_cleanup_failures(app: &AppHandle, items: &[UninstallItem]) {
 /// 收尾的**决策内核**：逐条尽力而为，把「删了什么 / 留了什么」如实带回。
 /// 任何一步失败都不改变 npm 的结论 —— 它是收尾，不是判据。
 fn cleanup_after_uninstall_items(dir: &Path) -> Vec<UninstallItem> {
+    // ① 只删 DSH 自己的启动脚本。pnpm 那次收尾**不能**带上它们（见 collect_leftover_files）：
+    // 那里删的是 pnpm 的脚本，把两套混进同一次遍历会让「这是谁的收尾」说不清。
+    let shims: Vec<PathBuf> = DSH_SHIM_NAMES.iter().map(|n| dir.join(n)).collect();
+    collect_leftover_files(dir, &shims)
+}
+
+/// 收尾的**共用地基**：删掉给定的文件，再按「先 scope 后 node_modules」的顺序回收空目录。
+///
+/// 为什么把 DSH / pnpm 两条收尾合并到这里：
+///
+/// 真机现场（2026-10-07）暴露的缺口是**顺序**问题 —— 引导安装把 pnpm 装进了 npm 全局目录
+/// （`D:\Programs\npm`），于是：
+///   1. 卸载 DSH 时收尾跑了一遍：`@deepseek-ai` 空了 → 删掉 ✓；而 `node_modules` 里
+///      **还有 pnpm** → 记一条「已保留」，跳过；
+///   2. 之后卸载 pnpm：包与脚本删掉了，但**没有任何收尾**，
+///      于是 `node_modules\pnpm` 空壳留着、`node_modules` 只剩它因而也删不掉。
+/// 结果 `@deepseek-ai` 干净了，`node_modules` 整个空在那儿 —— 比修之前更让人困惑，
+/// 因为清单里那句「已保留」保留它的偏偏是我们自己刚删掉的 pnpm。
+///
+/// 现在 pnpm 那一步走完会**再收尾一次**，而这套「只删真空目录、不递归」的机制本来就在
+/// DSH 那条路上被两条单测钉着（见 cleanup_after_uninstall_reclaims_only_what_dsh_left_behind）。
+/// 幂等：目录非空就跳过，跑两次不会有副作用。
+fn collect_leftover_files(dir: &Path, shims: &[PathBuf]) -> Vec<UninstallItem> {
     let mut items: Vec<UninstallItem> = Vec::new();
     let npm_node_modules = dir.join("node_modules");
     let scope = npm_node_modules.join(DSH_SCOPE_DIR);
 
     // ① 漏下的启动脚本（正常路径上 npm 已经删过了，这里只兜底）
-    for name in DSH_SHIM_NAMES {
-        let p = dir.join(name);
+    for p in shims {
         if !p.is_file() {
             continue;
         }
-        let (status, detail) = match std::fs::remove_file(&p) {
+        let (status, detail) = match std::fs::remove_file(p) {
             Ok(()) => ("removed", String::new()),
             Err(e) => ("failed", e.to_string()),
         };
@@ -6423,7 +6445,59 @@ fn remove_pnpm_at(
         }
     }
 
+    // ③ **npm 全局目录**收尾：pnpm 装在这个目录里时（向导一键安装走
+    // `npm install -g pnpm`，正是这条路），上面删掉的 `node_modules\pnpm` 是个空壳目录，
+    // 而 `node_modules` 只剩它 → 两者都删不掉。这里补一次与 DSH 同款的收尾。
+    //
+    // 只在 npm 全局布局下做：Standalone 布局的 loc.dir 是 `C:\Program Files\nodejs` 这类
+    // **系统目录**，那里通常压根没有 `node_modules`，跑一遍纯属空转（而且探它本身
+    // 就可能要权限）。判据是「这个目录下真的有 node_modules」，不必猜。
+    if loc.layout == PnpmLayout::NpmGlobal && loc.dir.join("node_modules").is_dir() {
+        items.extend(cleanup_pnpm_global_dir(&loc.dir));
+    }
+
     (out, items, denied)
+}
+
+/// 卸载 pnpm 之后的**全局目录收尾**：回收空掉的 `node_modules\pnpm` 空壳与随之空掉的
+/// `node_modules` 本身。
+///
+/// 不碰 `@deepseek-ai` scope —— 它由 DSH 那一步的收尾负责（见 [`cleanup_after_uninstall_items`]），
+/// 两条路各管各的目录，报告里也会各记各的条目。`remove_dir_if_empty` 只删真空目录、
+/// 不递归，所以 `node_modules` 里还有别人的包时一律保留（那正是它该有的行为）。
+///
+/// 幂等：第二次调用时目录要么已不存在、要么非空，两者都直接跳过 —— 所以 DSH 那一步
+/// 已经跑过之后再跑一次完全无害。
+fn cleanup_pnpm_global_dir(dir: &Path) -> Vec<UninstallItem> {
+    // 脚本（pnpm / pnpm.cmd / pnpm.ps1 …）在 remove_pnpm_at 里已经删过了，
+    // 这里仍然把同一组名字传进去当兜底 —— 万一那一步漏了某一个。
+    // 刻意传的是 **pnpm 的**脚本名而不是 DSH_SHIM_NAMES：这条收尾只负责 pnpm，
+    // 不该去动 `dsh.cmd`（它此时已随 DSH 卸载而消失，但语义上不归这儿管）。
+    let shims: Vec<PathBuf> = PNPM_SCRIPT_NAMES.iter().map(|n| dir.join(n)).collect();
+    let mut items = collect_leftover_files(dir, &shims);
+
+    // `node_modules\pnpm` 空壳：npm 删包不删它（与 @deepseek-ai 同一个毛病）。
+    let pkg_shell = dir.join("node_modules").join("pnpm");
+    if let Some((status, detail)) = remove_dir_if_empty(&pkg_shell) {
+        items.push(UninstallItem {
+            kind: "package".to_string(),
+            path: pkg_shell.to_string_lossy().to_string(),
+            status: status.to_string(),
+            detail: detail.unwrap_or_default(),
+        });
+    }
+
+    // 再收一次 node_modules 本身：**顺序很关键** —— 上面刚把包空壳删掉，它这才变空。
+    // collect_leftover_files 里那次判定时 pnpm 空壳还在，于是保留了 node_modules。
+    if let Some((status, detail)) = remove_dir_if_empty(&dir.join("node_modules")) {
+        items.push(UninstallItem {
+            kind: "node_modules".to_string(),
+            path: dir.join("node_modules").to_string_lossy().to_string(),
+            status: status.to_string(),
+            detail: detail.unwrap_or_default(),
+        });
+    }
+    items
 }
 
 /// 这个路径是不是**当前用户不该直接写**的系统位置（`C:\Program Files` 及其之下）。
@@ -6556,6 +6630,17 @@ fn uninstall_pnpm_elevated_inner(
     let still = detect::find_pnpm_cmd();
     let done = still.is_none();
     if done {
+        // 提权成功后再收一次尾（幂等）：pnpm 装在自定义 npm 全局目录、且那一层需要
+        // 管理员权限时（本项目当前不产生这种组合，但将来 install 路径变了就会），
+        // 包空壳与 node_modules 的回收得有人做。目录推不出来就跳过 —— 宁可不做，
+        // 也不能凭空猜一个目录去删。
+        if let Some(dir) = npm_global_dir_of(&paths) {
+            if dir.join("node_modules").is_dir() {
+                let extra = cleanup_pnpm_global_dir(&dir);
+                log_uninstall_cleanup_failures(app, &extra);
+                items.extend(extra);
+            }
+        }
         emit_log(app, "update", i18n::t("log_uninstall_pnpm_ok").to_string());
     } else {
         emit_log(
@@ -6574,6 +6659,35 @@ fn uninstall_pnpm_elevated_inner(
         // 提权之后还删不掉的，不再是「需要提权」—— 那条路已经走过了，如实留空。
         needs_elevation: Vec::new(),
     })
+}
+
+/// 从「pnpm 的落点路径」反推它所在的 npm 全局目录。
+///
+/// 两种落点形态都要认：`…\<全局目录>\pnpm.cmd`（脚本直接躺在全局目录里）与
+/// `…\<全局目录>\node_modules\pnpm`（包目录）。判据是**那一层确实有 node_modules** ——
+/// 这是 npm 全局目录唯一可靠的外部特征，而 `C:\Program Files\nodejs` 这类 PNPM_HOME
+/// 目录**没有**它，于是自然被排除在外（那种布局不需要收尾，见 cleanup_pnpm_global_dir）。
+fn npm_global_dir_of(paths: &[String]) -> Option<PathBuf> {
+    for p in paths {
+        let path = Path::new(p);
+        // `…\<g>\node_modules\pnpm` → 去掉最后两级
+        let from_pkg = path
+            .parent()
+            .filter(|parent| parent.file_name().is_some_and(|n| n == "node_modules"))
+            .and_then(|nm| nm.parent());
+        if let Some(g) = from_pkg {
+            if g.join("node_modules").is_dir() {
+                return Some(g.to_path_buf());
+            }
+        }
+        // `…\<g>\pnpm.cmd` → 去掉最后一级
+        if let Some(g) = path.parent() {
+            if g.join("node_modules").is_dir() {
+                return Some(g.to_path_buf());
+            }
+        }
+    }
+    None
 }
 
 /// 完成首次运行引导：把当前（含自动检测补全的）配置写入 %APPDATA%\com.dsh.desktop\config.json。
@@ -7554,6 +7668,79 @@ mod tests {
             "包目录还在时不能报成功"
         );
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- pnpm 卸载之后的全局目录收尾（2026-10-07 顺序缺口） ----------
+
+    /// 卸载 pnpm 之后，`node_modules\pnpm` 空壳与随之空掉的 `node_modules` 必须被回收。
+    ///
+    /// 真机现场：向导一键安装走 `npm install -g pnpm`，于是 pnpm 就躺在 DSH 那个
+    /// npm 全局目录里。卸载顺序是「先 DSH 后 pnpm」，于是：
+    ///   1. DSH 那步收尾时 `node_modules` 里**还有 pnpm** → 记一条「已保留」；
+    ///   2. pnpm 那步删完包与脚本，却**没有任何收尾** → `node_modules\pnpm` 空壳留着，
+    ///      `node_modules` 只剩它因而也删不掉。
+    /// 结果 `@deepseek-ai` 干净了、`node_modules` 整个空在那儿。
+    #[test]
+    fn cleanup_pnpm_global_dir_reclaims_the_empty_shell_and_node_modules() {
+        let base = create_private_temp_dir("pnpm-cleanup").expect("建临时目录");
+        // 布局：npm 全局目录，node_modules 里只有 pnpm（脚本已被 remove_pnpm_at 删掉）
+        let g = base.join("chosen-global");
+        std::fs::create_dir_all(g.join("node_modules").join("pnpm")).unwrap();
+
+        let items = cleanup_pnpm_global_dir(&g);
+        assert!(
+            !g.join("node_modules").exists(),
+            "空掉的 node_modules 应当被回收（这正是用户看到的残留）：{items:?}"
+        );
+        let kinds: Vec<(String, String)> = items
+            .iter()
+            .map(|i| (i.kind.clone(), i.status.clone()))
+            .collect();
+        assert!(
+            items
+                .iter()
+                .any(|i| i.kind == "package" && i.status == "removed"),
+            "pnpm 空壳目录要在清单里如实出现：{kinds:?}"
+        );
+
+        // 幂等：目录已不在时再跑一次，不该报出「已删除」之类的假动作
+        let again = cleanup_pnpm_global_dir(&g);
+        assert!(
+            again.iter().all(|i| i.status != "removed"),
+            "目录已经不在了，第二次收尾不该再报「已删除」：{again:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `node_modules` 里还有**别人的包**时，一切照旧保留 —— 收尾绝不能顺手删掉
+    /// 用户自己 `npm i -g` 装的东西（这条与 DSH 那条收尾是同一把尺子）。
+    #[test]
+    fn cleanup_pnpm_global_dir_keeps_other_global_packages() {
+        let base = create_private_temp_dir("pnpm-cleanup-others").expect("建临时目录");
+        let g = base.join("chosen-global");
+        std::fs::create_dir_all(g.join("node_modules").join("typescript")).unwrap();
+        // pnpm 的包目录非空（里面还有文件）→ 连它都不能动
+        std::fs::create_dir_all(g.join("node_modules").join("pnpm").join("dist")).unwrap();
+        std::fs::write(g.join("node_modules").join("pnpm").join("dist").join("a.js"), b"x").unwrap();
+
+        let items = cleanup_pnpm_global_dir(&g);
+        assert!(
+            g.join("node_modules").join("typescript").is_dir(),
+            "别的全局包必须原样保留"
+        );
+        assert!(
+            g.join("node_modules").join("pnpm").is_dir(),
+            "非空的 pnpm 目录不能被当空壳删掉"
+        );
+        assert!(
+            g.join("node_modules").is_dir(),
+            "node_modules 非空时必须保留"
+        );
+        assert!(
+            !items.iter().any(|i| i.status == "removed"),
+            "非空场景下不该有任何「已删除」条目：{items:?}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }

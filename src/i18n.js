@@ -134,7 +134,7 @@
     toast_py_fail: 'Python 安装任务失败',
     toast_py_status_fail: '检测 Python 失败: {0}',
     // ---- Python 能力桥接：把装好的库挂成 AI 工具（状态文案由后端按当前语言生成） ----
-    py_bridge_label: 'AI 调用能力（Python 能力桥接）',
+    py_bridge_label: 'AI 调用能力（Python 能力桥接）：',
     py_bridge_checking: '正在检测能力桥接状态…',
     lbl_language: '语言 / Language（保存后立即生效，无需重启）',
     opt_lang_zh: '中文', opt_lang_en: 'English',
@@ -518,7 +518,7 @@
     toast_py_fail: 'The Python install task failed',
     toast_py_status_fail: 'Failed to detect Python: {0}',
     // ---- Python capability bridge: exposes the installed libraries as AI tools ----
-    py_bridge_label: 'AI-callable capabilities (Python capability bridge)',
+    py_bridge_label: 'AI-callable capabilities (Python capability bridge):',
     py_bridge_checking: 'Detecting the capability bridge…',
     lbl_language: '语言 / Language (applies immediately after saving; no restart needed)',
     opt_lang_zh: '中文', opt_lang_en: 'English',

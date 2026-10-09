@@ -517,24 +517,24 @@ fn register_bundle(app: &AppHandle, profile: &str, bun: &Path) -> Result<(), Str
 /// 要直接跑 —— 早先的版本把 program 写死成 `cmd.exe`，于是配置里指向
 /// `dsh.ps1` 的机器会去执行一个根本不存在的东西（`cmd /C dsh.ps1` 不成立）。
 fn dsh_argv(app: &AppHandle) -> Option<(String, Vec<String>)> {
-    dsh_argv_for(dsh_cmd_path(app)?)
+    // `dsh_cmd_path` 给的是 `String`，`dsh_argv_for` 收 `&str` —— 借一下再传，
+    // 别把 String 直接塞进去（`?` 不会替你借用，`String` 也 `as &str` 不掉）。
+    let path = dsh_cmd_path(app)?;
+    dsh_argv_for(&path)
 }
 
 /// `dsh_argv` 的纯逻辑（不含查找与配置读取），所以分支行为能直接单测。
 fn dsh_argv_for(dsh: &str) -> Option<(String, Vec<String>)> {
-    if dsh.to_ascii_lowercase().ends_with(".cmd") {
-        Some((
-            "cmd.exe".to_string(),
-            vec!["/C".to_string(), quote_cmd_arg(dsh)],
-        ))
-    } else if dsh.to_ascii_lowercase().ends_with(".bat") {
-        // .bat 同理（cmd 脚本），但 CreateProcess 也不能直接跑
+    // .cmd / .bat 都是 cmd 的脚本，CreateProcess 不能直接执行 → 交给 cmd.exe。
+    // 合成一个条件而不是写两遍：两条分支产出完全相同，分开写只会诱使人只改一条。
+    let lower = dsh.to_ascii_lowercase();
+    if lower.ends_with(".cmd") || lower.ends_with(".bat") {
         Some((
             "cmd.exe".to_string(),
             vec!["/C".to_string(), quote_cmd_arg(dsh)],
         ))
     } else {
-        // .exe 或 .ps1：直接执行。注意这里**不做**「裸命令名」的兜底 ——
+        // .exe / .ps1：直接执行。注意这里**不做**「裸命令名」的兜底 ——
         // 裸 `dsh` 交给 cmd.exe 会被当成目录名，见 dsh_cmd_path 的注释。
         Some((dsh.to_string(), vec![dsh.to_string()]))
     }

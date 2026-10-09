@@ -865,7 +865,12 @@ mod tests {
             let (_, args) = dsh_argv_for(path).expect("cmd 脚本");
             assert_eq!(args[1], path, "{path}：命令名不得加引号（CreateProcess 会自己转义）");
             assert!(!args[1].contains('"'), "{path}：参数里不该出现引号");
-            assert!(!args[1].contains('\\'), "{path}：不该出现反斜杠转义");
+            // ⚠ 只查 `\"`，**不是**查「有没有反斜杠」—— Windows 路径本来就满是反斜杠，
+            // 写成 contains('\\') 会把每个正常路径都判成失败（这个断言自己就这么翻车过）。
+            assert!(
+                !args[1].contains(r"\""),
+                "{path}：不该出现 Rust 风格的 \\\" 转义（那正是 cmd 认不出来的命令名）"
+            );
         }
     }
 

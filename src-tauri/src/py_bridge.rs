@@ -663,12 +663,24 @@ fn probe_profile(app: &AppHandle) -> Option<String> {
 /// 整条命令失败、`profile` 探测不到 → 状态行显示「profile「」」（注册其实成功了）。
 /// 用户首次安装时 `dsh_path` 就是空的（要等首装向导写盘），正好命中这条路径。
 fn dsh_cmd_path(app: &AppHandle) -> Option<String> {
-    let cfg = config::load(app);
-    let p = cfg.dsh_path.trim();
-    if !p.is_empty() && Path::new(p).is_file() {
-        return Some(p.to_string());
+    // 走被单测覆盖的那个判定（tests 里同名函数）：测试必须守住**真实代码路径**，
+    // 而不是它的一份复制品 —— 复制品改错了测试照样绿。
+    if let Some(configured) = dsh_cmd_path_requires_a_real_file(&config::load(app).dsh_path) {
+        return Some(configured);
     }
     detect::find_dsh_cmd().map(|p| p.to_string_lossy().to_string())
+}
+
+/// 配置里填的 dsh 路径能不能直接用：非空 **且文件真的存在**。
+///
+/// 存在性检查不能省：首装向导跑完前 `dsh_path` 是空的，而写错路径的用户也不少见；
+/// 拿一条注定失败的命令去注册，得到的只会是一句看不懂的失败。
+fn dsh_cmd_path_requires_a_real_file(configured: &str) -> Option<String> {
+    let t = configured.trim();
+    if t.is_empty() || !Path::new(t).is_file() {
+        return None;
+    }
+    Some(t.to_string())
 }
 
 /// DSH 的 Web 端口是否已被占用（= DSH 正在跑）。
@@ -878,22 +890,27 @@ mod tests {
     /// 「已注册进 profile「」」，而 profile 里其实什么都没有。
     #[test]
     fn no_dsh_found_means_none_not_a_bare_command_name() {
-        // dsh_cmd_path 找不到时的契约：None（由调用方当成「注册没做」+ 保留 pending）
-        assert!(dsh_cmd_path_requires_a_real_file(r"C:\nope\dsh.cmd").is_none());
+        // 配置里是空串 → 交给 find_dsh_cmd 那一层；整条路都拿不到时才 None
+        assert!(dsh_cmd_path_requires_a_real_file("").is_none());
+        assert!(dsh_cmd_path_requires_a_real_file("   ").is_none());
+        // 路径写得像模像样但**文件不存在** → 同样不能当它有效，
+        // 否则就会拼出一条注定失败的命令（曾经的真故障就是这样冒出来的）
+        assert!(dsh_cmd_path_requires_a_real_file(r"C:\definitely-not-here\dsh.cmd").is_none());
+        // 只有真存在的文件才算数（这里造一个临时文件来验证正面情形）
+        let tmp = std::env::temp_dir().join(format!("dsh-fake-{}.cmd", std::process::id()));
+        std::fs::write(&tmp, "@echo off\r\n").unwrap();
+        assert_eq!(
+            dsh_cmd_path_requires_a_real_file(&tmp.to_string_lossy()),
+            Some(tmp.to_string_lossy().to_string())
+        );
+        let _ = std::fs::remove_file(&tmp);
+
+        // 另一条契约：dsh_argv_for 只负责选 program，不负责「找不找得到」
         assert_eq!(
             dsh_argv_for("dsh").expect("裸 dsh 仍可直接执行").0,
             "dsh",
-            "本函数只负责选 program；「找不到」由 dsh_cmd_path 用 None 表达"
+            "「找不到」由 dsh_cmd_path 用 None 表达，本函数不兜底"
         );
-    }
-
-    /// `dsh_cmd_path` 里「配置路径 / find_dsh_cmd 都拿不到」的判定逻辑（纯字符串版）。
-    fn dsh_cmd_path_requires_a_real_file(configured: &str) -> Option<String> {
-        let t = configured.trim();
-        if t.is_empty() {
-            return None;
-        }
-        Some(t.to_string())
     }
 
     /// 回归：**有 pending 标记绝不能被报成「已激活」**。

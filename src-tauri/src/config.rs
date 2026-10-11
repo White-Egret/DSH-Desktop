@@ -105,6 +105,26 @@ pub struct Config {
     /// 旧版本装好的机器两个字段都是默认值（false + 空串），于是卸载时走「不动那一行」
     /// 这条保守路径，正是我们要的：那时用户机器上的 prefix 可能是他自己 `npm config set` 的。
     pub npm_prefix_claimed: bool,
+    /// 启动等待页（诗句那页）是否播放背景音乐。
+    ///
+    /// 默认 true：这一页平均要停留几十秒，安静得有点长；音量单独走
+    /// `startup_music_volume`（默认偏低的 40），不想要的用户在首选项一键关掉即可。
+    ///
+    /// 与界面语言无关：内置曲是程序合成的（不依赖任何资源文件与网络），
+    /// 自选曲由用户自己指定，两条路径都由 main.js 统一控制起停。
+    pub startup_music_enabled: bool,
+    /// 用户自选的音乐文件完整路径；空串 = 用内置曲（程序用 Web Audio 合成的
+    /// 一段五声音阶琶音，见 main.js 的 music 模块）。
+    ///
+    /// 为什么**不**走 Tauri 的 assetProtocol 直接让前端播 `file://`：
+    /// 那个开关本程序是刻意关着的（见 tauri.conf.json），打开它等于把
+    /// 「内嵌的 DSH 页面（不可信的 http://127.0.0.1 来源）也能读本机任意文件」
+    /// 这件事放回来。所以这里只存路径，由 `process::read_startup_music`
+    /// **读那一个已保存的文件**再回传给前端（见该命令的注释）。
+    pub startup_music_path: String,
+    /// 背景音乐音量，0~100。内置曲与自选曲共用同一档。
+    /// 默认 40：足够听出氛围，又不会在办公室显得吵。
+    pub startup_music_volume: u32,
 }
 
 impl Default for Config {
@@ -146,6 +166,11 @@ impl Default for Config {
             npm_prefix_prev: String::new(),
             // false = 没写过（旧版本装好的机器就是这两个默认值 → 卸载时不动那一行）
             npm_prefix_claimed: false,
+            // 启动等待页默认有背景音乐（音量 40，偏保守）；想安静的用户在首选项关掉
+            startup_music_enabled: true,
+            // 空 = 用内置曲（Web Audio 现场合成）；选了文件才走自选曲
+            startup_music_path: String::new(),
+            startup_music_volume: 40,
         }
     }
 }
@@ -365,6 +390,55 @@ pub fn validate_program_file(field: &str, raw: &str) -> Result<String, String> {
         return Err(i18n::fmt("err_prog_missing", &[&norm]));
     }
     Ok(norm)
+}
+
+// ---------- 自选背景音乐（startup_music_path） ----------
+
+/// 允许的音乐文件扩展名（小写比较）。
+///
+/// 取这五个是因为它们是 WebView2（Chromium 内核）**开箱即用**能解码的容器：
+/// mp3 / wav / aac(m4a) / ogg(vorbis/opus) / flac。刻意不收 `.mka`、`.ape`、`.wma`、
+/// `.mid` 之类：它们要么解不了，要么依赖本机安装的解码器 —— 那种文件会出现
+/// 「路径有效、保存成功、启动页没声音」这种最难查的现象，只能在选择时就挡掉。
+pub const MUSIC_EXTS: [&str; 5] = ["mp3", "wav", "m4a", "ogg", "flac"];
+
+/// 单个音乐文件的大小上限：32 MiB。约等于一整首无损（FLAC 约 20~25 分钟）
+/// 或十几首高码率 MP3，远超「启动等待页循环播放」这个用途所需，
+/// 而把它卡住可以防止手滑选到一张整张专辑（几百 MB）把内存吃光。
+pub const MUSIC_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
+/// 校验首选项里「自选音乐文件」的路径形状，返回规范化后的路径；
+/// 空串是**合法**输入（= 用内置曲），原样返回空串。
+///
+/// 与程序路径共用 `path_shape` 的黑名单（绝对路径 / 非 UNC / 无 `..`），
+/// 因为这个路径同样会**被程序读取**：config.json 是明文文件、能被本用户下任何进程改写，
+/// 而程序开机自启时会按它读文件。这里不额外加「必须在用户目录内」的白名单 ——
+/// 音乐放在 D 盘等位置很常见，强行限制只会误伤（理由与 MEDIUM-3 那段一致）。
+///
+/// **不要求文件存在**：与 dsh_path / npm_path 同款处理 —— 允许用户先把路径填好
+/// （比如指向另一台机器 / 还没拷过来的文件），真正读文件的那一步
+/// （process::read_startup_music）才校验存在性并给明确报错。
+pub fn validate_music_path(raw: &str) -> Result<String, String> {
+    let field = "startup_music_path";
+    if raw.trim().is_empty() {
+        return Ok(String::new());
+    }
+    let norm = path_shape(field, raw)?;
+    let ext = PathBuf::from(&norm)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !MUSIC_EXTS.contains(&ext.as_str()) {
+        return Err(i18n::fmt("err_music_ext", &[&norm]));
+    }
+    Ok(norm)
+}
+
+/// 音量收敛到 0~100。手改 config.json 能写进任何 u32，这里挡下来；
+/// 保存入口与读取入口都调一次（前端输入框的 max 已经在挡，但那是界面，不是边界）。
+pub fn clamp_music_volume(raw: u32) -> u32 {
+    raw.min(100)
 }
 
 /// 引导安装时自定义目录的长度上限（字符数，不含结尾分隔符）。
@@ -2147,5 +2221,96 @@ mod tests {
             validate_python_install_dir(&ok).is_ok(),
             "非 Program Files 的自定义目录应当放行: {ok}"
         );
+    }
+
+    // ---------- 自选背景音乐 ----------
+
+    /// 留空 = 用内置曲。这是**合法输入**而不是错误 —— 首选项里清空那一栏
+    /// 就该立刻保存成功，否则「恢复内置」按钮会变成一个报错的按钮。
+    #[test]
+    fn music_path_empty_means_builtin_tune() {
+        assert_eq!(validate_music_path("").unwrap(), "");
+        assert_eq!(validate_music_path("   ").unwrap(), "");
+    }
+
+    /// 名单内的大小写不敏感（用户从资源管理器拖进来的常常是 `Song.MP3`），
+    /// 名单外的必须在**保存时**就拒 —— 那类文件「保存成功但启动页没声音」，
+    /// 是最难排查的一类现象，只能提前挡。
+    #[test]
+    fn music_path_accepts_only_decodable_formats() {
+        let ok = |ext: &str| format!(r"C:\Music\track.{ext}");
+        for ext in ["mp3", "wav", "m4a", "ogg", "flac"] {
+            assert!(
+                validate_music_path(&ok(ext)).is_ok(),
+                "{ext} 是 WebView2 能解码的格式，应当放行"
+            );
+        }
+        assert!(
+            validate_music_path(&ok("MP3")).is_ok(),
+            "扩展名大小写不敏感：Song.MP3 应当放行"
+        );
+        for ext in ["wma", "mka", "ape", "mid", "txt", "exe"] {
+            assert!(
+                validate_music_path(&ok(ext)).is_err(),
+                "{ext} 解不了 / 不该被执行，必须在保存时拒掉"
+            );
+        }
+        assert!(
+            validate_music_path(r"C:\Music\noext").is_err(),
+            "没有扩展名的文件无法判断能不能解码，应当拒掉"
+        );
+    }
+
+    /// 与其它路径字段共用同一把黑名单尺子（相对路径 / UNC / `..`）。
+    /// 这个字段同样会被程序读文件，而 config.json 是明文、能被本用户下任何进程改写，
+    /// 所以只在保存入口拦是不够的（见 read_startup_music 里那次复校）。
+    #[test]
+    fn music_path_shares_the_blacklist_with_other_path_fields() {
+        for bad in [
+            r"Music\track.mp3",      // 相对路径
+            r"\\server\share\t.mp3", // UNC
+            r"C:\Music\..\t.mp3",    // 上级跳转
+        ] {
+            assert!(
+                validate_music_path(bad).is_err(),
+                "应当拒绝这个路径: {bad}"
+            );
+        }
+    }
+
+    /// 路径存在**不**在这一步校验（与 dsh_path / npm_path 同款）：
+    /// 用户可以先填好路径再把文件拷过来。存在性由 read_startup_music 负责，
+    /// 且那里的报错文案说的是「找不到文件」，与这里的形状错误区分得开。
+    #[test]
+    fn music_path_does_not_require_the_file_to_exist() {
+        assert!(
+            validate_music_path(r"Z:\definitely\not\here\track.mp3").is_ok(),
+            "不存在的路径在这一步应当放行（存在性由读取那一步管）"
+        );
+    }
+
+    /// 音量越界只在读取时收敛（保存入口那道在 process.rs），
+    /// 但两条路都要有 —— config.json 是明文，界面上的 max 不算边界。
+    #[test]
+    fn music_volume_is_clamped_into_range() {
+        assert_eq!(clamp_music_volume(0), 0);
+        assert_eq!(clamp_music_volume(40), 40);
+        assert_eq!(clamp_music_volume(100), 100);
+        assert_eq!(clamp_music_volume(101), 100);
+        assert_eq!(clamp_music_volume(u32::MAX), 100);
+    }
+
+    /// 升级即生效的前提：老配置里没有这三个键时，serde(default) 必须给出
+    /// 「开着 + 内置曲 + 音量 40」这套默认值，而不是 false/空/0 ——
+    /// 尤其**不能**是 false：老用户升级后本该立刻听到内置曲（这是本次改动的意图）。
+    #[test]
+    fn startup_music_defaults_to_enabled_builtin_at_moderate_volume() {
+        let d = Config::default();
+        assert!(d.startup_music_enabled, "默认应当是开启（音量本来就调得低）");
+        assert!(
+            d.startup_music_path.is_empty(),
+            "默认应当用内置曲（不预置任何音频资源文件）"
+        );
+        assert_eq!(d.startup_music_volume, 40);
     }
 }

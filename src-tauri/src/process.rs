@@ -2311,6 +2311,10 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     config.npm_cache_dir = config::validate_npm_cache_dir(&config.npm_cache_dir)?.unwrap_or_default();
     // 外观只认 light / dark / system（非法值归一为 system，与前端下拉框互为防线）
     config.appearance = config::normalize_appearance(&config.appearance).to_string();
+    // 启动等待页背景音乐：路径形状 + 扩展名白名单（空 = 内置曲），
+    // 音量收敛到 0~100。两处都手改 config.json 也绕不过去 —— 与上面那些路径字段同一套防线。
+    config.startup_music_path = config::validate_music_path(&config.startup_music_path)?;
+    config.startup_music_volume = config::clamp_music_volume(config.startup_music_volume);
     // 安全模式修复验证等待：0 = 关闭验证提示；其余收敛到 5~3600 秒（与就绪超时同一刻度）
     config.safe_verify_secs = if config.safe_verify_secs == 0 {
         0
@@ -2984,6 +2988,136 @@ pub fn pick_folder(app: AppHandle, kind: String) {
             }
         }
     });
+}
+
+/// 首选项「自选背景音乐」：挑一个音频文件。
+///
+/// 过滤器只列 WebView2 能解码的格式（与 config::MUSIC_EXTS 同一份名单），
+/// 而**不做**任何自动纠错 —— 用户在对话框里选错扩展名时，明确拒绝比"默默放行
+/// 一个启动时没声音的路径"要好排查（见 err_music_ext 的文案）。
+#[tauri::command]
+pub fn pick_music_file(app: AppHandle, kind: String) {
+    use tauri_plugin_dialog::DialogExt;
+    let app2 = app.clone();
+    app.dialog()
+        .file()
+        .add_filter(
+            i18n::t("pick_filter_music"),
+            &["mp3", "wav", "m4a", "ogg", "flac"],
+        )
+        .pick_file(move |file| {
+            if let Some(f) = file {
+                if let Ok(p) = f.into_path() {
+                    let _ = app2.emit(
+                        "path-picked",
+                        serde_json::json!({ "kind": kind, "path": p.to_string_lossy() }),
+                    );
+                }
+            }
+        });
+}
+
+/// 读启动等待页要播的那**一个**音乐文件，回给前端在内存里播放。
+///
+/// 返回 `None` = 配置里没选文件（用内置曲，前端走 Web Audio 合成），
+/// 这不是错误 —— 用 `Option` 而不是塞一个哨兵字符串，免得前端把"正常"当"失败"。
+///
+/// 为什么不走 assetProtocol（让前端自己 `convertFileSrc` 播本地文件）：
+/// tauri.conf.json 里 assetProtocol 是**刻意关掉的**。打开它等于给内嵌的
+/// DSH 页面（不可信的 http://127.0.0.1:3080 来源，capabilities/default.json
+/// 的注释明确警告过）也开了「读本机任意文件」的门 —— 为了播放一段音乐不值得。
+///
+/// 关键设计：**不接受调用方传路径**。路径只从配置里取，且那张表里只有
+/// 用户在首选项里亲自选中的那一个文件。所以即便有人能调这条命令，
+/// 也拿不到「任意路径 → 任意文件内容」这个原语（顶多读到用户自己指定的那首歌）。
+///
+/// 返回 base64 而不是原始字节：Tauri 的 IPC 是 JSON，Vec<u8> 会被序列化成
+/// 一长串数字（体积翻好几倍）。前端拿到后转 Blob → objectURL 播放。
+#[derive(Serialize)]
+pub struct StartupMusic {
+    /// 文件内容（base64，无换行）
+    pub data: String,
+    /// 由扩展名推出的 MIME，给 <audio> 一个正确的类型
+    pub mime: String,
+    /// 文件名（含扩展名），只用于首选项里显示"正在播哪个文件"
+    pub name: String,
+}
+
+/// 扩展名 → MIME。名单与 config::MUSIC_EXTS 一致；取不到就回退成
+/// `application/octet-stream`（前端照样按字节解码，交给 WebView2 自己认）。
+fn music_mime(ext_lower: &str) -> &'static str {
+    match ext_lower {
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "ogg" => "audio/ogg",
+        "flac" => "audio/flac",
+        _ => "application/octet-stream",
+    }
+}
+
+/// base64 编码（标准字母表，带填充）。刻意不引新依赖：
+/// 一个几十行的编码函数，比给 Cargo.toml / Cargo.lock 加一条依赖划算得多
+/// （CI 用 `cargo test --lib`，多一个依赖就多一处要更新的锁文件）。
+fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+#[tauri::command]
+pub fn read_startup_music(app: AppHandle) -> Result<Option<StartupMusic>, String> {
+    let cfg = config::load(&app);
+    let raw = cfg.startup_music_path.trim().to_string();
+    // 空 = 用内置曲（Web Audio 现场合成），不需要读任何文件。
+    // 用 None 表示「不是错误」，前端据此走内置曲。
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    // 形状校验在这一步**再跑一次**，而不是只信保存入口：config.json 是明文，
+    // 能被本用户下任何进程改写（MEDIUM-3 开头那段讲的就是这件事）
+    let norm = config::validate_music_path(&raw)?;
+    let md = std::fs::metadata(&norm).map_err(|_| i18n::fmt("err_music_missing", &[&norm]))?;
+    if !md.is_file() {
+        return Err(i18n::fmt("err_music_missing", &[&norm]));
+    }
+    if md.len() > config::MUSIC_MAX_BYTES {
+        return Err(i18n::fmt("err_music_too_big", &[&norm]));
+    }
+    let bytes =
+        std::fs::read(&norm).map_err(|e| i18n::fmt("err_music_read", &[&norm, &e.to_string()]))?;
+    let ext = Path::new(&norm)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let name = Path::new(&norm)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    Ok(Some(StartupMusic {
+        data: base64_encode(&bytes),
+        mime: music_mime(&ext).to_string(),
+        name,
+    }))
 }
 
 /// 退出 / 关窗时的兜底清理（幂等，可安全重复调用）。
@@ -7748,5 +7882,58 @@ mod tests {
             "非空场景下不该有任何「已删除」条目：{items:?}"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- 自选背景音乐：base64 编码与 MIME 推断 ----------
+
+    /// base64 是**手写**的（不想为几十行代码给 Cargo.lock 加一条依赖），
+    /// 所以必须钉住它：前端 `atob()` 拿到的字符串错一位，整首歌就解不出来，
+    /// 而症状是「选了文件却没声音」，极难联想到编码问题。
+    /// 标准向量来自 RFC 4648 的 §10 官方测试值。
+    #[test]
+    fn base64_matches_rfc4648_test_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    /// 尾部填充只该出现在 1 / 2 字节余数上；长度是 3 的倍数时不能多补一个 `=`
+    /// （多一个字符会让前端 atob 之后的字节数对不上，静默截掉一截音频）。
+    #[test]
+    fn base64_padding_depends_only_on_remainder() {
+        assert_eq!(base64_encode(&[1, 2, 3]).len(), 4);
+        assert_eq!(base64_encode(&[1, 2, 3, 4]).len(), 8);
+        assert_eq!(base64_encode(&[1]).len(), 4);
+        assert!(base64_encode(&[1, 2]).ends_with('='));
+        assert!(!base64_encode(&[1, 2, 3]).ends_with('='));
+    }
+
+    /// 高位字节必须原样编码（音频文件全是二进制，最容易在这里写错）。
+    /// 这段数据覆盖 0x00 / 0xFF 与非 ASCII 三类。
+    #[test]
+    fn base64_handles_high_bytes() {
+        assert_eq!(base64_encode(&[0x00]), "AA==");
+        assert_eq!(base64_encode(&[0xff]), "/w==");
+        assert_eq!(base64_encode(&[0xff, 0xff]), "//8=");
+        assert_eq!(base64_encode(&[0xff, 0xff, 0xff]), "////");
+        // 0xFB 0xFF 0xBF → +/+/ 附近：验证高次位没有算错（这里最容易出的 bug）
+        assert_eq!(base64_encode(&[0xfb, 0xff, 0xbf]), "+/+/");
+    }
+
+    /// MIME 只按扩展名给，取不到就回退成 octet-stream ——
+    /// 宁可让 WebView2 自己按字节嗅探，也不要猜错类型导致它拒绝加载。
+    #[test]
+    fn music_mime_covers_the_allowed_extensions() {
+        assert_eq!(music_mime("mp3"), "audio/mpeg");
+        assert_eq!(music_mime("wav"), "audio/wav");
+        assert_eq!(music_mime("m4a"), "audio/mp4");
+        assert_eq!(music_mime("ogg"), "audio/ogg");
+        assert_eq!(music_mime("flac"), "audio/flac");
+        assert_eq!(music_mime(""), "application/octet-stream");
+        assert_eq!(music_mime("wma"), "application/octet-stream");
     }
 }

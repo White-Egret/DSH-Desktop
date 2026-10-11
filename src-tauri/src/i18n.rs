@@ -122,6 +122,13 @@ pub fn t(key: &str) -> &'static str {
         "err_prog_ext" => if en { "{0}: only .exe / .cmd / .bat can be launched (a .ps1 or extension-less file would go through unpredictable file associations). Re-select the program in Preferences." } else { "{0}：只允许启动 .exe / .cmd / .bat 文件（.ps1 或无扩展名会走不可预测的文件关联）。请在「首选项」中重新选择。" },
         "err_prog_missing" => if en { "{0}: no such executable file. Click \"Auto-detect\" in Preferences or pick the path again." } else { "{0}：找不到该可执行文件。请在「首选项」中点「自动检测」或重新选择路径。" },
 
+        // ---------- 自选背景音乐（startup_music_path / 读取失败） ----------
+        "err_music_ext" => if en { "{0}: unsupported music format. Pick .mp3 / .wav / .m4a / .ogg / .flac — the app's webview cannot decode .wma / .mka / .ape etc., and such a file would save fine but play nothing." } else { "{0}：不支持的音乐格式。请选择 .mp3 / .wav / .m4a / .ogg / .flac —— 程序的 webview 无法解码 .wma / .mka / .ape 等格式，那类文件能保存成功却不会出声。" },
+        "err_music_missing" => if en { "{0}: no such music file. Re-pick it in Preferences, or clear the field to go back to the built-in tune." } else { "{0}：找不到该音乐文件。请在「首选项」中重新选择，或清空该栏改回内置曲目。" },
+        "err_music_too_big" => if en { "{0}: larger than 32 MB. Please pick a shorter track or a more compressed file." } else { "{0}：文件超过 32 MB。请选择更短的曲目，或压缩率更高的文件。" },
+        "err_music_read" => if en { "Cannot read the music file {0}: {1}" } else { "无法读取音乐文件 {0}：{1}" },
+        "pick_filter_music" => if en { "Music files" } else { "音乐文件" },
+
         // ---------- 版本 / 包检测 ----------
         "err_ver_flags" => if en { "Cannot read the local DSH version (--version / -v / -V all failed)" } else { "无法获取本地 DSH 版本（--version / -v / -V 均不可用）" },
         "err_ver_no_dsh" => if en { "dsh.cmd not found ({0}); cannot read the local version" } else { "找不到 dsh.cmd（{0}），无法获取本地版本" },

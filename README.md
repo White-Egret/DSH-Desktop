@@ -243,6 +243,7 @@ Open **⚙ 首选项 (Preferences)** from the toolbar. The paths of the two prog
 | Python environment | off by default | a status line plus **基本安装 / 额外安装** buttons, and a capability-bridge row that exposes the installed libraries as AI tools — see [Python environment](#python-environment) |
 | Interface language | `zh` (中文) | `zh` / `en`; switches the whole launcher and syncs DSH's `settings.yaml` — see [Language](#language) |
 | Appearance | `system` (follow system) | `light` / `dark` / `system`; switches the launcher and syncs DSH's `ui-theme.preference` — see [Appearance](#appearance) |
+| Startup music | on, volume 40, built-in tune | Switch / volume / custom file as one group — see [Background music on the startup page](#background-music-on-the-startup-poem-page) |
 
 > There is deliberately **no "update args" setting any more**: the update command is always `npm install -g <package name>@<channel>` (plus a `--prefix` derived from where `dsh.cmd` actually lives, when DSH is installed outside npm's default directory — see *Choosing where DSH gets installed*), and the channel (`latest` / `next`) is chosen in the **⤓ 更新 DSH** dialog itself — see [Update DSH](#update-dsh). Extra npm knobs (registry, proxy) belong in the **user-level** `~/.npmrc` — global effect, no extra file inside the DSH directory tree (this is how this machine is configured); an `.npmrc` next to the DSH home dir works too (that is where npm reads `./.npmrc`) but adds a file there. Note that **pnpm does not read `~/.npmrc`**: its own global source lives in the `auth.ini` written by `pnpm config set registry`, which is exactly what the Preferences *Package sources (registry)* button manages.
 
@@ -437,6 +438,25 @@ Same three-way semantics as DSH's own "General settings → Appearance", with th
 - Like the language sync, this is a minimal, targeted line edit: only `ui-theme.preference` is added/changed; everything else in `settings.yaml` is preserved.
 - Upgrade compatibility: an old `config.json` without the appearance field inherits DSH's current theme on first load (reading `settings.yaml`), so upgrading the launcher never re-skins your DSH page by itself. From then on, saving in Preferences takes over the value.
 - Changing the appearance inside DSH's own settings affects the DSH page only; the launcher keeps whatever was last saved in its Preferences.
+
+## Background music on the startup (poem) page
+
+The waiting page that shows poem lines while DSH starts stays up for tens of seconds (minutes on a cold boot), so it can carry background music. Three settings live together in **⚙ Preferences → Startup music**, stored as `startup_music_enabled` / `startup_music_volume` / `startup_music_path` in `config.json`:
+
+- **Switch** (on by default) and **volume** (40 by default): dragging the volume changes what is *currently playing* immediately — you don't have to press Save first; saving just persists it.
+- **Custom music file** (empty = built-in tune): pick an mp3 / wav / m4a / ogg / flac (≤ 32 MB) and it loops on the waiting page; "Use built-in" clears the field and switches back.
+
+| | Built-in tune (default) | Custom file |
+|---|---|---|
+| Source | A **C-major pentatonic arpeggio synthesized on the fly with Web Audio** | A local file you choose |
+| Needs | Nothing — no audio asset is shipped, no network, no system codecs | One of the five containers WebView2 can decode |
+| Stops working | Never | File deleted/moved, over 32 MB, unreadable disk |
+
+Music shares the poem's lifetime: it fades in when the waiting page appears, and fades out with the poem as soon as DSH is ready (also on errors and port conflicts).
+
+**Nothing fails silently**: an unreadable custom file falls back to the built-in tune and says why in the log; if the system's autoplay policy blocks it (the autostart path has no user gesture at all) the app tells you and starts on your next click.
+
+**Why the webview doesn't just play the local path**: that would require enabling Tauri's `assetProtocol`, which is **deliberately off**. Turning it on would also hand the embedded DSH page (an untrusted `http://127.0.0.1:3080` origin) the ability to read arbitrary local files. Instead the app reads **that one** saved file (`read_startup_music` takes **no path from the caller** — it only ever reads the configured path), hands it back as base64, and the page plays it from a `blob:` URL. The CSP was widened for exactly this one purpose: `media-src 'self' blob:` — no `file:`. The path still shares the same blacklist as every other path field (absolute, non-UNC, no `..`) and is **re-validated at read time**: `config.json` is plaintext, so checking only on save is not enough.
 
 ## Toolbar display mode (pinned / auto-hide)
 

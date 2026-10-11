@@ -11,5 +11,9 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
+  },
+  "comment_deps": "刻意**没有任何 dependencies**：@deepseek-ai/* 是宿主（DSH 安装目录）提供的共享包，profile 的 node_modules 里没有它们，pnpm 也不会把 DSH 的依赖暴露给 profile 里的 bundle。所以顶层 import 一个 @deepseek-ai/* 裸包名会让整个插件在模块加载期 ERR_MODULE_NOT_FOUND —— apply() 从未执行、一个工具都不注册，而日志里只有一句 failed to import。本机两个可用的第三方插件各用各的办法绕开：dsh-github 把 dsh-tools 的子模块物理拷贝进 lib/vendor/；dsh-multimedia 完全不用 defineTool，手写 tool 对象直接 ctx.tools.register。本包走后一条。node: 前缀的内置模块不受此限。",
+  "scripts": {
+    "selftest": "node index.js"
   }
 }

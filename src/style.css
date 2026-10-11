@@ -1031,6 +1031,42 @@ body.tb-auto .refresh-overlay { top: 0; }
   color: var(--text);
 }
 
+/* 首选项「启动音乐」块：开关 / 音量 / 文件路径是一组设置，放在同一个
+   .field 里（而不是三个各自独立的 field-switch），用户才知道它们说的是同一件事。
+   音量这一行与开关并排：两个都是即时感知的调节，不需要滚到下面去找。 */
+.music-block {
+  gap: 8px;
+}
+.music-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+/* 开关沿用 .field-switch 自带的边框/底色（那是首选项里既有的开关样式，
+   整站统一）；这里只调尺寸，让它与音量那一行在视觉上等高并排。 */
+.music-switch {
+  flex: 1;
+  min-width: 260px;
+  padding: 8px 10px;
+}
+.music-volume {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+.music-volume input[type="range"] {
+  width: 120px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.music-volume b {
+  min-width: 26px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;  /* 拖动时数字宽度不变，不会左右抖 */
+}
+
 /* 首选项最底部的「维护」块：卸载是破坏性动作，用一条分隔线把它和上面的
    普通设置隔开，视觉上明确「下面是另一类操作」。 */
 .uninstall-block {

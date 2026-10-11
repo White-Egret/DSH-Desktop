@@ -392,6 +392,22 @@
     log_safe_verify_ok: '[safe] 修复验证通过：日常实例已就绪。',
     lbl_safe_reset: '进入安全模式时重置基线（旧 .dsh-safe 归档为 .dsh-safe-archive-时间戳，绝不删除；重建后只写入从日常模式借用的 .credentials.yaml，保证每次进入都是原厂纯净环境）',
     lbl_safe_verify: '安全模式修复验证等待（秒；退出后日常实例超过该时间未就绪则提示；0 = 不验证）',
+    // ---- 首选项：启动等待页（诗句那页）的背景音乐 ----
+    // 开关 / 音量 / 自选文件是一组，首选项里合在一个块里呈现。
+    lbl_music: '启动音乐（等待 DSH 就绪、显示诗句的那段页面）',
+    lbl_music_on: '播放背景音乐',
+    lbl_music_volume: '音量',
+    lbl_music_file: '自选音乐文件（留空 = 内置曲）',
+    ph_music_path: '留空 = 使用内置曲目',
+    btn_music_builtin: '恢复内置',
+    note_music: '内置曲是程序用 Web Audio 现场合成的五声音阶琶音（不联网、不读任何文件）；自选曲在启动等待页循环播放，DSH 一就绪就随诗行一起淡出。支持 mp3 / wav / m4a / ogg / flac（WebView2 能解码的格式），单个文件不超过 32 MB。文件不在了或读不出来时会自动回落到内置曲，并在日志里说明原因。',
+    // 状态行右侧的小标志：告诉用户此刻到底是哪一段在（可能）播
+    music_flag_off: '已关闭',
+    music_flag_builtin: '内置曲',
+    music_flag_file: '{0}',
+    music_read_fail: '背景音乐读取失败，已回落到内置曲：{0}',
+    music_decode_fail: '无法解码这个音频文件',
+    music_autoplay_blocked: '背景音乐被系统的自动播放策略拦下，点一下窗口即可开始播放。',
   };
 
   const en = {
@@ -765,6 +781,22 @@
     log_safe_verify_ok: '[safe] Repair verification passed: the daily instance is ready.',
     lbl_safe_reset: 'Reset the safe-mode baseline on entry (the old .dsh-safe is archived as .dsh-safe-archive-<timestamp>, never deleted; the rebuilt home only receives the .credentials.yaml borrowed from the daily mode — a factory-pristine environment every time)',
     lbl_safe_verify: 'Safe-mode repair verification wait (seconds; after exiting, prompt if the daily instance is not ready within this time; 0 = do not verify)',
+    // ---- Preferences: background music on the startup (poem) page ----
+    // Switch / volume / custom file belong together, so they share one block.
+    lbl_music: 'Startup music (the page shown while waiting for DSH to become ready)',
+    lbl_music_on: 'Play background music',
+    lbl_music_volume: 'Volume',
+    lbl_music_file: 'Custom music file (empty = built-in tune)',
+    ph_music_path: 'Empty = use the built-in tune',
+    btn_music_builtin: 'Use built-in',
+    note_music: 'The built-in tune is synthesized on the fly with Web Audio (no network, no file to ship); a custom file loops on the startup page and fades out together with the poem lines once DSH is ready. Supported: mp3 / wav / m4a / ogg / flac (whatever WebView2 can decode), up to 32 MB per file. If the file is missing or unreadable it falls back to the built-in tune and says so in the log.',
+    // Small status flag: tells the user which track is (or would be) playing
+    music_flag_off: 'Off',
+    music_flag_builtin: 'Built-in',
+    music_flag_file: '{0}',
+    music_read_fail: 'Could not read the music file; fell back to the built-in tune: {0}',
+    music_decode_fail: 'this audio file could not be decoded',
+    music_autoplay_blocked: 'The system autoplay policy blocked the music; click anywhere in the window to start it.',
   };
 
   const L = {

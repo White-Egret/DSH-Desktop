@@ -9,9 +9,21 @@
 //
 // 生命周期纪律：子进程归本插件管 —— ctx.effect 里注册的一切在插件卸载时统一清理，
 // 看门狗负责崩溃重启；DSH 退出时插件被卸载 → 子进程被 kill，**不留孤儿进程**。
+//
+// ⚠⚠ 零顶层运行时 import —— 这是本文件最重要的架构约束，不是代码风格问题。
+// 曾经顶层写 `import { defineTool } from '@deepseek-ai/dsh-tools'`，结果**整个插件
+// 一个工具都没注册**，且看不出任何原因。实测结论：profile 的 node_modules 里
+// **没有** `@deepseek-ai/dsh-tools`（只有 DSH 自己的安装目录里有，pnpm 不会把它
+// 暴露给 profile 里的 bundle），所以那个裸包名 import 在模块加载期就
+// ERR_MODULE_NOT_FOUND —— `apply()` 从未被调用。
+// 本机两个可用的第三方插件各自用不同方式绕开它，两条路都验证过能跑：
+//   · `dsh-github` 把 dsh-tools 的一个子模块**物理拷贝**进 lib/vendor/ 再相对引用；
+//   · `dsh-multimedia` **完全不用 defineTool**，手写 tool 对象直接 ctx.tools.register。
+// 这里走第二条：manifest 的参数本来就是标准 JSON Schema envelope，
+// 与 dsh-multimedia 手写的形状同构，原样注册即可，不需要 defineTool 的编译层。
+// `node:` 前缀的内置模块仍然可用（那不是 npm 依赖）。
 
 import { spawn } from 'node:child_process'
-import { defineTool } from '@deepseek-ai/dsh-tools'
 
 // 握手用的客户端版本。**major 必须与 Python 侧 dsh_bridge.__version__ 的 major 相同**，
 // 否则 runtime 会以 protocol-mismatch 拒绝（-32006）。这里刻意不硬读版本号：
@@ -318,34 +330,6 @@ export function apply(ctx, config = {}) {
     setTimeout(() => { start().catch((e) => log('ERROR', `重启失败：${e.message}`)) }, delay)
   }
 
-  /**
-   * 把 manifest 里的每个工具包成 ctx.tools 能注册的 definition。
-   *
-   * execute 里做的是「把 args 原样转发」：参数校验交给 Python 侧（它的签名才是真的），
-   * 这里再校验一遍只会引入两份可能不一致的规则。
-   */
-  function toolDefinitions() {
-    return manifestTools.map((t) => defineTool({
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters,
-      output: {
-        // 桥接工具的返回值形状不统一（{ok, result} / {path, preview} / {ok, error}），
-        // 这里统一成一个宽松的 JSON 值输出，不做强制 schema —— 强制了必然误伤。
-        schema: { type: 'json' },
-        render: (_args, value) => toContentBlocks(value),
-      },
-      execute: async (args) => {
-        if (!conn) {
-          // 握手失败过或进程已死：现拉一次再试，而不是直接报错给用户
-          await start()
-        }
-        if (!conn) throw new Error('Python 桥接不可用')
-        return await conn.request(t.name, args ?? {}, CALL_TIMEOUT_MS)
-      },
-    }))
-  }
-
   // ctx.effect：execute 的**返回值**就是清理函数，插件停用/卸载时由 Cordis 调用。
   // ⚠ 真实 API：`ctx.effect()` 返回一个可调用、可 await 的 wrapper（见 cordis
   //   lib/index.js 的 `effect(execute, label)`：1278 行 `return wrapper`，
@@ -376,12 +360,57 @@ export function apply(ctx, config = {}) {
       conn = null
     }
 
+    /**
+     * 逐个注册 manifest 里的工具。
+     *
+     * 形状照 `dsh-multimedia`（17 个工具，本机正在用）：**手写 tool 对象**，
+     * 不走 `defineTool`。它的参数就是 Python manifest 原样给出的标准 JSON Schema
+     * envelope（`{type:'object', properties, required}`）—— 与 dsh-multimedia
+     * 手写的形状同构，所以不需要任何转换。
+     *
+     * `execute` 拿到的是**已解析好的参数对象**（registry 自己校验并解析），
+     * 这里只负责转发回 Python；参数语义的权威在 Python 侧的签名。
+     *
+     * ⚠ 每个工具单独 try/catch：一个工具有问题不能连累其余 11 个。
+     */
     function registerAll() {
       const disposers = []
-      for (const def of toolDefinitions()) {
-        const handle = ctx.tools.register(def)
-        disposers.push(() => handle.unregister?.())
+      let registeredCount = 0
+      for (const t of manifestTools) {
+        try {
+          const tool = {
+            name: t.name,
+            description: t.description,
+            // manifest 给什么就登记什么：空参数的工具 Python 侧给 {}，
+            // 这里补一个标准的空 envelope，别把 undefined 传进去。
+            parameters: (t.parameters && typeof t.parameters === 'object')
+              ? t.parameters
+              : { type: 'object', properties: {} },
+            output: {
+              // 桥接工具返回值形状不统一（{ok, result} / {path, preview} / {ok, error}），
+              // 统一成宽松的 JSON 值输出，不做强制 schema —— 强制了必然误伤。
+              schema: { type: 'json' },
+              render: (_args, value) => toContentBlocks(value),
+            },
+            execute: async (args) => {
+              if (!conn) {
+                // 握手失败过或进程已死：现拉一次再试，而不是直接报错给用户
+                await start()
+              }
+              if (!conn) throw new Error('Python 桥接不可用')
+              return await conn.request(t.name, args ?? {}, CALL_TIMEOUT_MS)
+            },
+          }
+          // tools.register() 的返回值本身就是 disposer（dsh-tools 的 register
+          // 就是 `return this.layers.effect(...)`），所以直接收下它。
+          disposers.push(ctx.tools.register(tool))
+          registeredCount += 1
+        } catch (e) {
+          // 这是「工具明明在 manifest 里、AI 却看不到它」的唯一线索，必须显眼
+          log('ERROR', `注册工具 ${t.name} 失败：${e?.message ?? e}`)
+        }
       }
+      log('INFO', `已注册 ${registeredCount}/${manifestTools.length} 个工具`)
       return () => { for (const d of disposers) { try { d() } catch { /* 已卸载 */ } } }
     }
 
@@ -425,3 +454,42 @@ export function apply(ctx, config = {}) {
 // 少了后者 apply() 里的 ctx.systemPrompt 可能是 undefined —— 那一段是**增强**，
 // 拿不到就只注册工具，不让可选功能拖垮主线。
 export const inject = ['tools', 'systemPrompt']
+
+// ---------------------------------------------------------------------------
+// 模块可加载性自检（DSH_PY_BRIDGE_SELFTEST=1 时跑）
+//
+// 为什么需要它：本文件曾经顶层 `import { defineTool } from '@deepseek-ai/dsh-tools'`，
+// 而 profile 的 node_modules 里**没有**那个包（只有 DSH 自己的安装目录里有，
+// pnpm 不会把它暴露给 profile 里的 bundle）。于是模块加载期就
+// ERR_MODULE_NOT_FOUND，`apply()` 从未执行 —— 一个工具都没注册，而日志里
+// 连一行都没有（DSH 只报一句 `failed to import`）。这个自检就是为这类
+// 「import 写错、整包静默消失」的故障兜底的：只要能 import 本文件就说明顶层依赖
+// 全部解析成功，剩下的问题才有机会暴露在日志里。
+if (process.env.DSH_PY_BRIDGE_SELFTEST === '1') {
+  const failures = []
+  // 1) 顶层 import 是否解析成功 —— 走到这里就已经成功了（否则本文件加载不出来）
+  if (typeof spawn !== 'function') failures.push('node:child_process 的 spawn 不可用')
+  // 2) 导出的插件契约是否齐全（loader 按名字取这三个）
+  if (typeof apply !== 'function') failures.push('缺少 export apply')
+  if (!Array.isArray(inject) || inject.length === 0) failures.push('缺少 export inject')
+  if (inject.includes('tools') !== true) failures.push("inject 必须含 'tools'（否则 ctx.tools 是 undefined）")
+  // 3) 手写 tool 对象的形状：照 dsh-multimedia 那份（本机正在用）的最小要求
+  const sample = {
+    name: 'x',
+    description: 'd',
+    parameters: { type: 'object', properties: {}, required: [] },
+    output: { schema: { type: 'json' }, render: (_a, v) => [{ type: 'text', text: JSON.stringify(v) }] },
+    execute: async () => ({}),
+  }
+  for (const key of ['name', 'description', 'parameters', 'output', 'execute']) {
+    if (sample[key] === undefined) failures.push('tool 对象缺字段: ' + key)
+  }
+  if (typeof sample.execute !== 'function') failures.push('execute 必须是函数')
+  if (typeof sample.output.render !== 'function') failures.push('output.render 必须是函数')
+  if (failures.length > 0) {
+    console.error('[py-bridge] 自检失败:\n  ' + failures.join('\n  '))
+    process.exitCode = 1
+  } else {
+    console.log('[py-bridge] 自检通过：模块可加载、插件契约完整、tool 形状合法')
+  }
+}

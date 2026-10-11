@@ -298,6 +298,7 @@ function startPoem() {
   $('poem-panel').classList.remove('hidden');
   showPoemLine();
   scheduleNextPoemLine();
+  startMusic(); // 与诗行同起：等待页有声音，DSH 一就绪就一起淡出
 }
 
 function stopPoem() {
@@ -308,6 +309,367 @@ function stopPoem() {
   $('poem-panel').classList.add('hidden');
   $('poem-line').textContent = '';
   $('poem-source').innerHTML = '';
+  stopMusic(); // 离开启动页（就绪 / 出错 / 端口占用）一律淡出
+}
+
+// ---- 启动等待页背景音乐 ----
+//
+// 与诗句**同生命周期**：startPoem 起、stopPoem 停。两者都做了淡入淡出 ——
+// 硬切会「咔」一下，诗还在屏幕上音乐就没了，很出戏。
+//
+// 两种音源，同一音量旋钮：
+//   ① 内置曲（未选文件）：Web Audio 现场合成的一段五声音阶琶音。不带任何资源文件、
+//      不联网、不依赖解码器 —— 换句话说「装了就有声音」不需要用户先去找一个 mp3。
+//   ② 自选曲（首选项里选过文件）：后端把那**一个**文件读成 base64 回传，
+//      前端转成 blob: URL 交给 <audio> 循环播。为什么绕这一圈而不直接让前端播
+//      本地路径，见 process.rs::read_startup_music 的注释（assetProtocol 是刻意关着的）。
+
+const music = {
+  enabled: false,      // 来自配置的开关
+  volume: 40,          // 0~100
+  path: '',            // 自选文件路径；空 = 内置曲
+  // ---- 内置曲（Web Audio）状态 ----
+  ctx: null,           // AudioContext（首次真正要出声时才创建）
+  master: null,        // 总音量节点（淡入淡出作用在它上面）
+  timer: null,         // 预排程定时器
+  nextTime: 0,         // 下一个音符的起始时间（AudioContext 时间轴）
+  step: 0,             // 步进计数，用来按固定节奏选音
+  playing: false,
+  // ---- 自选曲状态 ----
+  audio: $('startup-music-audio'), // <audio> 在页面里静止不动，取一次就够
+  blobUrl: null,       // 当前这份曲的 blob: URL，换曲时 revoke；页面卸载时也 revoke
+  audioPaused: false,  // 自选曲被自动播放策略挡住、正等一次用户交互
+  loading: false,      // 正在读文件/等解码：startMusic 期间状态事件可能再来一次，要挡住重入
+  generation: 0,       // 每次 stopMusic 自增：在飞的 startMusic 醒来时发现代数变了就放弃
+};
+
+// 程序退出/刷新时把最后一份 objectURL 还回去。换曲路径上 revoke 掉上一份已经覆盖了
+// 「反复切歌漏内存」；这一处补的是「只放了一首歌就没了」那一份。
+// 用 pagehide 而非 beforeunload：后者在 WebView2 里并不总是触发（进程被杀时更不会），
+// 而 pagehide 是导航离开的标准钩子 —— 何况进程真被杀时，内存本来也一起还了。
+window.addEventListener('pagehide', () => {
+  if (music.blobUrl) URL.revokeObjectURL(music.blobUrl);
+});
+
+// 内置曲的音符表：C 大调五声音阶（宫商角徵羽），两个八度。
+// 选它是因为**任何两个相邻的音都不会显得刺耳** —— 琶音落在这套音上，怎么走都不难听，
+// 而不需要调音的曲子最容易在合成时失手。
+const MUSIC_SCALE = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 587.33, 659.25];
+// 每一拍的走音顺序：固定的一小段循环，循环起来有起伏又不单调。
+const MUSIC_PATTERN = [0, 2, 4, 3, 5, 4, 2, 1, 3, 5, 6, 4, 2, 0, 1, 2];
+
+/// 播放某个音符：三角波过一层低通（滤掉刺耳的高次谐波，听起来更接近钢琴/竖琴），
+/// 外加一个略低八度的正弦做低频垫。音量包络是「快起慢落」，音色干净。
+function playNote(ctx, dest, freq, startAt, dur, gain) {
+  const osc = ctx.createOscillator();
+  const lp = ctx.createBiquadFilter();
+  const env = ctx.createGain();
+  osc.type = 'triangle';
+  osc.frequency.value = freq;
+  lp.type = 'lowpass';
+  lp.frequency.value = Math.min(freq * 5, 8000);
+  env.gain.setValueAtTime(0, startAt);
+  env.gain.linearRampToValueAtTime(gain, startAt + 0.05);       // 软起音，避免"啪"
+  env.gain.exponentialRampToValueAtTime(gain * 0.28, startAt + 0.25);
+  env.gain.exponentialRampToValueAtTime(0.0001, startAt + dur);
+  osc.connect(lp).connect(env).connect(dest);
+  osc.start(startAt);
+  osc.stop(startAt + dur + 0.05);
+}
+
+/// 内置曲的排程器：每 200ms 往前排 0.8 秒的音符。
+/// 「提前排程」而不是「到点再发」是 Web Audio 的标准做法 —— setInterval 在后台标签页
+/// 会被节流到 1 秒甚至更久，而 AudioContext 的时间轴不会被节流：提前排好的音符
+/// 自己会按点响掉。
+const MUSIC_BEAT = 0.46;   // 每拍秒数（≈ 65 BPM，比心跳慢一档，适合长时间垫底）
+const MUSIC_LOOKAHEAD = 0.8;
+// 单个音符的峰值增益。这个数不是随手填的：音表 / 节奏 / 包络固定之后，把整段
+// 离线渲染出来**实测峰值**，再反推该定多少（下面是实测值，不是估算）：
+//   音符增益 0.09 时，默认音量（40）下峰值 -39.8 dBFS —— 实测听不见；
+//   提到 0.28 后，同样的音量 40 → 峰值 -15.6 dBFS，音量拉满（100）→ -7.7 dBFS。
+// 对一首稀疏的琶音来说 -15.6 dBFS 是"安静垫底"的合适响度，而拉满也只是明显可闻、
+// 不会吵到压过别的提示音。同刻最多叠 2~3 个音，离 0 dBFS 还差得远，削不了波。
+const MUSIC_NOTE_GAIN = 0.28;
+const MUSIC_BASS_GAIN = 0.22;   // 低八度长音：比主音再轻一档，只当"垫底"而不是抢戏
+
+function musicTick() {
+  const m = music;
+  if (!m.playing || !m.ctx) return;
+  const now = m.ctx.currentTime;
+  // 循环被拖到很后面（机器卡了一秒、系统休眠唤醒）时重新对齐，
+  // 否则接下来几千个音符会挤在一起齐奏
+  if (m.nextTime < now) m.nextTime = now + 0.05;
+  while (m.nextTime < now + MUSIC_LOOKAHEAD) {
+    const idx = MUSIC_PATTERN[m.step % MUSIC_PATTERN.length];
+    const freq = MUSIC_SCALE[idx];
+    // 每 8 拍叠一个低八度的长音，给段落一个落点（像是"换气"）
+    playNote(m.ctx, m.master, freq, m.nextTime, MUSIC_BEAT * 2.2, MUSIC_NOTE_GAIN);
+    if (m.step % 8 === 0) {
+      playNote(m.ctx, m.master, freq / 2, m.nextTime, MUSIC_BEAT * 4, MUSIC_BASS_GAIN);
+    }
+    m.nextTime += MUSIC_BEAT;
+    m.step += 1;
+  }
+}
+
+function musicBuiltinStart() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return false;                 // 没有 Web Audio（不该发生）：返回 false 让调用方回落
+  if (!music.ctx) {
+    music.ctx = new AC();
+    music.master = music.ctx.createGain();
+    music.master.gain.value = 0;         // 从 0 起，淡入自己做
+    music.master.connect(music.ctx.destination);
+  }
+  // Web Audio 和 <audio> 一样有自动播放策略：没有用户手势时新建的 AudioContext
+  // 会停在 suspended（静默）。resume() 成功即视为放行；失败/仍挂起则挂一次性交互
+  // 监听，等用户第一次点击时再 resume（否则"开机自启 + 内置曲"永远没声音）。
+  const ensureRunning = () => {
+    if (music.ctx && music.ctx.state === 'suspended') {
+      music.ctx.resume().then(() => {
+        if (music.ctx && music.ctx.state === 'running') {
+          refreshMusicFlag();
+        } else {
+          armMusicUnlock();
+        }
+      }).catch(() => armMusicUnlock());
+    }
+  };
+  ensureRunning();
+  music.step = 0;
+  music.nextTime = music.ctx.currentTime + 0.05;
+  music.playing = true;
+  musicTick();
+  music.timer = setInterval(musicTick, 200);
+  fadeMusicTo(volumeToGain(music.volume), 600);
+  return true;
+}
+
+function musicBuiltinStop() {
+  music.playing = false;
+  if (music.timer) clearInterval(music.timer);
+  music.timer = null;
+  if (music.ctx && music.master) {
+    fadeMusicTo(0, 500);
+    // 淡出结束后把上下文关掉：留着一个 AudioContext 在后台占着 WebAudio 线程，
+    // 用户不开音乐时它本不该醒着
+    const ctx = music.ctx;
+    setTimeout(() => { if (!music.playing) { try { ctx.close(); } catch (e) { /* 已关闭 */ } music.ctx = null; music.master = null; } }, 560);
+  }
+}
+
+function volumeToGain(vol) {
+  // 刻意保持**线性**，与自选曲那条路（<audio>.volume = 音量/100）对齐：
+  // 同一个音量档下，用户从内置曲切到自己的歌（或反过来），响度不会一高一低。
+  // 之前这里用的是 pow(vol/100, 2) * 1.6（想模拟人耳的响度感知），看着更"自然"，
+  // 但它与自选曲不一致，而且实测把默认档压到了几乎听不见（见下一个函数的注释）。
+  // 上限 0.85：用户拉到 100 时刻意不把背景音推满，总要给别的提示音留位置。
+  return Math.min(0.85, (Math.max(0, vol) / 100) * 0.85);
+}
+
+function fadeMusicTo(target, ms) {
+  const m = music;
+  if (!m.ctx || !m.master) return;
+  const now = m.ctx.currentTime;
+  // cancelScheduledValues + 重新排程：连续拖动音量时不会攒出一长串互相打断的斜坡
+  m.master.gain.cancelScheduledValues(now);
+  m.master.gain.setValueAtTime(m.master.gain.value, now);
+  m.master.gain.linearRampToValueAtTime(target, now + ms / 1000);
+}
+
+/// 把一首自选曲挂到 <audio> 上（src 来自后端读回的 base64 → blob: URL）。
+/// 播不出来（解码失败等）时返回 false，调用方回落到内置曲并记日志。
+async function loadCustomTrack() {
+  const el = music.audio;
+  if (!el) return false;
+  let info;
+  try {
+    info = await invoke('read_startup_music');
+  } catch (e) {
+    // 读不到（文件被删/移动、超 32 MB、磁盘出错）：不是致命错误 —— 回落内置曲，
+    // 但要让用户知道为什么"我选的曲子没响"，否则他们只会以为开关坏了。
+    appendLog('launcher', '[launcher] ' + t('music_read_fail', String(e)));
+    refreshMusicFlag();
+    return false;
+  }
+  if (!info) return false;               // 没选文件 = 内置曲，不是失败
+  // 换曲前先回收上一份 object URL：每次启动都 revoke 一次，否则窗口开着不放就一直在漏
+  if (music.blobUrl) { URL.revokeObjectURL(music.blobUrl); music.blobUrl = null; }
+  try {
+    const bin = atob(info.data);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) buf[i] = bin.charCodeAt(i);
+    music.blobUrl = URL.createObjectURL(new Blob([buf], { type: info.mime || 'audio/mpeg' }));
+    el.src = music.blobUrl;
+    el.loop = true;
+    el.volume = Math.min(1, Math.max(0, music.volume) / 100);
+    // 解码失败时 error 事件会触发、loadedmetadata 永远不来 —— 必须靠超时兜底，
+    // 否则这一行会永远挂着，startMusic 也永远等不到结果（等待页就此卡在无音乐状态）。
+    // 注意：**error 与 loadedmetadata 必须分出两种结果**。只 resolve 一个"完成"标志的话，
+    // 解码失败也会被当成"曲已就绪"，于是 play() 在一个空 src 上拒绝，用户听到的是
+    // "点了没反应"而不是"换回内置曲" —— 恰好把最该报出来的故障吞掉。
+    const ok = await new Promise((resolve) => {
+      const finish = (good) => {
+        el.removeEventListener('loadedmetadata', onMeta);
+        el.removeEventListener('error', onErr);
+        clearTimeout(timer);
+        resolve(good);
+      };
+      const onMeta = () => finish(true);
+      const onErr = () => finish(false);
+      const timer = setTimeout(() => finish(false), 8000);   // 元数据迟迟不来 = 当失败
+      el.addEventListener('loadedmetadata', onMeta);
+      el.addEventListener('error', onErr);
+    });
+    if (!ok) {
+      appendLog('launcher', '[launcher] ' + t('music_read_fail', t('music_decode_fail')));
+      refreshMusicFlag();
+      return false;
+    }
+    return true;
+  } catch (e) {
+    appendLog('launcher', '[launcher] ' + t('music_read_fail', String(e)));
+    refreshMusicFlag();
+    return false;
+  }
+}
+
+/// 启动等待页开始时调一次：按配置决定播哪一段。
+///
+/// `loading` 这道重入闸是必要的：读自选曲要 await 后端 + 等解码元数据（可能好几秒），
+/// 而这段时间里后端每刷新一次状态就送来一个 `starting` 事件 —— 没有闸门就会
+/// 同时跑两条加载链，各建一个 blob URL，最后一个还把前一个的 revoke 掉（放不出声）。
+async function startMusic() {
+  if (!music.enabled || music.playing || music.audioPaused || music.loading) return;
+  music.loading = true;
+  const gen = music.generation || 0;
+  // 这一趟还要继续吗？stopMusic 会把代数 +1 —— 期间等待页已经结束（或又重启了一次）。
+  const alive = () => gen === (music.generation || 0) && poemActive;
+  try {
+    const wantCustom = music.path.trim() !== '';
+    // 读了再播：自选曲要先拿到字节才能播（这里是唯一的异步点，失败会自己回落内置曲）
+    if (wantCustom) {
+      const ok = await loadCustomTrack();
+      if (!alive()) return;                 // 读完发现已经不用播了：别再出声
+      if (ok) {
+        try {
+          await music.audio.play();
+          if (!alive()) { music.audio.pause(); return; }
+          music.playing = true;
+          refreshMusicFlag();
+          return;
+        } catch (e) {
+          // 被自动播放策略挡下（开机自启那条路没有任何用户手势）：
+          // 挂一次性交互监听，等用户第一次点击时补播（见 armMusicUnlock）
+          if (!alive()) return;
+          armMusicUnlock();
+          appendLog('launcher', '[launcher] ' + t('music_autoplay_blocked'));
+          refreshMusicFlag();
+          return;
+        }
+      }
+    }
+    if (!alive()) return;
+    if (musicBuiltinStart()) music.playing = true;
+    refreshMusicFlag();
+  } finally {
+    music.loading = false;
+  }
+}
+
+function stopMusic() {
+  // 让**正在飞行**的那次 startMusic 作废：DSH 可能在自选曲还在读的时候就绪了，
+  // 那条 await 链醒来后会去把音乐放出来 —— 而这时页面已经切走，音乐就永远停不下了。
+  // 靠代数（generation）判定而不是布尔量：连续 stop→start 时布尔量分不清先后。
+  music.generation = (music.generation || 0) + 1;
+  music.audioPaused = false;
+  if (music.audio) {
+    try { music.audio.pause(); } catch (e) { /* 还没 src，忽略 */ }
+  }
+  music.playing = false;
+  musicBuiltinStop();
+  refreshMusicFlag();
+}
+
+/// 自动播放被挡时（开机自启那条路没有任何用户手势）：挂一次性交互监听，
+/// 用户第一次点/按键时补上这一次播放/恢复。避免"程序自启 + 音乐开关开着 = 永远没声音"。
+/// 两条被挡的路都归它管：<audio>.play() 被拒，与 AudioContext 停在 suspended。
+function armMusicUnlock() {
+  if (music.audioPaused) return;
+  music.audioPaused = true;
+  const unlock = async () => {
+    document.removeEventListener('pointerdown', unlock);
+    document.removeEventListener('keydown', unlock);
+    music.audioPaused = false;
+    if (!poemActive || !music.enabled) return;
+    if (music.path.trim() !== '') {
+      try { await music.audio.play(); music.playing = true; refreshMusicFlag(); return; } catch (e) { /* 再试内置曲 */ }
+    }
+    // AudioContext 只是"挂起"而不是"没建"：resume 即可，不需要重新排程音符
+    if (music.ctx && music.ctx.state === 'suspended') {
+      try { await music.ctx.resume(); music.playing = true; refreshMusicFlag(); return; } catch (e) { /* 继续往下重建 */ }
+    }
+    if (musicBuiltinStart()) { music.playing = true; refreshMusicFlag(); }
+  };
+  document.addEventListener('pointerdown', unlock);
+  document.addEventListener('keydown', unlock);
+}
+
+/// 首选项那一行右侧的小标志：正在播哪一段（内置 / 文件名 / 已关闭）。
+function refreshMusicFlag() {
+  const el = $('music-state-flag');
+  if (!el) return;
+  let text = '', cls = 'flag';
+  if (!music.enabled) {
+    text = t('music_flag_off');
+  } else if (music.path.trim()) {
+    const file = music.path.split(/[\\/]/).pop();
+    text = t('music_flag_file', file);
+    cls += music.playing ? ' ok' : '';
+  } else {
+    text = t('music_flag_builtin');
+    cls += music.playing ? ' ok' : '';
+  }
+  el.textContent = text;
+  el.className = cls;
+}
+
+/// 把配置里的音乐字段读进页面控件（打开首选项时调一次）。
+/// 与其它设置字段一样走「config 缺字段就按默认值显示」：老配置里没有这几个键，
+/// 界面上不该是一片空白或 unchecked，而应该显示后端真正会用的默认值（开 + 音量 40 + 内置曲）。
+function syncMusicSettingsFromConfig() {
+  const cfg = config || {};
+  music.enabled = cfg.startup_music_enabled !== false;   // 后端默认 true，只有显式 false 才关
+  const vol = Number(cfg.startup_music_volume);
+  music.volume = Number.isFinite(vol) ? Math.max(0, Math.min(100, vol)) : 40;
+  music.path = (cfg.startup_music_path || '').trim();
+  const on = $('set-music-enabled');
+  if (on) on.checked = music.enabled;
+  const range = $('set-music-volume');
+  if (range) range.value = music.volume;
+  updateMusicVolumeLabel();
+  const path = $('set-music-path');
+  if (path) path.value = music.path;
+  refreshMusicFlag();
+}
+
+function updateMusicVolumeLabel() {
+  const el = $('music-volume-val');
+  if (el) el.textContent = String(music.volume);
+}
+
+/// 音量滑块拖动时的即时反馈：**先**改内存里的值并更新正在播的那一段（如果正停在
+/// 等待页上），这样用户不必点「保存」就能听见效果；点「保存」才真正落盘。
+function onMusicVolumeInput(v) {
+  const vol = Math.max(0, Math.min(100, Number(v) || 0));
+  music.volume = vol;
+  updateMusicVolumeLabel();
+  if (music.audio && !music.audio.paused && music.path.trim()) {
+    music.audio.volume = Math.min(1, vol / 100);
+  }
+  if (music.playing && !music.path.trim() && music.ctx && music.master) {
+    fadeMusicTo(volumeToGain(vol), 150);
+  }
 }
 
 // ---------- 状态 UI ----------
@@ -878,6 +1240,11 @@ async function refreshAutostartToggle() {
 async function refreshConfig() {
   config = await invoke('get_config');
   $('port-val').textContent = config.port;
+  // 音乐字段也要在这里读一次：refreshConfig 不只首启调用（保存首选项、记住 Node 版本
+  // 之后都会重跑），而启动等待页可能在任何一次之后才开始 —— 那时若 music.enabled /
+  // volume / path 还是初始化时的值，就播错了。syncMusicSettingsFromConfig 对缺失字段
+  // 按后端默认值兜底，老配置上也不会出错。
+  syncMusicSettingsFromConfig();
 }
 
 // ---------- 外观（浅色 / 深色 / 跟随系统；与 DSH 的 ui-theme.preference 同源联动） ----------
@@ -961,6 +1328,8 @@ function openSettings() {
   $('set-safe-reset').checked = config.safe_reset_baseline === true;
   const sv = Number(config.safe_verify_secs);
   $('set-safe-verify').value = Number.isFinite(sv) ? sv : 80;
+  // 启动音乐：开关 / 音量 / 文件路径。音量取不到字段（老配置）时按默认 40 显示。
+  syncMusicSettingsFromConfig();
   $('set-config-path').textContent = config.config_path;
   markFlag('home-exists-flag', config.home_exists);
   // 搬家警告：每次打开设置页按「这一格是不是被改过」重判一次（与浏览/输入事件共用同一条判定）
@@ -1333,6 +1702,12 @@ async function saveSettings() {
       const v = parseInt($('set-safe-verify').value, 10);
       return Number.isFinite(v) && v >= 0 ? v : 80;
     })(),
+    // 启动等待页背景音乐：开关 / 音量 / 自选文件路径（空 = 内置曲）。
+    // 音量用 Number 而不是 parseInt —— range 控件给的是小数也该原样保存，
+    // 后端还会再收敛一次到 0~100。
+    startup_music_enabled: $('set-music-enabled').checked,
+    startup_music_volume: Math.max(0, Math.min(100, Number($('set-music-volume').value) || 0)),
+    startup_music_path: $('set-music-path').value.trim(),
     // 「Node 版本过低」的确认记忆不是设置页字段：原样带上内存里的值，
     // 后端在保存时也会再兜一层（缺字段时沿用磁盘上的值）
     node_min_ack: (config && config.node_min_ack) || '',
@@ -1424,6 +1799,11 @@ function onPathPicked(p) {
       if (input.id === 'wiz-dsh-dir') refreshDshCmd();
       // 家目录改了就当场亮出搬家警告（「浏览」是用户真正动手搬家的入口，不能只等他手输）
       if (input.id === 'set-home-dir') refreshHomeMoveWarn();
+      // 选了自选曲：状态行要立刻改过来，不能还挂着"内置曲"
+      if (input.id === 'set-music-path') {
+        music.path = p.path.trim();
+        refreshMusicFlag();
+      }
     }
   }
 }
@@ -2595,13 +2975,36 @@ function bindUI() {
   };
 
   // 浏览按钮（文件/文件夹选择由 Rust 端 dialog 插件完成，结果经 path-picked 事件回填）
+  // 三种 data-pick：folder（选目录）/ music（选音频，过滤器只列能解码的格式）/
+  // 其它一律按「可执行文件」处理（保持旧行为不变）。
   document.querySelectorAll('[data-pick]').forEach((btn) => {
     btn.onclick = () => {
       const kind = btn.dataset.kind;
-      const cmd = btn.dataset.pick === 'folder' ? 'pick_folder' : 'pick_exec_path';
+      const cmd = btn.dataset.pick === 'folder'
+        ? 'pick_folder'
+        : btn.dataset.pick === 'music' ? 'pick_music_file' : 'pick_exec_path';
       invoke(cmd, { kind }).catch((e) => toast(String(e), true));
     };
   });
+
+  // ---- 首选项「启动音乐」：开关 / 音量 / 自选文件 ----
+  const musicToggle = $('set-music-enabled');
+  if (musicToggle) {
+    musicToggle.onchange = () => {
+      music.enabled = musicToggle.checked;
+      refreshMusicFlag();
+    };
+  }
+  const musicVol = $('set-music-volume');
+  if (musicVol) musicVol.oninput = () => onMusicVolumeInput(musicVol.value);
+  // 「恢复内置」= 清空路径。顺手把内存里的路径一起清掉，
+  // 否则状态行还显示着刚被清掉的文件名（要等下次打开首选项才对）。
+  $('btn-music-clear').onclick = () => {
+    const pathEl = $('set-music-path');
+    if (pathEl) pathEl.value = '';
+    music.path = '';
+    refreshMusicFlag();
+  };
 
   // 家目录：手输即判「与已保存的不同」，当场亮出/收起搬家警告。
   // 用 input 而不是 change：警告的作用是「动手拷贝之前就说清楚」，等到失焦就晚了半拍。

@@ -87,6 +87,11 @@ pub fn run(launched_by_autostart: bool) {
             process::detect_npm_package,
             process::pick_exec_path,
             process::pick_folder,
+            // 首选项「自选背景音乐」：挑音频文件（过滤器只列 WebView2 能解码的格式），
+            // 以及把**已保存的那一个**文件读出来回传给前端在内存里播放
+            // （刻意不走 assetProtocol —— 它是关着的，见 pick_music_file 的注释）
+            process::pick_music_file,
+            process::read_startup_music,
             process::is_autostart_enabled,
             process::set_autostart,
             process::was_launched_by_autostart,

@@ -125,6 +125,20 @@ pub struct Config {
     /// 背景音乐音量，0~100。内置曲与自选曲共用同一档。
     /// 默认 40：足够听出氛围，又不会在办公室显得吵。
     pub startup_music_volume: u32,
+    /// Python 能力桥接的「待激活」标记：内容是安装时生成的 pending 记录
+    /// （解释器路径，见 py_bridge::pending_record）。空串 = 没有 pending。
+    ///
+    /// ⚠ 它**必须**是 Config 的字段，不能只靠 write_config_key 单键写入。
+    /// 真机教训（2026-10-11，测试机实测）：这个键最初只走单键写，结构体里没有
+    /// 对应字段，于是任何一次「load → 整体写回」—— 前端保存首选项、set_last_url
+    /// 等一切单键写 —— 都会在反序列化时把它当未知键丢弃。后果：安装时 DSH 正在
+    /// 跑 → 只留标记等重启；重启前一次 save_config 把标记抹掉；随后两次重启
+    /// activate_pending 都静默返回（当时它还没有自愈与日志），注册从未发生，
+    /// desktop.log 与 dsh.log 双双空白，AI 看不到任何 Python 工具。
+    /// 三层防线：①本字段让 load/save 往返不再丢它；②save_config 的
+    /// 「缺字段沿用磁盘值」兜底（与 node_min_ack 同款）；③activate_pending
+    /// 的自愈进门 —— 标记丢了，只要桥接代码已释放就照样补注册。
+    pub python_bridge_pending: String,
 }
 
 impl Default for Config {
@@ -171,6 +185,8 @@ impl Default for Config {
             // 空 = 用内置曲（Web Audio 现场合成）；选了文件才走自选曲
             startup_music_path: String::new(),
             startup_music_volume: 40,
+            // 空 = 没有「待激活」的 Python 桥接（见结构体字段注释）
+            python_bridge_pending: String::new(),
         }
     }
 }
@@ -1623,6 +1639,23 @@ fn read_ui_language_override(app: &AppHandle) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn python_bridge_pending_survives_load_save_roundtrip() {
+        // 真机教训（2026-10-11）：这个字段曾是 config.json 里的「孤儿键」——
+        // 结构体没有它，任何 load → 写回都把它丢弃，pending 标记装完即被抹。
+        // 这条测试守住：字段存在，且序列化/反序列化往返后原样保留。
+        let mut c = Config::default();
+        assert!(c.python_bridge_pending.is_empty());
+        c.python_bridge_pending = r"D:\Programs\Python\python.exe".to_string();
+        let text = serde_json::to_string(&c).expect("serialize Config");
+        let back: Config = serde_json::from_str(&text).expect("deserialize Config");
+        assert_eq!(
+            back.python_bridge_pending,
+            r"D:\Programs\Python\python.exe",
+            "pending 标记必须在整体写盘往返中存活"
+        );
+    }
     use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
 

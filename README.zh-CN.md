@@ -289,6 +289,7 @@ from the dsh installation or D:\DSH\Home\profiles\web
 **AI 能调到什么**（12 个工具，单进程）：`convert_file_to_markdown`、`convert_files_to_markdown`、`markitdown_capabilities`、`read_excel_data`、`create_styled_excel`、`read_docx_text`、`generate_word_report`、`read_pptx_outline`、`add_resized_image_to_pptx`、`get_python_environment_info`、`describe_python_capabilities`、`execute_python_sandbox`。
 
 - **单进程多工具。** `dsh_bridge.runtime` 只 import 一个入口模块，各工具模块在 import 期用 `@tool` 装饰器注册。共享同一个 MarkItDown 实例与同一个解释器正是要点所在 —— 另一个选择是每个库一个进程。
+- **转换在进程内完成，但绕开 numpy。** `import openpyxl` 与 `import markitdown` 都会在**顶层**顺手 `import numpy`（两处都有 `try/except ImportError` 保护，属上游支持的降级路径），而 numpy 的 C 扩展在部分 Windows 机器上**每进程首次加载**要挂约 10 分钟。所以这两条 import 都套在 `utils.numpy_hidden()` 里：期间把 `numpy`/`pandas` 置为 `sys.modules[name] = None`（官方禁导入 idiom），退出时**只解除屏蔽、绝不替用户 import**，用户先做过数据分析则完全不动它。`xlsx`/`xlsm` 另走 openpyxl 原生转换，零 pandas 依赖。
 - **只认本机文件。** 转换走 `MarkItDown().convert_local(...)`，每个路径都过一遍拒绝 `http(s)://` 的校验。一个能收 URL 的入口就是 SSRF 与远程内容注入的现成原语。
 - **长正文不过 stdio。** 超过 `max_chars` 就把全文写进文件、只回 `{path, chars, lines, preview}`；DataFrame 只回 `head(20)` 加形状与列名。几 MB 的工具结果是最快把会话撑坏的方式。
 - **沙箱边界**（`execute_python_sandbox`）：导入白名单 + 受限 builtins。`os` / `sys` / `subprocess` / `socket` / `shutil` / `ctypes` / `importlib` / `pickle` / 网络类模块一律拒绝，`eval` / `exec` / `compile` / `__import__` 与下划线属性访问同样拒绝 —— 不挡下划线属性的话，`getattr(x, "__class__")` 能摸到 `__subclasses__`，沙箱当场就没了。`pandas` / `numpy` / `scipy` / `matplotlib` / `sklearn` **在白名单里但不强制安装**：没装时报的是普通 `ModuleNotFoundError`（「装一下就行」），与「被策略拒绝」读起来完全不同。异常统一变成 `{ok: false, error}`，桥接进程必须扛过每一条。
@@ -297,7 +298,9 @@ from the dsh installation or D:\DSH\Home\profiles\web
 
 **首次安装 vs. DSH 已在运行。** `dsh plugin` 自己会初始化不存在的 profile，但它不能与 DSH 的首次启动在同一个 profile 上抢跑。所以：DSH **没在监听**时立即注册；**正在跑**时只写一个持久化的 `python_bridge_pending` 标记，由 `py_bridge::activate_pending`（挂在状态汇总报出 `running` 的那一处）在下次进入 DSH 时注册。这一步失败**绝不回滚 pip** —— 已经装好的库不该被说成「没装」，而是降级成「稍后自动激活」。
 
-**排障。** 按钮下方那行状态会报出阶段（`not-installed` / `needs-release` / `pending-activate` / `active`），**这一行没有手动部署按钮** —— 释放与注册一律由「进入 DSH 时自动激活」承担：DSH 没在跑时安装末尾就地装好，正在跑则挂标记等下次进入。注册失败会在下次进入 DSH 时自动重试，不必手动干预；细节看 `desktop.log` 里的 `[py-bridge]` 行。桥接侧的失败（缺 `dsh_bridge`、协议版本不匹配）由插件记进日志并回显在提示里。宿主与 `dsh-python-bridge` 版本不一致会报 `protocol-mismatch`（`-32006`），而不是「静默一个工具都没有」。新注册的插件需要**重启 DSH** 才会加载。
+> **真机教训（2026-10-11，测试机）**：这个标记最初只是 config.json 里的一个单键（`write_config_key` 写入），而 `Config` 结构体里**没有对应字段** —— 任何一次「load → 整体写回」（保存首选项、`set_last_url` 等一切单键写）都会在反序列化时把它当未知键丢弃。实测后果：安装时 DSH 正在跑 → 留标记等重启；重启前一次「保存首选项」把标记抹掉；随后两次重启 `activate_pending` 都**静默返回、一行日志没有**，注册从未发生，`desktop.log` 与 `dsh.log` 双双空白，AI 看不到任何 Python 工具。现有三层防线：①标记是 `Config` 的正式字段（往返不丢）；②`save_config` 对它做「缺字段沿用磁盘值」兜底（与 `node_min_ack` 同款）；③`activate_pending` 的**自愈进门** —— 标记丢了，只要桥接代码已释放、Python 在、还没注册进 profile，就照样补注册；`find_python` 失败的出口也会留一行 `[py-bridge]` 日志。
+
+**排障。** 按钮下方那行状态会报出阶段（`not-installed` / `needs-release` / `pending-activate` / `active`），**这一行没有手动部署按钮** —— 释放与注册一律由「进入 DSH 时自动激活」承担：DSH 没在跑时安装末尾就地装好，正在跑则挂标记等下次进入。注册失败会在下次进入 DSH 时自动重试，不必手动干预；细节看 `desktop.log` 里的 `[py-bridge]` 行。**如果重启 DSH 后连一行 `[py-bridge]` 都没有，说明激活链压根没跑 —— 这本身就是最重要的线索**：先查 `config.json` 里 `python_bridge_pending` 是否还在（它曾被整体保存抹掉，见上一段），再看桥接代码目录（`py-bridge\bridge_entry.py`）是否已释放（自愈进门靠它兜底）。桥接侧的失败（缺 `dsh_bridge`、协议版本不匹配）由插件记进日志并回显在提示里。宿主与 `dsh-python-bridge` 版本不一致会报 `protocol-mismatch`（`-32006`），而不是「静默一个工具都没有」。新注册的插件需要**重启 DSH** 才会加载。
 
 **「已激活」但 AI 看不到工具时，别信状态行，直接查这三个地方**（这是上面那次 link: 故障留下的排查纪律）：
 
@@ -306,8 +309,10 @@ from the dsh installation or D:\DSH\Home\profiles\web
 Test-Path "D:\DSH\Home\profiles\web\node_modules\@local\dsh-desktop-python-bridge\index.js"
 # 2. 依赖表里写的是 file:...tgz 还是 link:（link: 就是没装上）
 Select-String -Path "D:\DSH\Home\profiles\web\package.json" -Pattern "python-bridge"
-# 3. DSH 自己怎么说（can not resolve = 第 2 条没修好）
-Select-String -Path "D:\DSH\Home\logs\dsh.log" -Pattern "python-bridge|did not activate|failed to import"
+# 3. DSH 自己怎么说（cannot resolve = 第 2 条没修好；什么都没有 = 注册从未发生，看第 4 条）
+Select-String -Path "D:\DSH\Home\logs\dsh.log" -Pattern "python-bridge|failed to import|cannot resolve"
+# 4. 桌面端的激活链跑没跑 —— [py-bridge] 行只在 desktop.log，dsh.log 里永远搜不到
+Select-String -Path "$env:APPDATA\com.dsh.desktop\desktop.log" -Pattern "py-bridge" | Select-Object -Last 10
 ```
 
 > **曾经有过一颗「部署 / 重新部署」按钮，现已移除**：它做的事与自动激活完全重叠，留着只会让人误以为「装完还得再点一下」。更糟的是，状态行一旦说谎（`pending` 标记被当成了「已注册」，而实际一个工具都没注册），那颗按钮的存在会让人更不会怀疑 —— 界面上多一个可点的东西，就多一份「到底该点哪个」的心智负担。

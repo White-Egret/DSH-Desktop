@@ -1718,6 +1718,10 @@ async function saveSettings() {
     // 漏带一次，卸载就只能走保守路径（保留那一行），用户得到的就不再是「删干净」。
     npm_prefix_prev: (config && config.npm_prefix_prev) || '',
     npm_prefix_claimed: !!(config && config.npm_prefix_claimed),
+    // Python 桥接的「待激活」标记，同样不是设置页字段：原样带上内存里的值。
+    // 漏带一次，「保存首选项」就会把标记抹掉，桥接永远停在未注册 ——
+    // 后端 save_config 另有「缺字段沿用磁盘值」的兜底，这里是同一防线的前端半边。
+    python_bridge_pending: (config && config.python_bridge_pending) || '',
     // 更新命令不再有可配置参数：固定 install -g <包名>@<频道>，
     // 频道由「更新 DSH」弹窗里的 latest / next 单选决定（见 renderUpdateModal）
   };

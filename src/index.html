@@ -186,8 +186,37 @@
           <span data-i18n="lbl_autostart">开机自动启动（系统登录后静默拉起，可在托盘恢复窗口；首启先延迟 12 秒错开冷启动高峰）</span>
           <input type="checkbox" id="set-autostart" />
         </label>
-        <!-- 以下两块（npm 缓存位置 / 包源 registry）按用户要求移到「开机自动启动」下方：
-             它们都属于"外部工具（npm / pnpm）的行为配置"，与上面的程序自身设置分开。 -->
+        <!-- 「启动音乐」块：与上面的开关型设置不同，这里是**一组**
+             必须一起读写的字段（开关 / 曲目 / 音量），所以用 <div class="field"> 而不是
+             三个散落的 field-switch —— 组在一起用户才知道它们说的是同一件事。
+             自选文件走 data-pick="music"（后端 pick_music_file，过滤器只列能解码的格式）；
+             「恢复内置」= 清空路径，前端据此回落到程序用 Web Audio 现场合成的那段曲。 -->
+        <div class="field music-block">
+          <span><span data-i18n="lbl_music">启动音乐（等待 DSH 就绪、显示诗句的那段页面）</span><em id="music-state-flag" class="flag"></em></span>
+          <div class="music-actions">
+            <label class="field-switch music-switch">
+              <span data-i18n="lbl_music_on">播放背景音乐</span>
+              <input type="checkbox" id="set-music-enabled" />
+            </label>
+            <label class="field music-volume">
+              <span data-i18n="lbl_music_volume">音量</span>
+              <input type="range" id="set-music-volume" min="0" max="100" step="5" />
+              <b id="music-volume-val">40</b>
+            </label>
+          </div>
+          <label class="field">
+            <span data-i18n="lbl_music_file">自选音乐文件（留空 = 内置曲）</span>
+            <div class="row">
+              <input id="set-music-path" type="text" spellcheck="false"
+                     placeholder="留空 = 使用内置曲目" data-i18n-placeholder="ph_music_path" />
+              <button class="btn small" data-pick="music" data-kind="music" data-target="set-music-path" data-i18n="btn_browse">浏览</button>
+              <button id="btn-music-clear" class="btn small" data-i18n="btn_music_builtin">恢复内置</button>
+            </div>
+          </label>
+          <div class="hint" data-i18n="note_music">内置曲是程序用 Web Audio 现场合成的五声音阶琶音（不联网、不读任何文件）；自选曲在启动等待页循环播放，DSH 一就绪就随诗行一起淡出。支持 mp3 / wav / m4a / ogg / flac（WebView2 能解码的格式），单个文件不超过 32 MB。文件不在了或读不出来时会自动回落到内置曲，并在日志里说明原因。</div>
+        </div>
+        <!-- npm 缓存位置 / 包源 registry 两块也在「开机自动启动」下方（与上面的程序自身设置分开）：
+             它们都属于"外部工具（npm / pnpm）的行为配置"。 -->
         <!-- npm 缓存位置：写进 npm **自己**的配置文件（~/.npmrc 的 cache 一行，最小行编辑），
              所以终端里的 npm 也用它；留空 = 删除该行、回到 npm 默认位置。右侧那行小字显示
              「npm 配置里的值 / 实际生效的值」——被环境变量或项目级 .npmrc 覆盖时两者不同。 -->
@@ -273,36 +302,7 @@
             <pre id="python-log" class="update-progress-log hidden"></pre>
           </div>
         </div>
-        <!-- 首选项里的「启动音乐」块：与上面的开关型设置不同，这里是**一组**
-             必须一起读写的字段（开关 / 曲目 / 音量），所以用 <div class="field"> 而不是
-             三个散落的 field-switch —— 组在一起用户才知道它们说的是同一件事。
-             自选文件走 data-pick="music"（后端 pick_music_file，过滤器只列能解码的格式）；
-             「恢复内置」= 清空路径，前端据此回落到程序用 Web Audio 现场合成的那段曲。 -->
-        <div class="field music-block">
-          <span><span data-i18n="lbl_music">启动音乐（等待 DSH 就绪、显示诗句的那段页面）</span><em id="music-state-flag" class="flag"></em></span>
-          <div class="music-actions">
-            <label class="field-switch music-switch">
-              <span data-i18n="lbl_music_on">播放背景音乐</span>
-              <input type="checkbox" id="set-music-enabled" />
-            </label>
-            <label class="field music-volume">
-              <span data-i18n="lbl_music_volume">音量</span>
-              <input type="range" id="set-music-volume" min="0" max="100" step="5" />
-              <b id="music-volume-val">40</b>
-            </label>
-          </div>
-          <label class="field">
-            <span data-i18n="lbl_music_file">自选音乐文件（留空 = 内置曲）</span>
-            <div class="row">
-              <input id="set-music-path" type="text" spellcheck="false"
-                     placeholder="留空 = 使用内置曲目" data-i18n-placeholder="ph_music_path" />
-              <button class="btn small" data-pick="music" data-kind="music" data-target="set-music-path" data-i18n="btn_browse">浏览</button>
-              <button id="btn-music-clear" class="btn small" data-i18n="btn_music_builtin">恢复内置</button>
-            </div>
-          </label>
-          <div class="hint" data-i18n="note_music">内置曲是程序用 Web Audio 现场合成的五声音阶琶音（不联网、不读任何文件）；自选曲在启动等待页循环播放，DSH 一就绪就随诗行一起淡出。支持 mp3 / wav / m4a / ogg / flac（WebView2 能解码的格式），单个文件不超过 32 MB。文件不在了或读不出来时会自动回落到内置曲，并在日志里说明原因。</div>
-        </div>
-        <label class="field field-switch">
+                <label class="field field-switch">
           <span data-i18n="lbl_safe_reset">进入安全模式时重置基线（旧 .dsh-safe 归档为 .dsh-safe-archive-时间戳，绝不删除；重建后只写入从日常模式借用的 .credentials.yaml，保证每次进入都是原厂纯净环境）</span>
           <input type="checkbox" id="set-safe-reset" />
         </label>

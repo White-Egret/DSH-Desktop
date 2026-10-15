@@ -2356,6 +2356,14 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     if old_cfg.npm_prefix_claimed {
         config.npm_prefix_claimed = true;
     }
+    // Python 桥接的 pending 标记：同样不是设置页字段（老版本前端根本不认识它）。
+    // 缺字段时沿用磁盘上的值 —— 否则用户点一次「保存首选项」，「等重启后激活」
+    // 的标记就被抹掉，桥接永远停在未注册（真机教训见 Config::python_bridge_pending 注释）。
+    if config.python_bridge_pending.trim().is_empty()
+        && !old_cfg.python_bridge_pending.trim().is_empty()
+    {
+        config.python_bridge_pending = old_cfg.python_bridge_pending.clone();
+    }
     config::save(&app, &config)?;
     // 固定显示模式下「收起」没有意义：顺手清掉，免得前端漏同步时内容区仍按 0 偏移
     if config.toolbar_mode != "auto" {

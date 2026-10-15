@@ -443,6 +443,7 @@ pub fn t(key: &str) -> &'static str {
         "py_bridge_bundle_released" => if en { "[setup] Released the registration bundle to {0}" } else { "[setup] 已把注册用插件包释放到 {0}" },
         "py_bridge_registered" => if en { "Python capability bridge registered into profile \"{0}\". Restart DSH to load the new tools (they appear as convert_file_to_markdown and friends)." } else { "Python 能力桥接已注册进 profile「{0}」。重启 DSH 后新工具才会生效（会出现 convert_file_to_markdown 等工具）。" },
         "py_bridge_deferred" => if en { "DSH is currently running, so the bridge was not registered yet — it will be activated automatically after you restart DSH. (interpreter: {0})" } else { "DSH 正在运行，桥接暂未注册 —— 将在重启后进入 DSH 时自动激活。（解释器：{0}）" },
+        "py_bridge_activate_no_python" => if en { "Bridge code awaits activation but no Python interpreter was found (pending flag: {0})." } else { "桥接待激活，但找不到 Python 解释器（pending 标记：{0}）。" },
         "py_bridge_no_dsh" => if en { "Cannot find the dsh executable, so the bridge was NOT registered. It will be retried automatically next time DSH starts. (looked for: {0})" } else { "找不到 dsh 可执行文件，桥接**未**注册。将在下次启动 DSH 时自动重试。（找过：{0}）" },
         "py_bridge_register_fail" => if en { "Could not register the Python bridge: {0}. It will be retried the next time DSH starts (interpreter: {1})." } else { "注册 Python 能力桥接失败：{0}。将在下次启动 DSH 时自动重试（解释器：{1}）。" },
         "py_bridge_pack_fail" => if en { "Could not package the Python bridge bundle (npm pack): {0}." } else { "打包 Python 能力桥接失败（npm pack）：{0}。" },

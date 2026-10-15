@@ -13,6 +13,7 @@ import dsh_bridge
 from utils import (
     DEFAULT_MAX_CHARS,
     ToolError,
+    import_without_numpy,
     resolve_input_path,
     run_tool,
 )
@@ -46,7 +47,12 @@ from utils import (
 def read_excel_data(file_path: str, sheet_name: str | None = None, max_rows: int = 200) -> dict:
     def work():
         try:
-            from openpyxl import load_workbook
+            # 屏蔽 numpy 后 import：openpyxl 顶层 `import numpy`（带 try/except
+            # 保护，缺了只把 NUMPY 常量置假）。不挡的话，在会挂 numpy 的机器上
+            # 首次调用要白等 ~610 秒 —— 见 utils.numpy_hidden 的完整说明。
+            load_workbook = getattr(import_without_numpy("openpyxl"), "load_workbook", None)
+            if load_workbook is None:
+                raise ToolError("openpyxl 缺少 load_workbook；请重新执行「基本安装」。")
         except ImportError as exc:  # noqa: BLE001
             raise ToolError(f"openpyxl 不可用：{exc}。请重新执行「基本安装」。") from exc
 

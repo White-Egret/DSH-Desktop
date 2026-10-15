@@ -289,7 +289,18 @@ export function apply(ctx, config = {}) {
       const manifest = result?.manifest ?? {}
       manifestTools.length = 0
       for (const t of manifest.tools ?? []) {
+        // ⚠ name 必须显式带上 —— 第八轮真机教训（2026-10-13）：曾只填
+        // description/parameters，registerAll 里 name: t.name 取到 undefined。
+        // register() 对 name 只查「≠ run_code」，于是 12 个工具以 undefined 为名
+        // 「注册成功」，wireSchemas 投影出 {name: undefined, …}，而 undefined 不是
+        // 合法 JSON 值 —— session.append("request/header") 的无损检查当场抛
+        // 「carries non-JSON-serializable data」，每一轮请求都崩。
+        if (typeof t.name !== 'string' || t.name.length === 0) {
+          log('WARN', 'manifest 里有一个没有名字的工具，已跳过')
+          continue
+        }
         manifestTools.push({
+          name: t.name,
           description: t.description,
           parameters: t.parameters ?? { type: 'object', properties: {} },
         })
@@ -388,8 +399,21 @@ export function apply(ctx, config = {}) {
               : { type: 'object', properties: {} },
             output: {
               // 桥接工具返回值形状不统一（{ok, result} / {path, preview} / {ok, error}），
-              // 统一成宽松的 JSON 值输出，不做强制 schema —— 强制了必然误伤。
-              schema: { type: 'json' },
+              // 统一成宽松输出，不做强制 schema —— 强制了必然误伤。
+              //
+              // ⚠ schema 必须是 **JSON Schema 子集**（dsh-tools register() 内的
+              // assertSupportedJsonSchema：SCHEMA_TYPES = object/array/string/number/
+              // integer/boolean/null，连 type 数组都不接受）。第七轮真机教训
+              // （2026-10-13）：曾写 `type: 'json'` —— 那是 ToolSdkSchema DSL 的
+              // 类型（valueSchemaSpecToJsonSchema 那条路才认 json），不是 JSON
+              // Schema —— 于是 12 个工具在 register() 的断言处**全部**抛
+              // JsonSchemaError，被下面的 catch 吞进 cordis logger（它不落
+              // stdout/dsh.log，永远看不见），表现恰好是「插件已加载、能力段落
+              // 可见、一个工具都没有」。空 schema {} 是官方认可的「标准无约束
+              // JSON」形式（assertSupportedJsonSchema 的 doc：annotation-only
+              // schemas are accepted as the standard unconstrained-JSON form），
+              // 执行期的输出值校验对它也全通过。
+              schema: {},
               render: (_args, value) => toContentBlocks(value),
             },
             execute: async (args) => {

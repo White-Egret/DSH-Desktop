@@ -340,17 +340,34 @@ pub fn deploy_after_install(app: &AppHandle, py: &detect::PythonExe) -> Result<S
 ///
 /// 由 process.rs 在 DSH 起来之后调。返回 Some(说明) 表示「这次真的激活了」。
 pub fn activate_pending(app: &AppHandle) -> Option<String> {
-    if !config::read_config_flag(app, PENDING_KEY) {
-        return None;
-    }
-    let Some(py) = detect::find_python() else {
-        return None;
-    };
     let cfg_dir = config::config_dir(app);
     let bd = bridge_dir(&cfg_dir);
     let bun = bundle_dir(&cfg_dir);
+    let pending_flag = config::read_config_flag(app, PENDING_KEY);
+    // 自愈进门（2026-10-11 测试机教训）：pending 标记写在 config.json 的单键里，
+    // 而 Config 结构体那时还没有对应字段 —— 任何一次「load → 整体写回」
+    // （前端保存首选项、set_last_url 等单键写）都会在反序列化时把它当未知键丢弃。
+    // 实测：安装时 DSH 正在跑 → 留标记等重启；重启前一次 save_config 把标记抹掉；
+    // 于是这里静默返回、一行日志没有，两次重启注册都没发生。
+    // 进门条件因此放宽为「标记在 **或** 桥接代码已释放」：标记丢了，只要代码在
+    // 磁盘上就照样走完激活链（下面 bundle_registered 会拦住已注册的机器，
+    // 不会重复跑 pnpm）。从未安装过的机器（标记空 + 代码不存在）仍在这里
+    // 零开销返回 —— 每次启动的常态路径不产生任何日志与子进程。
+    let released = bd.join("bridge_entry.py").is_file();
+    if !pending_flag && !released {
+        return None;
+    }
+    let Some(py) = detect::find_python() else {
+        // 能走到这里说明至少有 pending 标记或已释放的代码，却找不到 Python：
+        // 异常，值得一行日志（没装过 Python 桥接的机器进不到这里，不会刷屏）。
+        logger::append_line(
+            &logger::desktop_log_path(app),
+            &i18n::fmt("py_bridge_activate_no_python", &[&pending_flag.to_string()]),
+        );
+        return None;
+    };
     // pending 存在但代码已被删（用户清过目录）：重新释放一次，别让标记永远满足不了
-    if !bd.join("bridge_entry.py").is_file() {
+    if !released {
         if let Err(e) = release_sources(&bd, &bun) {
             logger::append_line(
                 &logger::desktop_log_path(app),
@@ -358,6 +375,22 @@ pub fn activate_pending(app: &AppHandle) -> Option<String> {
             );
             return None;
         }
+    }
+    let profile = probe_profile(app).unwrap_or_else(|| {
+        logger::append_line(
+            &logger::desktop_log_path(app),
+            "[py-bridge] probe_profile failed; falling back to profile \"web\"",
+        );
+        "web".to_string()
+    });
+    // 已注册（上次激活成功，但 clear_pending 写的空串后来同样可能被抹，或标记丢失）：
+    // 只清标记，绝不重复 npm pack + pnpm —— 这条路径每次进入 DSH 都会走到，
+    // 已注册的机器必须安静、零副作用。
+    if bundle_registered(&profile) {
+        if pending_flag {
+            clear_pending(app);
+        }
+        return None;
     }
     let python_path = py.program.to_string_lossy().to_string();
     if let Err(e) = write_bundle_config(&bun, &python_path, &bd) {
@@ -367,13 +400,6 @@ pub fn activate_pending(app: &AppHandle) -> Option<String> {
         );
         return None;
     }
-    let profile = probe_profile(app).unwrap_or_else(|| {
-        logger::append_line(
-            &logger::desktop_log_path(app),
-            "[py-bridge] probe_profile failed; falling back to profile \"web\"",
-        );
-        "web".to_string()
-    });
     match register_bundle(app, &profile, &bun) {
         Ok(()) => {
             clear_pending(app);

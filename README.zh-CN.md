@@ -256,8 +256,8 @@ pnpm 安装命令示例:     npm install -g pnpm
 生成 Office 文档（`.docx` / `.pptx` / `.xlsx`）与做数据分析都要用到 Python，所以首选项在「npm 缓存位置 / 包源 registry」两块下方给了一个 **Python 环境**块：
 
 - **状态行** —— 本机有没有可用的 Python（≥ 3.10）、版本与路径，以及两组推荐包装没装。判断用 `importlib.util.find_spec` 真去 import 而不是看 `pip list`：装了但用不了的算没装；Python 2 与 Microsoft Store 那个「点了去应用商店」的 `python.exe` 执行别名都算没有。
-- **基本安装** —— 本机已有可用解释器就**跳过本体**；否则从 python.org 下载最新稳定版 CPython（版本解析自下载页，失败时回落到内置的固定版本），**先从该版本的官方发布页取 SHA-256 校验通过才执行**（拿不到哈希就不装，与 Node.js 那条路同一条纪律），然后用 `/passive InstallAllUsers=0 PrependPath=1 Include_test=0` 跑官方安装程序 —— 装给当前用户、不弹 UAC、自写 PATH、自带进度窗口，最后执行 `pip install markitdown[all] python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile typing_extensions dsh-python-bridge`。
-- **数据分析扩展包** —— 在基本包装完之后再加 `numpy pandas python-dateutil tzdata six`。
+- **基本安装** —— 本机已有可用解释器就**跳过本体**；否则从 python.org 下载最新稳定版 CPython（版本解析自下载页，失败时回落到内置的固定版本），**先从该版本的官方发布页取 SHA-256 校验通过才执行**（拿不到哈希就不装，与 Node.js 那条路同一条纪律），然后用 `/passive InstallAllUsers=0 PrependPath=1 Include_test=0` 跑官方安装程序 —— 装给当前用户、不弹 UAC、自写 PATH、自带进度窗口，最后执行 `pip install markitdown pdfminer-six pdfplumber mammoth olefile python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile dsh-python-bridge`。
+- **数据分析扩展包** —— 在基本包装完之后再加 `numpy pandas python-dateutil tzdata`。
 - **安装位置** —— 只在还没装 Python 本体时出现。留空 = Python 官方默认；填上（或点「浏览」）可装到如 `D:\Python314`。它以 `TargetDir=…` 交给官方安装程序，**装完核对落点**：安装器报成功却没把 `python.exe` 放进指定目录的，会如实报错而不是报成功。`Program Files` **连同其子目录会被当场拒绝** —— 本程序是「装给当前用户、不弹 UAC」的，那个权限本来就写不进去；与其等到下载与哈希校验全过之后才抛一句「退出码 5」，不如现在就把规则说清楚。
 
 面板里实时显示进度（下载百分比、安装程序退出、`pip` 的逐行输出），与首次运行向导共用同一把「同一时刻只跑一个」的锁，每一步都会写进 `desktop.log`。
@@ -266,7 +266,13 @@ pnpm 安装命令示例:     npm install -g pnpm
 
 基本安装清单里有两个包硬性要求 **≥ 3.10**：`markitdown`（PyPI 0.1.8，`Requires-Python >=3.10,<3.15`）与桥接运行时 `dsh-python-bridge`（`>=3.10`）。若下限还停在 3.8，「本机已有 Python 就跳过本体」会把 3.8/3.9 的机器带进一次**注定失败**的 pip 安装，而失败点落在 pip 的依赖解析里 —— 那句报错用户读不出能做什么。所以 `detect::PYTHON_MIN_VERSION` 取 `3.10.0`：老解释器一律判「没有可用的 Python」，改走「装新本体」那条路，并在日志里说明原因；这条边界的两侧由 `detect::parses_python_version_and_its_floor` 的单测钉住。
 
-`markitdown[all]` 是以**单个 argv 元素**交给 pip 的 —— 子进程不经 shell 直接 spawn，所以不需要引号，而加引号反而会让 pip 去找一个名字里带引号的包。它的 Azure、音频转写等 extras 需要凭据或外部程序（ffmpeg），这些路径**优雅降级**（返回一句能看懂的话，不崩），纯文档格式不受影响；`markitdown_capabilities` 能报出当前到底哪些转换器可用。
+**为什么是裸 `markitdown` 而不是 `markitdown[all]`**（2026-10-17 收窄依赖边界）：`[all]` 会把 18 个 extras 全带上，其中 azure-ai-*（5 个包）、pydub、speechrecognition、youtube-transcript-api 这些桥接**根本不用**（Azure 转换要凭据、音频转写要 ffmpeg、YouTube 要联网抓字幕），却让每次「基本安装」多下载几十 MB、多出 20 个包的升级面。换成裸 `markitdown` 后**必须显式补回三个包**，否则 PDF / DOCX 转换会直接坏掉：`pdfminer-six` + `pdfplumber`（PDF 后端，缺一不可）与 `mammoth`（DOCX 唯一后端）；另补 `olefile` 保持 Outlook `.msg` 能力等价。
+
+这三个在 markitdown 里是**可选导入** —— 缺了它不报错，只在真正转 PDF/DOCX 时才抛 `MissingDependencyException`。所以状态行的 `PY_BASIC_MODULES` 单独检查它们：只靠「markitdown 能 import」判断环境健康的话，缺了这三个包会显示「一切正常」而转换实际失败。
+
+同理，`typing_extensions` 已从清单移除（纯传递依赖，不装也不会缺），`six` 从扩展包移除（`markdownify` 的传递依赖，单列只会多打印一行 `Requirement already satisfied`）。
+
+`markitdown` 现在没有 extras 语法，不再有「带方括号的单个 argv 元素」这条约束。音频转写 / Azure 那类路径**优雅降级**（返回一句能看懂的话，不崩），纯文档格式不受影响；`markitdown_capabilities` 能报出当前到底哪些转换路径可用。
 
 ### Python 能力桥接（AI 真正能调用的部分）
 

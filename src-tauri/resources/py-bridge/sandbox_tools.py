@@ -39,7 +39,12 @@ ALLOWED_MODULES: frozenset[str] = frozenset(
         "struct", "zlib", "gzip", "difflib", "pprint", "types",
         # —— 办公文档（基本安装） ——
         "markitdown", "docx", "pptx", "openpyxl", "xlsxwriter", "lxml",
-        "PIL", "et_xmlfile", "typing_extensions", "xlrd", "xlwt", "odf",
+        "PIL", "et_xmlfile", "typing_extensions",
+        # 文档转换的格式后端（2026-10-17 收窄依赖边界后由基本清单显式安装，
+        # 不再由 markitdown[all] 的 extras 带入 —— 但沙箱里仍应放行它们）
+        "pdfminer", "pdfplumber", "mammoth", "olefile",
+        # 旧版 Office 格式（装了才可用；xls 在转换工具里被主动拒绝，见其说明）
+        "xlrd", "xlwt", "odf",
         # —— 数据分析（装了即用） ——
         "numpy", "pandas", "scipy", "matplotlib", "sklearn",
         "statsmodels", "seaborn", "plotly", "sympy",

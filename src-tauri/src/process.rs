@@ -3511,15 +3511,30 @@ pub async fn setup_install_pnpm(app: AppHandle) -> Result<(), String> {
 // pip 的逐行输出走 `python-log`。与首装向导**共用 setup_busy**：同一时刻只允许一个
 // 安装任务，所以向导不会和 Python 安装抢进度区，撞上时前端拿到 err_setup_busy 即可。
 
-/// 基本安装的 9 个包。**顺序与拼写必须与前端 `py_packages_html` 的文案一致**（改这里就同步改 i18n.js）。
+/// 基本安装的包。**顺序与拼写必须与前端 `py_packages_html` 的文案一致**（改这里就同步改 i18n.js）。
 ///
-/// `markitdown[all]` 是微软的「任意文档 → Markdown」库（docx / pptx / xlsx / xls / pdf /
-/// html / 音频转写 / outlook / azure-doc-intel … 各 extras 的汇总），也是桥接工具
-/// `convert_file_to_markdown` 的底座。注意 `[all]` 在 argv 里是**单个参数**：
-/// 我们不经 shell 直接把字符串丢给 CreateProcess，所以既不需要引号也不该加引号
-/// （加了 pip 会去找一个名字里带引号的包）。同理它要求 Python ≥ 3.10，见 detect.rs。
-const PY_BASIC_PKGS: [&str; 9] = [
-    "markitdown[all]",
+/// **为什么是裸 `markitdown` 而不是 `markitdown[all]`**（2026-10-17 收窄依赖边界）：
+/// `[all]` 会把 18 个 extras 全带上，其中 azure-ai-*（5 个包）、pydub、
+/// speechrecognition、youtube-transcript-api、xlrd 这些桥接**根本不用**
+/// （Azure 转换要凭据、音频转写要 ffmpeg、YouTube 要联网抓字幕），
+/// 却让每次「基本安装」多下载几十 MB、多出 20 个包的升级面。
+///
+/// 换成裸 `markitdown` 后**必须显式补回**三个它自己不再带的包 ——
+/// 否则 PDF / DOCX 转换会直接坏掉（真机实测过的失败模式）：
+///   · `pdfminer-six` + `pdfplumber` → `_pdf_converter` 缺一不可
+///   · `mammoth`                     → `_docx_converter` 的唯一后端
+/// 另外补 `olefile`（Outlook .msg 转换器用），保持与 `[all]` 时的能力等价。
+///
+/// 注意 `[all]` 在 argv 里曾是**单个参数**：我们不经 shell 直接把字符串丢给
+/// CreateProcess，所以既不需要引号也不该加引号（加了 pip 会去找一个名字里带
+/// 引号的包）。现在不再有 extras 语法，这条约束自然消失。
+/// 同理它要求 Python ≥ 3.10，见 detect.rs。
+const PY_BASIC_PKGS: [&str; 12] = [
+    "markitdown",
+    "pdfminer-six",
+    "pdfplumber",
+    "mammoth",
+    "olefile",
     "python-docx",
     "python-pptx",
     "openpyxl",
@@ -3527,8 +3542,12 @@ const PY_BASIC_PKGS: [&str; 9] = [
     "lxml",
     "Pillow",
     "et_xmlfile",
-    "typing_extensions",
 ];
+
+/// `typing_extensions` 曾经单列在基本清单里，但它是**纯传递依赖**
+/// （python-pptx / pydantic 之类会自己带），不装它也不会缺 —— 而装了它
+/// 会让「基本安装」多一条与上游版本打架的可能。2026-10-17 收窄依赖边界时移除。
+/// 保留这条注释是为了说明「它消失不是漏写」。见 PY_BASIC_MODULES 的对应调整。
 
 /// 桥接运行时：**单独一个常量、同一次 pip 装完**（不另起一条命令）。
 ///
@@ -3538,19 +3557,39 @@ const PY_BASIC_PKGS: [&str; 9] = [
 /// `pip_install_blocking` 只接受一组包，所以这里用 `basic_install_pkgs()` 拼出并集。
 const PY_BRIDGE_PKGS: [&str; 1] = ["dsh-python-bridge"];
 
-/// 数据分析扩展包（同样与前端文案同源）
-const PY_EXTRA_PKGS: [&str; 5] = ["numpy", "pandas", "python-dateutil", "tzdata", "six"];
+/// 数据分析扩展包（同样与前端文案同源）。
+///
+/// **2026-10-17 收窄依赖边界时去掉了 `six`**：它是 `markdownify` 的传递依赖
+/// （裸 `markitdown` 也照样带进来），单列它只是让 pip 多打印一行
+/// `Requirement already satisfied`，对能力没有任何增益。
+///
+/// 剩下的四个在裸 `markitdown` 下**真正归扩展包所有**：
+///   · `pandas` / `python-dateutil` / `tzdata` —— 不再由 `markitdown[all]` 带入
+///   · `numpy` —— 仍会被 `magika → onnxruntime` 带进来，但这里是「显式点名」，
+///     语义上是扩展包的一部分（且用户卸载后能靠这颗按钮补回）
+/// 这正是这颗按钮此前"完全空转"问题的解法：退回裸 markitdown 后，点它
+/// 会真的装上东西，而不是只打印 `Requirement already satisfied`。
+const PY_EXTRA_PKGS: [&str; 4] = ["numpy", "pandas", "python-dateutil", "tzdata"];
 
 /// 上面两组包对应的**导入名**（python-docx → docx、python-dateutil → dateutil、
 /// XlsxWriter → xlsxwriter、Pillow → PIL —— 与包名不是一回事）。
 /// 状态行回答的是「这些库现在 import 得了吗」，而不是「pip list 里有没有」：
 /// 在别的虚拟环境里装过、或文件损坏，都必须以真正能 import 为准。
 ///
-/// `markitdown` 走**包名同名**（`[all]` 只是 pip 的 extras 语法，导入名就是 `markitdown`）；
-/// `dsh_bridge` 同理 —— 这两个正是「基本安装」之后 AI 能不能调起工具的前提，
-/// 所以它们缺了也要在状态行上体现出来。
-const PY_BASIC_MODULES: &str = "markitdown dsh_bridge docx pptx openpyxl xlsxwriter lxml PIL et_xmlfile typing_extensions";
-const PY_EXTRA_MODULES: &str = "numpy pandas dateutil tzdata six";
+/// `markitdown` 走**包名同名**；`dsh_bridge` 同理 —— 这两个正是「基本安装」之后
+/// AI 能不能调起工具的前提，所以它们缺了也要在状态行上体现出来。
+///
+/// **PDF / DOCX 的两个后端必须在状态行里可见**（2026-10-17 收窄依赖边界时补）：
+/// 退回裸 `markitdown` 后，`pdfminer`/`pdfplumber`/`mammoth` 不再由 extras 带入，
+/// 而是由基本清单显式安装。它们是**可选导入**（缺了 markitdown 不报错，
+/// 只在真正转 PDF/DOCX 时才抛 MissingDependencyException），所以如果只靠
+/// 「markitdown 能 import」来判断环境健康，缺了这三个包会显示"一切正常"
+/// 而转换实际失败 —— 这正是状态行必须单独检查它们的原因。
+///
+/// `typing_extensions` 已从清单移除（纯传递依赖，见 PY_BASIC_PKGS 的说明），
+/// 这里同步去掉，否则状态行会永远报它缺失。
+const PY_BASIC_MODULES: &str = "markitdown dsh_bridge docx pptx openpyxl xlsxwriter lxml PIL et_xmlfile pdfminer pdfplumber mammoth olefile";
+const PY_EXTRA_MODULES: &str = "numpy pandas dateutil tzdata";
 
 /// 基本安装实际要装的那一组包（办公库 + 桥接运行时），供 pip 与文案共用。
 ///

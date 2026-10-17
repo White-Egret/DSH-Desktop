@@ -5,7 +5,7 @@
 //! ```text
 //! 点「基本安装」
 //!   └─ process.rs::python_basic_install_blocking
-//!        ├─ pip install markitdown[all] + 办公库 + dsh-python-bridge   （只依赖 Python）
+//!        ├─ pip install markitdown + pdf/pdfdocx 后端 + 办公库 + dsh-python-bridge （只依赖 Python）
 //!        └─ py_bridge::deploy_after_install
 //!             ├─ 释放 Python 侧代码 → <config>\py-bridge\
 //!             ├─ 释放 Node 侧 bundle → <config>\py-bridge-bundle\

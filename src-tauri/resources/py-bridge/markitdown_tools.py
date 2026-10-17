@@ -4,8 +4,14 @@
 
 只用 `MarkItDown().convert_local(...)`（**最窄的转换入口**）：显式走本地文件路径，
 不接受 URL —— 见 utils.resolve_input_path 的说明（SSRF / 远程内容注入）。
-`markitdown[all]` 里的 Azure / 音频转写 extras 需要额外凭据或外部程序（ffmpeg），
+音频转写 / Azure 文档智能这类能力需要额外凭据或外部程序（ffmpeg），
 这里一律**优雅降级**：缺依赖时返回一句人话，而不是让整个工具组崩掉。
+
+**依赖边界（2026-10-17 收窄）**：基本安装用裸 `markitdown`，不再用
+`markitdown[all]`。所以 PDF / DOCX / Outlook 的后端改为**由基本清单显式安装**：
+`pdfminer-six` + `pdfplumber`（PDF）、`mammoth`（DOCX）、`olefile`（.msg）。
+这些在 markitdown 里都是**可选导入** —— 缺了它不报错，只在真正转换对应格式时
+抛 `MissingDependencyException`，所以状态行（PY_BASIC_MODULES）也单独检查它们。
 
 **为什么 xlsx 不走 markitdown**（第十二轮，2026-10-14 真机定案）：
 `import markitdown` 会**无条件**拉进全部 18 个 converter（`converters/__init__.py`
@@ -14,11 +20,11 @@ C 扩展**。本机 numpy 的 `create_module`（DLL 加载）每进程首次要�
 （faulthandler 全线程栈实证：GIL 已释放、单线程、无并发、无异常），而转一个 docx
 **根本不需要 pandas/numpy** —— 实证：pandas/numpy 缺席时 docx 转换完全正常。
 
-所以这里在 import markitdown 期间把 pandas **临时藏起来**（见 _pandas_hidden）：
-`_xlsx_converter` 的 `try/except ImportError` 会干净地接住，docx/pdf/pptx/html/csv
-等全部不受影响，numpy 永不被加载；xlsx/xlsm 改由 openpyxl **原生转换**
-（见 _xlsx_to_markdown，openpyxl 本来就在基本安装清单里、也已经是 read_excel_data
-的底座）—— 能力不减，且完全绕开 pandas。
+所以这里在 import markitdown 期间把 numpy/pandas **临时藏起来**（见
+utils.numpy_hidden）：`_xlsx_converter` 与 openpyxl 的 `try/except ImportError`
+都会干净地接住，docx/pdf/pptx/html/csv 等全部不受影响，numpy 永不被加载；
+xlsx/xlsm 改由 openpyxl **原生转换**（见 _xlsx_to_markdown，openpyxl 本来就在
+基本安装清单里、也已经是 read_excel_data 的底座）—— 能力不减，且完全绕开 pandas。
 """
 
 from __future__ import annotations
@@ -47,9 +53,10 @@ from utils import (
 def _install_magika_stub() -> None:
     """在 import markitdown **之前**装好 magika 占位。
 
-    markitdown[all] 依赖 magika 做文件类型嗅探，而 magika → onnxruntime 在
-    Python 3.14（Windows 构建）的**导入期**就触发原生 access violation
-    （0xC0000005，进程级崩溃，try/except 拦不住 —— 真机实测 2026-10-11）。
+    magika 是 markitdown 的**无条件依赖**（不是 extras —— 裸 `markitdown`
+    也照样带它），而 magika → onnxruntime 在 Python 3.14（Windows 构建）的
+    **导入期**就触发原生 access violation（0xC0000005，进程级崩溃，
+    try/except 拦不住 —— 真机实测 2026-10-11）。
     唯一安全的拦截点是 sys.modules：先放一个占位模块，让 markitdown 顶层的
     `import magika` 命中缓存而根本不执行真实模块。
 

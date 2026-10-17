@@ -135,8 +135,10 @@ def generate_word_report(
         except ImportError as exc:  # noqa: BLE001
             raise ToolError(f"python-docx 不可用：{exc}。请重新执行「基本安装」。") from exc
 
-        if not isinstance(sections, (list, tuple)):
-            sections = []
+        # 归一化到**新名字**，绝不回写参数本身：`sections = []` 会让 sections
+        # 在 work() 里成为局部变量，于是第 138 行的读取直接 UnboundLocalError
+        # （真机实测 2026-10-16：这个工具从没被真正调用过，所以一直没暴露）。
+        section_list = sections if isinstance(sections, (list, tuple)) else []
         dest = resolve_input_path(output_path, must_exist=False)
         if dest.suffix.lower() != ".docx":
             dest = dest.with_suffix(".docx")
@@ -157,7 +159,7 @@ def generate_word_report(
 
         doc.add_heading(str(title), level=0)
         written = 0
-        for sec in sections:
+        for sec in section_list:
             if not isinstance(sec, dict):
                 continue
             heading = sec.get("heading")

@@ -408,6 +408,10 @@
     music_read_fail: '背景音乐读取失败，已回落到内置曲：{0}',
     music_decode_fail: '无法解码这个音频文件',
     music_autoplay_blocked: '背景音乐被系统的自动播放策略拦下，点一下窗口即可开始播放。',
+    // "播完再停"的收尾日志（离开启动页时不硬切，让当前这一遍自然放完）
+    music_finish_cycle: '启动页已结束：内置曲将奏完当前乐句后自然收尾。',
+    music_finish_track: '启动页已结束：自选曲将继续播完剩余约 {0} 秒后停止。',
+    music_finish_track_unknown: '启动页已结束：自选曲将继续播完这一遍后停止。',
   };
 
   const en = {
@@ -797,6 +801,10 @@
     music_read_fail: 'Could not read the music file; fell back to the built-in tune: {0}',
     music_decode_fail: 'this audio file could not be decoded',
     music_autoplay_blocked: 'The system autoplay policy blocked the music; click anywhere in the window to start it.',
+    // "Play to the end" wind-down log lines (no hard cut when the startup page goes away)
+    music_finish_cycle: 'Startup page ended: the built-in tune finishes the current phrase, then winds down naturally.',
+    music_finish_track: 'Startup page ended: the custom track keeps playing its remaining ~{0} s, then stops.',
+    music_finish_track_unknown: 'Startup page ended: the custom track keeps playing to the end of this pass, then stops.',
   };
 
   const L = {

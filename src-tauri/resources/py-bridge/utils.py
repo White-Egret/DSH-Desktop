@@ -199,6 +199,11 @@ _MISSING = object()
 # 会互相看到半个状态（一个刚放上 None、另一个正要 import 真模块）。
 _NUMPY_HIDE_LOCK = threading.RLock()
 
+# import_without_numpy 的专用门锁：把「查 sys.modules + 导入」整段串行化。
+# 与 _NUMPY_HIDE_LOCK 分开是刻意的 —— numpy_hidden 要支持嵌套重入，
+# 在它内部加锁会让嵌套调用死锁；而这里只保护「同一个模块只被导入一次」。
+_IMPORT_GATE = threading.RLock()
+
 
 @contextmanager
 def numpy_hidden():
@@ -248,11 +253,26 @@ def import_without_numpy(module_name: str, **import_kwargs):
 
     给 openpyxl / markitdown 这类「顶层会顺手拖 numpy」的库用。
     已经 import 过的模块直接返回（第二次调用不会重复屏蔽，也就没有开销）。
+
+    **检查与导入必须同锁**（真机并发实证，2026-10-16）：早先的写法是
+    「先查 sys.modules，再进 numpy_hidden 里 __import__」，两步之间没有互斥。
+    桥接的工具调用跑在线程池里，于是两个并发 convert 会这样撞车：
+
+        线程 A: 查 sys.modules → 没有 → 开始 import openpyxl（耗时几十 ms）
+        线程 B: 查 sys.modules → 还没有 → 也去 import
+                → 在 A 的屏蔽窗口内拿到**半初始化的模块**，
+                   `load_workbook` 属性还不存在 → 报「openpyxl 缺少 load_workbook」
+
+    实测 8 个并发里有 2 个中招。这里用 `_IMPORT_GATE` 把「查 + 导入」整段串行化；
+    不放在 numpy_hidden 里是因为那个上下文管理器要支持重入（见上面的嵌套测试），
+    在那儿加锁会让嵌套调用自己死锁。
     """
-    if module_name in sys.modules and sys.modules[module_name] is not None:
-        return sys.modules[module_name]
-    with numpy_hidden():
-        return __import__(module_name, **import_kwargs)
+    with _IMPORT_GATE:
+        existing = sys.modules.get(module_name, _MISSING)
+        if existing is not _MISSING and existing is not None:
+            return existing
+        with numpy_hidden():
+            return __import__(module_name, **import_kwargs)
 
 
 # ---------- 落盘诊断 ----------
@@ -266,11 +286,25 @@ _DIAG_T0 = time.perf_counter()
 
 
 def diag(stage: str, detail: str = "") -> None:
-    """把关键阶段写进 `<桥接目录>\\bridge-diag.log`（带时间戳与进程累计耗时）。"""
+    """把关键阶段写进 `<桥接目录>\\bridge-diag.log`（带时间戳与进程累计耗时）。
+
+    **两个时钟不能混用**（真机日志实证，2026-10-15）：墙钟那半必须整段取自
+    `time.time()`，累计耗时那半才用 `time.perf_counter()`。早先的写法是
+    「秒取自 `strftime`（墙钟）+ 毫秒取自 `perf_counter() % 1`（开机以来的
+    秒数）」—— 两个不同源的数字拼一起，毫秒位就是乱的，日志里会出现
+    墙钟倒流：
+
+        [18:32:10.866 + 120.63s] markitdown.import.done
+        [18:32:10.146 + 120.91s] convert.markitdown.done   ← 反而更早
+
+    累计列（`+120.63s → +120.91s`）当时是对的，所以排障没被带偏；但墙钟
+    误导人。现在两者各自同源。
+    """
     try:
-        now = time.perf_counter()
-        ts = time.strftime("%H:%M:%S") + f".{int(now % 1 * 1000):03d}"
-        line = f"[{ts} +{now - _DIAG_T0:8.2f}s] {stage}" + (f" | {detail}" if detail else "")
+        wall = time.time()
+        elapsed = time.perf_counter() - _DIAG_T0
+        ts = time.strftime("%H:%M:%S", time.localtime(wall)) + f".{int(wall % 1 * 1000):03d}"
+        line = f"[{ts} +{elapsed:8.2f}s] {stage}" + (f" | {detail}" if detail else "")
         with (bridge_home() / "bridge-diag.log").open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     except OSError:

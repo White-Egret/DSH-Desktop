@@ -108,7 +108,7 @@ pub struct Config {
     /// 启动等待页（诗句那页）是否播放背景音乐。
     ///
     /// 默认 true：这一页平均要停留几十秒，安静得有点长；音量单独走
-    /// `startup_music_volume`（默认偏低的 40），不想要的用户在首选项一键关掉即可。
+    /// `startup_music_volume`（默认 60，中等偏明显的存在感），不想要的用户在首选项一键关掉即可。
     ///
     /// 与界面语言无关：内置曲是程序合成的（不依赖任何资源文件与网络），
     /// 自选曲由用户自己指定，两条路径都由 main.js 统一控制起停。
@@ -123,7 +123,8 @@ pub struct Config {
     /// **读那一个已保存的文件**再回传给前端（见该命令的注释）。
     pub startup_music_path: String,
     /// 背景音乐音量，0~100。内置曲与自选曲共用同一档。
-    /// 默认 40：足够听出氛围，又不会在办公室显得吵。
+    /// 默认 60：内置曲实测峰值约 -12 dBFS，能明确听出氛围又不至于吵；
+    /// 觉得响的用户拖低即可，曲子本身不削波。
     pub startup_music_volume: u32,
     /// Python 能力桥接的「待激活」标记：内容是安装时生成的 pending 记录
     /// （解释器路径，见 py_bridge::pending_record）。空串 = 没有 pending。
@@ -180,11 +181,11 @@ impl Default for Config {
             npm_prefix_prev: String::new(),
             // false = 没写过（旧版本装好的机器就是这两个默认值 → 卸载时不动那一行）
             npm_prefix_claimed: false,
-            // 启动等待页默认有背景音乐（音量 40，偏保守）；想安静的用户在首选项关掉
+            // 启动等待页默认有背景音乐（音量 60，能明确听见）；想安静的用户在首选项关掉
             startup_music_enabled: true,
             // 空 = 用内置曲（Web Audio 现场合成）；选了文件才走自选曲
             startup_music_path: String::new(),
-            startup_music_volume: 40,
+            startup_music_volume: 60,
             // 空 = 没有「待激活」的 Python 桥接（见结构体字段注释）
             python_bridge_pending: String::new(),
         }
@@ -2334,16 +2335,16 @@ mod tests {
     }
 
     /// 升级即生效的前提：老配置里没有这三个键时，serde(default) 必须给出
-    /// 「开着 + 内置曲 + 音量 40」这套默认值，而不是 false/空/0 ——
+    /// 「开着 + 内置曲 + 音量 60」这套默认值，而不是 false/空/0 ——
     /// 尤其**不能**是 false：老用户升级后本该立刻听到内置曲（这是本次改动的意图）。
     #[test]
-    fn startup_music_defaults_to_enabled_builtin_at_moderate_volume() {
+    fn startup_music_defaults_to_enabled_builtin_at_default_volume() {
         let d = Config::default();
-        assert!(d.startup_music_enabled, "默认应当是开启（音量本来就调得低）");
+        assert!(d.startup_music_enabled, "默认应当是开启");
         assert!(
             d.startup_music_path.is_empty(),
             "默认应当用内置曲（不预置任何音频资源文件）"
         );
-        assert_eq!(d.startup_music_volume, 40);
+        assert_eq!(d.startup_music_volume, 60);
     }
 }

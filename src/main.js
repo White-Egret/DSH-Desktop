@@ -290,7 +290,7 @@ function scheduleNextPoemLine() {
 }
 
 function startPoem() {
-  stopPoem();
+  stopPoem();                 // 硬停上一轮（含正在收尾的音乐）：新一轮启动要从安静处重新起
   const lines = getPoemLines();
   if (!lines.length) return;
   poemActive = true;
@@ -298,10 +298,10 @@ function startPoem() {
   $('poem-panel').classList.remove('hidden');
   showPoemLine();
   scheduleNextPoemLine();
-  startMusic(); // 与诗行同起：等待页有声音，DSH 一就绪就一起淡出
+  startMusic(); // 与诗行同起；就绪后的收尾走 stopPoem(true)，不在这里停
 }
 
-function stopPoem() {
+function stopPoem(graceful = false) {
   poemActive = false;
   clearTimeout(poemTimer);
   poemTimer = null;
@@ -309,13 +309,18 @@ function stopPoem() {
   $('poem-panel').classList.add('hidden');
   $('poem-line').textContent = '';
   $('poem-source').innerHTML = '';
-  stopMusic(); // 离开启动页（就绪 / 出错 / 端口占用）一律淡出
+  // graceful=true：离开启动页（就绪 / 出错 / 端口占用）时音乐"播完再停"；
+  // graceful=false：立即停 —— startPoem 开头那次属于这种（新一轮不能叠旧声音）
+  stopMusic(graceful);
 }
 
 // ---- 启动等待页背景音乐 ----
 //
-// 与诗句**同生命周期**：startPoem 起、stopPoem 停。两者都做了淡入淡出 ——
-// 硬切会「咔」一下，诗还在屏幕上音乐就没了，很出戏。
+// 与诗行**同进退**：startPoem 起；离开启动页时**不硬切** —— 自选曲把 loop 关掉、
+// 播完这一遍才停，内置曲奏完当前乐句后自然收尾。曲子 1 分钟还是 5 分钟、
+// 启动 10 秒还是 100 秒都一样：就绪那一刻余下多长就播多长（见 beginMusicFinish）。
+// 两条路径都有淡入；"播完"的收尾靠音符/曲目自己的自然结束，不额外叠加淡出 ——
+// 淡出会把最后一个音的尾巴削掉，那就不是"播完"了。
 //
 // 两种音源，同一音量旋钮：
 //   ① 内置曲（未选文件）：Web Audio 现场合成的一段五声音阶琶音。不带任何资源文件、
@@ -326,7 +331,7 @@ function stopPoem() {
 
 const music = {
   enabled: false,      // 来自配置的开关
-  volume: 40,          // 0~100
+  volume: 60,          // 0~100（与后端 Default 一致；启动时会被 syncMusicSettingsFromConfig 覆盖）
   path: '',            // 自选文件路径；空 = 内置曲
   // ---- 内置曲（Web Audio）状态 ----
   ctx: null,           // AudioContext（首次真正要出声时才创建）
@@ -335,6 +340,10 @@ const music = {
   nextTime: 0,         // 下一个音符的起始时间（AudioContext 时间轴）
   step: 0,             // 步进计数，用来按固定节奏选音
   playing: false,
+  // ---- 收尾（"播完再停"）状态：beginMusicFinish 置位，hardStop/自然结束清位 ----
+  finishing: false,    // 正在播完当前这一遍/乐句；期间不排界外新音符、不再接受第二次收尾
+  finishAt: 0,         // 内置曲：当前循环的边界时刻（AudioContext 时间轴）
+  finishTimer: null,   // 内置曲：边界后等尾音落定的定时器（硬停必须清掉，否则会杀死新一轮音乐）
   // ---- 自选曲状态 ----
   audio: $('startup-music-audio'), // <audio> 在页面里静止不动，取一次就够
   blobUrl: null,       // 当前这份曲的 blob: URL，换曲时 revoke；页面卸载时也 revoke
@@ -350,6 +359,11 @@ const music = {
 window.addEventListener('pagehide', () => {
   if (music.blobUrl) URL.revokeObjectURL(music.blobUrl);
 });
+
+// 自选曲"播完这一遍"的收尾钩子：beginMusicFinish 关掉 loop 之后，'ended' 才会在
+// 曲目自然结束时出现（正常循环播放期间它永远不触发）。常驻监听 + finishing 守卫，
+// 守卫保证即使出现意外触发也不会把正在播的音乐误清场。
+if (music.audio) music.audio.addEventListener('ended', onMusicTrackEnded);
 
 // 内置曲的音符表：C 大调五声音阶（宫商角徵羽），两个八度。
 // 选它是因为**任何两个相邻的音都不会显得刺耳** —— 琶音落在这套音上，怎么走都不难听，
@@ -385,10 +399,11 @@ const MUSIC_BEAT = 0.46;   // 每拍秒数（≈ 65 BPM，比心跳慢一档，�
 const MUSIC_LOOKAHEAD = 0.8;
 // 单个音符的峰值增益。这个数不是随手填的：音表 / 节奏 / 包络固定之后，把整段
 // 离线渲染出来**实测峰值**，再反推该定多少（下面是实测值，不是估算）：
-//   音符增益 0.09 时，默认音量（40）下峰值 -39.8 dBFS —— 实测听不见；
-//   提到 0.28 后，同样的音量 40 → 峰值 -15.6 dBFS，音量拉满（100）→ -7.7 dBFS。
-// 对一首稀疏的琶音来说 -15.6 dBFS 是"安静垫底"的合适响度，而拉满也只是明显可闻、
-// 不会吵到压过别的提示音。同刻最多叠 2~3 个音，离 0 dBFS 还差得远，削不了波。
+//   音符增益 0.09 时，音量 40 下峰值 -39.8 dBFS —— 实测听不见；
+//   提到 0.28 后，音量 40 → 峰值 -15.6 dBFS，60（现行默认）→ -12.1 dBFS，
+//   拉满（100）→ -7.7 dBFS。
+// 对一首稀疏的琶音来说默认档 -12 dBFS 是"明确可闻的垫底"，拉满也不吵、
+// 离 0 dBFS 还差得远，削不了波。
 const MUSIC_NOTE_GAIN = 0.28;
 const MUSIC_BASS_GAIN = 0.22;   // 低八度长音：比主音再轻一档，只当"垫底"而不是抢戏
 
@@ -399,7 +414,23 @@ function musicTick() {
   // 循环被拖到很后面（机器卡了一秒、系统休眠唤醒）时重新对齐，
   // 否则接下来几千个音符会挤在一起齐奏
   if (m.nextTime < now) m.nextTime = now + 0.05;
+  // 收尾模式：排程推进到当前循环的边界就停手。边界之前的音符照常排（它们属于
+  // "正在播完的这一句"），边界之后一个都不排 —— 已排的音符按自己的衰减包络
+  // 自然落定，不做额外淡出（fade 会把最后一个音的尾巴削掉，那就不是"播完"了）。
+  if (m.finishing && m.nextTime >= m.finishAt) {
+    if (m.timer) { clearInterval(m.timer); m.timer = null; }
+    // 最后一个音的衰减尾约 2 秒（音符包络最长 BEAT*4 ≈ 1.9s）；落定后关上下文。
+    // finishTimer 只挂一次：stopPoem(graceful) 可能被 stopping → idle 连续触发。
+    if (!m.finishTimer) {
+      m.finishTimer = setTimeout(() => { m.finishTimer = null; musicBuiltinStop(); }, 2200);
+    }
+    return;
+  }
   while (m.nextTime < now + MUSIC_LOOKAHEAD) {
+    // 循环体内**必须**再查一次边界：预检查只拦"nextTime 已到边界"的情况，
+    // 而一次 tick 的排程窗口有 0.8 秒 —— 边界落在窗口内时，不查就会把
+    // finishAt 之后的音符（下一循环的开头）也排进去，最多多漏约 2 拍。
+    if (m.finishing && m.nextTime >= m.finishAt) break;
     const idx = MUSIC_PATTERN[m.step % MUSIC_PATTERN.length];
     const freq = MUSIC_SCALE[idx];
     // 每 8 拍叠一个低八度的长音，给段落一个落点（像是"换气"）
@@ -415,6 +446,10 @@ function musicTick() {
 function musicBuiltinStart() {
   const AC = window.AudioContext || window.webkitAudioContext;
   if (!AC) return false;                 // 没有 Web Audio（不该发生）：返回 false 让调用方回落
+  // 上一轮可能正处收尾（finishTimer 在等尾音落定）：新一轮开始就是硬停语义，
+  // 必须把那个定时器拆掉 —— 否则它到点会 musicBuiltinStop，把刚起的新音乐掐死。
+  if (music.finishTimer) { clearTimeout(music.finishTimer); music.finishTimer = null; }
+  music.finishing = false;
   if (!music.ctx) {
     music.ctx = new AC();
     music.master = music.ctx.createGain();
@@ -447,8 +482,11 @@ function musicBuiltinStart() {
 
 function musicBuiltinStop() {
   music.playing = false;
+  music.finishing = false;   // 终态：无论硬停还是"播完落定"，收尾状态都到此为止
+  music.finishAt = 0;
   if (music.timer) clearInterval(music.timer);
   music.timer = null;
+  if (music.finishTimer) { clearTimeout(music.finishTimer); music.finishTimer = null; }
   if (music.ctx && music.master) {
     fadeMusicTo(0, 500);
     // 淡出结束后把上下文关掉：留着一个 AudioContext 在后台占着 WebAudio 线程，
@@ -577,17 +615,84 @@ async function startMusic() {
   }
 }
 
-function stopMusic() {
+/// 停止启动音乐。
+/// graceful=true 是"播完再停"：不硬切，让当前这一遍放完（自选曲到文件末尾、
+/// 内置曲到乐句边界）—— 用于"DSH 已就绪、页面切走"，曲子余下 30 秒还是 4 分钟
+/// 都照播；graceful=false 是立即停（启动页重新开始、程序清理等场景）。
+function stopMusic(graceful = false) {
+  if (graceful && (music.playing || music.audioPaused)) {
+    beginMusicFinish();
+    return;
+  }
+  hardStopMusic();
+}
+
+/// 立即停：代数作废在飞的启动、拆收尾定时器、暂停自选曲、内置曲淡出并关上下文。
+/// 所有"不能再响"的路径都走这里。
+function hardStopMusic() {
   // 让**正在飞行**的那次 startMusic 作废：DSH 可能在自选曲还在读的时候就绪了，
   // 那条 await 链醒来后会去把音乐放出来 —— 而这时页面已经切走，音乐就永远停不下了。
   // 靠代数（generation）判定而不是布尔量：连续 stop→start 时布尔量分不清先后。
   music.generation = (music.generation || 0) + 1;
   music.audioPaused = false;
+  music.finishing = false;
+  music.finishAt = 0;
+  // 收尾定时器必须拆：它到点会调 musicBuiltinStop，若新一轮音乐已起，
+  // 这一下会把刚起的声音掐死（见 musicBuiltinStart 里同款防御）
+  if (music.finishTimer) { clearTimeout(music.finishTimer); music.finishTimer = null; }
   if (music.audio) {
+    music.audio.loop = true;   // 收尾模式曾关掉循环：恢复原状，下次启动照旧循环
     try { music.audio.pause(); } catch (e) { /* 还没 src，忽略 */ }
   }
   music.playing = false;
   musicBuiltinStop();
+  refreshMusicFlag();
+}
+
+/// 温和收尾：让"当前这一遍"播完再停。
+///   自选曲 → 关掉 loop，余下时长完全由曲目决定（30 秒或 4 分钟都可能），
+///            播到文件末尾由 'ended' 事件清理；
+///   内置曲 → 排程器推进到当前 16 拍循环的边界就停排，尾音按自己的包络自然衰减。
+/// 幂等：stopping → idle 连续两个状态事件都会走到这里，第二次直接返回。
+function beginMusicFinish() {
+  const m = music;
+  if (m.finishing) return;
+  // 自选曲正在响：关循环即可，剩下的交给 'ended'
+  if (m.path.trim() !== '' && m.audio && !m.audio.paused && !m.audio.ended) {
+    m.finishing = true;
+    m.audio.loop = false;
+    const remain = Number.isFinite(m.audio.duration)
+      ? Math.round(m.audio.duration - m.audio.currentTime)
+      : NaN;
+    appendLog('launcher', '[launcher] ' + (Number.isFinite(remain) && remain > 0
+      ? t('music_finish_track', remain)
+      : t('music_finish_track_unknown')));
+    refreshMusicFlag();
+    return;
+  }
+  // 内置曲正在响（上下文真的在出声才算"有东西可播完"）：奏完当前循环
+  if (m.ctx && m.master && m.ctx.state === 'running') {
+    m.finishing = true;
+    // m.step 是"下一拍"的序号，r = step % 16 是它在循环内的位置：
+    //   r === 0 → 已排程的音符恰好凑满一个完整循环，nextTime 就是边界；
+    //   r >   0 → 边界还要往后数 (16-r) 拍
+    const r = m.step % MUSIC_PATTERN.length;
+    m.finishAt = m.nextTime + (((MUSIC_PATTERN.length - r) % MUSIC_PATTERN.length) * MUSIC_BEAT);
+    appendLog('launcher', '[launcher] ' + t('music_finish_cycle'));
+    refreshMusicFlag();
+    return;
+  }
+  // 没有真正出声（被自动播放策略挡住 / 已经停了）：没什么可"播完"的，直接停
+  hardStopMusic();
+}
+
+/// 自选曲这一遍播完了（收尾模式关掉 loop 后，'ended' 只会在这种时刻出现）：
+/// 清状态、恢复循环标记。blob URL 留着（下次启动换曲时才 revoke）。
+function onMusicTrackEnded() {
+  if (!music.finishing) return;   // 循环播放中不会触发；真触发了也不该在这里清场
+  music.finishing = false;
+  music.playing = false;
+  if (music.audio) music.audio.loop = true;
   refreshMusicFlag();
 }
 
@@ -636,12 +741,12 @@ function refreshMusicFlag() {
 
 /// 把配置里的音乐字段读进页面控件（打开首选项时调一次）。
 /// 与其它设置字段一样走「config 缺字段就按默认值显示」：老配置里没有这几个键，
-/// 界面上不该是一片空白或 unchecked，而应该显示后端真正会用的默认值（开 + 音量 40 + 内置曲）。
+/// 界面上不该是一片空白或 unchecked，而应该显示后端真正会用的默认值（开 + 音量 60 + 内置曲）。
 function syncMusicSettingsFromConfig() {
   const cfg = config || {};
   music.enabled = cfg.startup_music_enabled !== false;   // 后端默认 true，只有显式 false 才关
   const vol = Number(cfg.startup_music_volume);
-  music.volume = Number.isFinite(vol) ? Math.max(0, Math.min(100, vol)) : 40;
+  music.volume = Number.isFinite(vol) ? Math.max(0, Math.min(100, vol)) : 60;
   music.path = (cfg.startup_music_path || '').trim();
   const on = $('set-music-enabled');
   if (on) on.checked = music.enabled;
@@ -779,7 +884,7 @@ function onStatus(p) {
 
   if (p.status !== 'starting') {
     stopWaitTimer();
-    stopPoem(); // 离开启动页即隐藏诗行（含“DSH 已就绪，页面即将显示”）
+    stopPoem(true); // 离开启动页即隐藏诗行；音乐走"播完再停"，不把旋律拦腰斩断
   }
 
   // DSH 服务启动/重启完成（进入运行态）时，自动刷新右上角的版本显示
@@ -1328,7 +1433,7 @@ function openSettings() {
   $('set-safe-reset').checked = config.safe_reset_baseline === true;
   const sv = Number(config.safe_verify_secs);
   $('set-safe-verify').value = Number.isFinite(sv) ? sv : 80;
-  // 启动音乐：开关 / 音量 / 文件路径。音量取不到字段（老配置）时按默认 40 显示。
+  // 启动音乐：开关 / 音量 / 文件路径。音量取不到字段（老配置）时按默认 60 显示。
   syncMusicSettingsFromConfig();
   $('set-config-path').textContent = config.config_path;
   markFlag('home-exists-flag', config.home_exists);

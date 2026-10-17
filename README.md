@@ -243,7 +243,7 @@ Open **⚙ 首选项 (Preferences)** from the toolbar. The paths of the two prog
 | Python environment | off by default | a status line plus **基本安装 / 额外安装** buttons, and a capability-bridge row that exposes the installed libraries as AI tools — see [Python environment](#python-environment) |
 | Interface language | `zh` (中文) | `zh` / `en`; switches the whole launcher and syncs DSH's `settings.yaml` — see [Language](#language) |
 | Appearance | `system` (follow system) | `light` / `dark` / `system`; switches the launcher and syncs DSH's `ui-theme.preference` — see [Appearance](#appearance) |
-| Startup music | on, volume 40, built-in tune | Switch / volume / custom file as one group — see [Background music on the startup page](#background-music-on-the-startup-poem-page) |
+| Startup music | on, volume 60, built-in tune | Switch / volume / custom file as one group — see [Background music on the startup page](#background-music-on-the-startup-poem-page) |
 
 > There is deliberately **no "update args" setting any more**: the update command is always `npm install -g <package name>@<channel>` (plus a `--prefix` derived from where `dsh.cmd` actually lives, when DSH is installed outside npm's default directory — see *Choosing where DSH gets installed*), and the channel (`latest` / `next`) is chosen in the **⤓ 更新 DSH** dialog itself — see [Update DSH](#update-dsh). Extra npm knobs (registry, proxy) belong in the **user-level** `~/.npmrc` — global effect, no extra file inside the DSH directory tree (this is how this machine is configured); an `.npmrc` next to the DSH home dir works too (that is where npm reads `./.npmrc`) but adds a file there. Note that **pnpm does not read `~/.npmrc`**: its own global source lives in the `auth.ini` written by `pnpm config set registry`, which is exactly what the Preferences *Package sources (registry)* button manages.
 
@@ -448,7 +448,7 @@ Same three-way semantics as DSH's own "General settings → Appearance", with th
 
 The waiting page that shows poem lines while DSH starts stays up for tens of seconds (minutes on a cold boot), so it can carry background music. Three settings live together in **⚙ Preferences → Startup music**, stored as `startup_music_enabled` / `startup_music_volume` / `startup_music_path` in `config.json`:
 
-- **Switch** (on by default) and **volume** (40 by default): dragging the volume changes what is *currently playing* immediately — you don't have to press Save first; saving just persists it.
+- **Switch** (on by default) and **volume** (60 by default): dragging the volume changes what is *currently playing* immediately — you don't have to press Save first; saving just persists it.
 - **Custom music file** (empty = built-in tune): pick an mp3 / wav / m4a / ogg / flac (≤ 32 MB) and it loops on the waiting page; "Use built-in" clears the field and switches back.
 
 | | Built-in tune (default) | Custom file |
@@ -457,7 +457,7 @@ The waiting page that shows poem lines while DSH starts stays up for tens of sec
 | Needs | Nothing — no audio asset is shipped, no network, no system codecs | One of the five containers WebView2 can decode |
 | Stops working | Never | File deleted/moved, over 32 MB, unreadable disk |
 
-Music shares the poem's lifetime: it fades in when the waiting page appears, and fades out with the poem as soon as DSH is ready (also on errors and port conflicts).
+Music joins the poem but **never gets cut off mid-phrase**: it fades in on the waiting page, and when DSH becomes ready (or the page goes away on errors / port conflicts) it **finishes the current pass before stopping** — the custom track drops its loop and plays to the end of the file (the remainder may be 30 seconds or 4 minutes, whatever the track has left), and the built-in tune completes the current phrase and decays naturally. Track length and startup speed don't change this. To silence immediately, drag the volume to 0 in Preferences (takes effect live), or click Start again — a new startup hard-stops the previous round first.
 
 **Nothing fails silently**: an unreadable custom file falls back to the built-in tune and says why in the log; if the system's autoplay policy blocks it (the autostart path has no user gesture at all) the app tells you and starts on your next click.
 

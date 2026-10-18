@@ -24,6 +24,8 @@
 // `node:` 前缀的内置模块仍然可用（那不是 npm 依赖）。
 
 import { spawn } from 'node:child_process'
+import { existsSync, statSync } from 'node:fs'
+import path from 'node:path'
 
 // 握手用的客户端版本。**major 必须与 Python 侧 dsh_bridge.__version__ 的 major 相同**，
 // 否则 runtime 会以 protocol-mismatch 拒绝（-32006）。这里刻意不硬读版本号：
@@ -71,14 +73,29 @@ class BridgeConnection {
       const text = String(chunk).trim()
       if (text) this.#onLog('WARN', `[py-bridge stderr] ${text}`)
     })
+    // ⚠ `error` 必须监听（真机教训 2026-10-18）：`spawn` 在可执行文件不存在时
+    // （ENOENT，例如用户换了 Python 解释器、或 profile 里的 pythonPath 指向已删除
+    // 的目录）不会 throw，而是**异步 emit 'error'**。Node 的规矩是：'error' 事件
+    // 若没有监听者，就被当成**未捕获异常**，直接杀掉整个宿主进程 ——
+    // `failOnStartupError: false` 兜不住这一层（它管的是插件 apply 抛错）。
+    // 实测症状：DSH 启动即 `fatal uncaught exception: Error: spawn … ENOENT`，
+    // 退出码 1，连 Web 界面都起不来。桥接挂了绝不该拖垮 DSH。
+    child.on('error', (err) => {
+      this.#settleAll(err)
+      this.#onExit(null, null, err)
+    })
     child.on('exit', (code, signal) => {
       // 进程没了，所有在途请求都不可能再有响应 —— 立刻 reject，
       // 否则调用方会一直等到 CALL_TIMEOUT_MS（10 分钟）才看到超时。
-      const err = new Error(`Python 桥接进程已退出（code=${code} signal=${signal}）`)
-      for (const { reject } of this.#pending.values()) reject(err)
-      this.#pending.clear()
+      this.#settleAll(new Error(`Python 桥接进程已退出（code=${code} signal=${signal}）`))
       this.#onExit(code, signal)
     })
+  }
+
+  /** 把在途请求全部 reject 掉（进程死了 / spawn 失败时调用）。 */
+  #settleAll(err) {
+    for (const { reject } of this.#pending.values()) reject(err)
+    this.#pending.clear()
   }
 
   #onData(chunk) {
@@ -178,9 +195,50 @@ function describeStartupFailure(err, pythonPath, cwd) {
   return raw
 }
 
+/**
+ * 选一个**真实存在**的工作目录给 spawn 用。
+ *
+ * 为什么必须有这一层：`spawn(cmd, args, { cwd })` 里 cwd 不存在时，Node 抛的是
+ * `Error: spawn <cmd> ENOENT` —— 报错指向可执行文件，而真正的毛病在 cwd。
+ * 真机踩过一次（2026-10-18）：用户切换 DSH home 后，配置里留着旧的绝对路径，
+ * 表现成「Python 被删了」，实际 Python 完好。桥接是可选功能，**绝不能因为
+ * 一个失效的工作目录就让整个 DSH 起不来**。
+ *
+ * 回退顺序：配置值 → bridgeDir → 用户主目录 → 当前进程 cwd。
+ * 全都不可用时返回 undefined（= 交给 Node 用默认 cwd），而不是传一个坏路径。
+ */
+function pickUsableCwd(...candidates) {
+  // 最后一个参数可能是 ctx（用于记日志），把它挑出来
+  let logger = null
+  const tail = candidates[candidates.length - 1]
+  if (tail && typeof tail === 'object' && typeof tail.logger !== 'undefined') {
+    logger = tail.logger
+    candidates = candidates.slice(0, -1)
+  }
+  const fallbacks = [process.env.USERPROFILE, process.env.HOME, process.cwd()].filter(Boolean)
+
+  const tried = []
+  for (const c of [...candidates, ...fallbacks]) {
+    const v = typeof c === 'string' ? c.trim() : ''
+    if (!v) continue
+    tried.push(v)
+    try {
+      if (existsSync(v) && statSync(v).isDirectory()) {
+        if (tried.length > 1) {
+          logger?.warn?.(`[py-bridge] 工作目录不可用，改用 ${v}（原值：${tried[0]}）`)
+        }
+        return v
+      }
+    } catch {
+      // 权限问题等：当作不可用，继续试下一个
+    }
+  }
+  logger?.warn?.(`[py-bridge] 找不到可用的工作目录（试过：${tried.join(' | ')}），交给 Node 默认值`)
+  return undefined
+}
+
 /** 把 Python 工具的返回值包装成 DSH 需要的 ContentBlock。 */
-function toContentBlocks(value) {
-  if (typeof value === 'string') return [{ type: 'text', text: value }]
+function toContentBlocks(value) {  if (typeof value === 'string') return [{ type: 'text', text: value }]
   try {
     return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
   } catch {
@@ -201,13 +259,50 @@ export function apply(ctx, config = {}) {
   const pythonPath = (config.pythonPath ?? '').trim()
   const entryModule = (config.entryModule ?? 'bridge_entry').trim() || 'bridge_entry'
   const bridgeDir = (config.bridgeDir ?? '').trim()
-  const cwd = (config.cwd ?? '').trim() || bridgeDir
+  const cwdRaw = (config.cwd ?? '').trim() || bridgeDir
 
   // 没装桥接就安静地什么都不做：DSH 必须照常可用（插件不是 DSH 的启动依赖）
   if (!pythonPath || !bridgeDir) {
     ctx.logger?.info?.('[py-bridge] 未配置 pythonPath/bridgeDir，跳过注册（请先执行「基本安装」）')
     return () => {}
   }
+
+  /**
+   * 桥接代码本身是否还在。
+   *
+   * 真机故障（2026-10-18）：用户机器上 `%APPDATA%\com.dsh.desktop\py-bridge\`
+   * 整个目录被删了（很可能是卸载旧版或手工清理），但 profile 里的插件还在、
+   * cordis.patch.yml 里还写着那个路径。后果有两层：
+   *   ① `cwd` 指向不存在的目录 → `spawn` 报 **ENOENT**（且报的是 exe 路径，
+   *      看起来像「Python 被删了」，实测 Python 完好）；
+   *   ② 即使 cwd 回退成功、进程起来了，Python 侧也会
+   *      `No module named dsh_bridge.runtime` —— 代码文件根本不在。
+   *
+   * 所以这里**先看文件在不在**，比 spawn 失败后再猜要准确得多。
+   * 缺了只记一句能行动的日志，然后安静退出（DSH 照常可用）。
+   */
+  const ENTRY_FILE = 'bridge_entry.py'
+  const entryPath = path.join(bridgeDir, ENTRY_FILE)
+  if (!existsSync(entryPath)) {
+    ctx.logger?.warn?.(
+      `[py-bridge] 桥接代码缺失：${entryPath} 不存在（目录可能被清理过）。` +
+        `工具暂不可用，但 DSH 照常工作 —— 请在首选项「Python 环境」里重新执行「基本安装」以恢复。`,
+    )
+    return () => {}
+  }
+
+  /**
+   * 工作目录：**必须是真实存在的目录**。
+   *
+   * 真机教训（2026-10-18）：`spawn` 的 ENOENT 不只表示「可执行文件不存在」——
+   * 当 `cwd` 选项指向一个**已删除的目录**时，Node 报的同样是
+   * `Error: spawn <python.exe> ENOENT`，且 `path` 字段显示的是 exe 路径，
+   * 极易误判成「Python 被删了」。实测该机器上 Python 3.14.7 完好无损。
+   *
+   * 策略：cwd 失效就退到 bridgeDir，再失效就退到用户主目录，
+   * 最后兜底 `process.cwd()` —— **绝不把失效路径交给 spawn**。
+   */
+  const cwd = pickUsableCwd(cwdRaw, bridgeDir, ctx)
 
   /** @type {BridgeConnection | null} */
   let conn = null
@@ -246,6 +341,15 @@ export function apply(ctx, config = {}) {
     if (starting) return starting
 
     starting = (async () => {
+      // 先检查解释器是否存在（真机教训 2026-10-18）：spawn 的 ENOENT 是**异步**
+      // 报的，如果只依赖 'error' 事件，握手会白等 HANDSHAKE_TIMEOUT_MS（60 秒）
+      // 才失败。这里提前判定，失败信息也更准确（能说出「哪个路径不存在」）。
+      if (!existsSync(pythonPath)) {
+        throw new Error(
+          `找不到 Python 解释器：${pythonPath}（可能是换了 Python 版本、或该目录已被删除）。` +
+            `请在首选项「Python 环境」里重新检测，或重新执行「基本安装」。`,
+        )
+      }
       const child = spawn(
         pythonPath,
         ['-u', '-m', 'dsh_bridge.runtime', entryModule],
@@ -264,9 +368,17 @@ export function apply(ctx, config = {}) {
       )
       conn = new BridgeConnection(child, {
         onLog: log,
-        onExit: (code, signal) => {
+        onExit: (code, signal, spawnError) => {
           resetCapabilities()
           if (disposed) return
+          // spawn 失败（ENOENT / EACCES）**不重启**：可执行文件不在就是不在，
+          // 退避重试 5 次只是把同一条错误刷 5 遍，还会让用户以为「正在自愈」。
+          // 这条路径必须只记一句能行动的日志，然后安静下来（工具不可用，
+          // 但 DSH 照常工作）。用户换回解释器后重启 DSH 即可恢复。
+          if (spawnError) {
+            log('ERROR', describeStartupFailure(spawnError, pythonPath, cwd))
+            return
+          }
           restart()
           if (code !== 0) log('ERROR', `桥接进程退出（code=${code} signal=${signal}）`)
         },

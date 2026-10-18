@@ -349,16 +349,29 @@ pub fn activate_pending(app: &AppHandle) -> Option<String> {
     // （前端保存首选项、set_last_url 等单键写）都会在反序列化时把它当未知键丢弃。
     // 实测：安装时 DSH 正在跑 → 留标记等重启；重启前一次 save_config 把标记抹掉；
     // 于是这里静默返回、一行日志没有，两次重启注册都没发生。
-    // 进门条件因此放宽为「标记在 **或** 桥接代码已释放」：标记丢了，只要代码在
-    // 磁盘上就照样走完激活链（下面 bundle_registered 会拦住已注册的机器，
-    // 不会重复跑 pnpm）。从未安装过的机器（标记空 + 代码不存在）仍在这里
-    // 零开销返回 —— 每次启动的常态路径不产生任何日志与子进程。
+    //
+    // 进门条件因此放宽为三选一（真机教训 2026-10-18 补上第三条）：
+    //   ① pending 标记在；
+    //   ② 桥接代码已释放到 py-bridge\；
+    //   ③ **profile 里已经注册过这个 bundle**。
+    //
+    // ③ 是必需的：用户重装前习惯删掉整个 `%APPDATA%\com.dsh.desktop`
+    // （连 config.json 一起），于是 ① 空、② false —— 而 profile 的
+    // `node_modules` 里那份**旧副本还在**，带着失效的绝对路径。若这里直接返回，
+    // 插件每次 spawn 都 ENOENT，永远没人去修。
+    //
+    // 从未装过的机器（三条全不满足）仍在这里零开销返回 —— 常态路径无日志、无子进程。
     let released = bd.join("bridge_entry.py").is_file();
-    if !pending_flag && !released {
+    let profile_hint = probe_profile(app);
+    let registered_somewhere = profile_hint
+        .as_deref()
+        .map(bundle_registered)
+        .unwrap_or(false);
+    if !pending_flag && !released && !registered_somewhere {
         return None;
     }
     let Some(py) = detect::find_python() else {
-        // 能走到这里说明至少有 pending 标记或已释放的代码，却找不到 Python：
+        // 能走到这里说明至少有一条成立，却找不到 Python：
         // 异常，值得一行日志（没装过 Python 桥接的机器进不到这里，不会刷屏）。
         logger::append_line(
             &logger::desktop_log_path(app),
@@ -376,7 +389,8 @@ pub fn activate_pending(app: &AppHandle) -> Option<String> {
             return None;
         }
     }
-    let profile = probe_profile(app).unwrap_or_else(|| {
+    // 复用进门判定时已经算好的 profile（避免重复跑 dsh --dump-config）
+    let profile = profile_hint.unwrap_or_else(|| {
         logger::append_line(
             &logger::desktop_log_path(app),
             "[py-bridge] probe_profile failed; falling back to profile \"web\"",
@@ -384,13 +398,56 @@ pub fn activate_pending(app: &AppHandle) -> Option<String> {
         "web".to_string()
     });
     // 已注册（上次激活成功，但 clear_pending 写的空串后来同样可能被抹，或标记丢失）：
-    // 只清标记，绝不重复 npm pack + pnpm —— 这条路径每次进入 DSH 都会走到，
-    // 已注册的机器必须安静、零副作用。
+    // 已注册的机器**默认**必须安静、零副作用 —— 这条路径每次进入 DSH 都会走到。
+    //
+    // **但「已注册」不等于「还能用」**（真机故障 2026-10-18）：用户换 home / 换 Python /
+    // 删目录之后，profile 里的包还在（bundle_registered 为真），而生效的
+    // `cordis.patch.yml`（**profile 的 node_modules 里那份副本**）还带着旧路径 ——
+    // 于是插件每次 spawn 都 ENOENT，而这里因为「已注册」直接返回，永远不会修好。
+    //
+    // ⚠ 关键：改**源目录**的 yml 是没用的 —— DSH 加载的是 profile 里那份安装副本。
+    // 想让它生效只有一条路：重新 `npm pack` + `dsh plugin add` 覆盖安装（下面的
+    // register_bundle）。这条路径不常见（只在配置失效时走），代价可以接受。
     if bundle_registered(&profile) {
-        if pending_flag {
-            clear_pending(app);
+        if bridge_config_usable(&profile, &bun, &bd) {
+            if pending_flag {
+                clear_pending(app);
+            }
+            return None;
         }
-        return None;
+        // 配置失效。先确保**源文件本身**还在 —— 用户可能清理过 %APPDATA%，
+        // 那样 py-bridge-bundle\ 整个目录都没了，光 write_bundle_config 会失败。
+        // release_sources 是幂等的（临时文件 + 原子改名），重放一次没有副作用。
+        if !bun.join("cordis.patch.yml").is_file() || !bd.join("bridge_entry.py").is_file() {
+            if let Err(e) = release_sources(&bd, &bun) {
+                let line = format!("[py-bridge] 配置失效且重新释放失败：{e}");
+                logger::append_line(&logger::desktop_log_path(app), &line);
+                return Some(line);
+            }
+        }
+        let python_path = py.program.to_string_lossy().to_string();
+        if let Err(e) = write_bundle_config(&bun, &python_path, &bd) {
+            logger::append_line(
+                &logger::desktop_log_path(app),
+                &format!("[py-bridge] 重写解释器路径失败：{e}"),
+            );
+            return None;
+        }
+        match register_bundle(app, &profile, &bun) {
+            Ok(()) => {
+                clear_pending(app);
+                let line = format!(
+                    "[py-bridge] 已注册但配置失效（路径不存在或为空），已重新注册以刷新配置（profile「{profile}」，解释器 {python_path}）"
+                );
+                logger::append_line(&logger::desktop_log_path(app), &line);
+                return Some(line);
+            }
+            Err(e) => {
+                let line = format!("[py-bridge] 配置失效且重新注册失败：{e}");
+                logger::append_line(&logger::desktop_log_path(app), &line);
+                return Some(line);
+            }
+        }
     }
     let python_path = py.program.to_string_lossy().to_string();
     if let Err(e) = write_bundle_config(&bun, &python_path, &bd) {
@@ -464,16 +521,108 @@ fn write_bundle_config(bun: &Path, python_path: &str, bd: &Path) -> Result<(), S
     let Ok(text) = std::fs::read_to_string(&patch) else {
         return Err(i18n::fmt("py_bridge_write_fail", &[&patch.to_string_lossy(), &"missing"]));
     };
-    // YAML 里单引号串里的单引号要写两遍（这是 YAML 的转义规则，不是我们自创的）
-    let py = python_path.replace('\'', "''");
-    let dir = bd.to_string_lossy().replace('\'', "''");
-    let out = text
-        .replace("pythonPath: ''", &format!("pythonPath: '{py}'"))
-        .replace("bridgeDir: ''", &format!("bridgeDir: '{dir}'"))
-        .replace("cwd: ''", &format!("cwd: '{dir}'"));
+    let out = patch_bundle_config(&text, python_path, &bd.to_string_lossy());
     std::fs::write(&patch, out).map_err(|e| {
         i18n::fmt("py_bridge_write_fail", &[&patch.to_string_lossy(), &e.to_string()])
     })
+}
+
+/// 把三个标量写进 cordis.patch.yml 的文本（**幂等**：空值填、旧值换）。
+///
+/// 早先的实现只做 `"pythonPath: ''"` → 新值的**字面替换**，于是它只在
+/// 「第一次从空值填」时有效；一旦值已经填过，第二次调用就找不到锚点、静默
+/// 什么都不做 —— 用户换了 Python 版本后，yml 里那条**失效的旧路径**永远改不掉
+/// （真机故障 2026-10-18：指向已删除的 D:\Programs\Python\python.exe，
+/// 桥接每次 spawn 都 ENOENT）。
+///
+/// 现在按**键**替换：`^(\s*)pythonPath:\s*.*$` → 保留缩进，值换成新路径。
+/// 这样「空 → 值」「旧值 → 新值」「重复调用」三种情况都是同一个结果。
+fn patch_bundle_config(text: &str, python_path: &str, bridge_dir: &str) -> String {
+    // YAML 单引号串里的单引号要写两遍（YAML 转义规则，不是我们自创的）
+    let quote = |s: &str| s.replace('\'', "''");
+    let py = quote(python_path);
+    let dir = quote(bridge_dir);
+
+    let mut out = String::with_capacity(text.len() + 64);
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let indent = &line[..line.len() - trimmed.len()];
+        if let Some(rest) = trimmed.strip_prefix("pythonPath:") {
+            // 保留行尾注释之外的一切结构：这里只有标量，直接重写整行
+            let _ = rest;
+            out.push_str(indent);
+            out.push_str(&format!("pythonPath: '{py}'\n"));
+        } else if let Some(rest) = trimmed.strip_prefix("bridgeDir:") {
+            let _ = rest;
+            out.push_str(indent);
+            out.push_str(&format!("bridgeDir: '{dir}'\n"));
+        } else if let Some(rest) = trimmed.strip_prefix("cwd:") {
+            let _ = rest;
+            out.push_str(indent);
+            out.push_str(&format!("cwd: '{dir}'\n"));
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// 从 cordis.patch.yml 里读出一个标量键的值（去引号、还原 YAML 的 `''` → `'`）。
+///
+/// 解析刻意极简（只认 `key: 'value'` / `key: ""`）—— 这个文件是我们自己
+/// 释放的，结构固定；引第三方 YAML 库只为读几行不值得。
+fn read_bundle_scalar(text: &str, key: &str) -> Option<String> {
+    for line in text.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix(key) else {
+            continue;
+        };
+        // 必须是 `key:` 而不是 `keySomething:` —— 保证键名完整匹配
+        let Some(rest) = rest.strip_prefix(':') else {
+            continue;
+        };
+        let v = rest.trim();
+        let unq = v
+            .strip_prefix('\'')
+            .and_then(|s| s.strip_suffix('\''))
+            .or_else(|| v.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
+            .unwrap_or(v);
+        return Some(unq.replace("''", "'"));
+    }
+    None
+}
+
+/// 从源 bundle 目录读出 `pythonPath`（保留给单测与诊断用）。
+fn read_bundle_python_path(bun: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(bun.join("cordis.patch.yml")).ok()?;
+    read_bundle_scalar(&text, "pythonPath")
+}
+
+/// 当前配置是否**真的可用**：三个路径都必须非空且真实存在。
+///
+/// 为什么三个都要查（真机故障 2026-10-18）：
+///   · `pythonPath` 不存在 → spawn ENOENT；
+///   · `cwd` 不存在 → **同样** spawn ENOENT，且报错里显示的是 exe 路径，
+///     极易误判成「Python 被删了」（实测 Python 完好，只是 cwd 指向了旧 home）；
+///   · `bridgeDir` 不存在 → Python 侧 `-m dsh_bridge.runtime` 找不到模块。
+///
+/// 只查 `pythonPath` 是**不够的** —— 这正是上一版修复的漏洞：它重写了路径，
+/// 但用户那次故障的 cwd 也是失效的，重写完照样 ENOENT。
+fn bridge_config_usable(profile: &str, bun: &Path, bd: &Path) -> bool {
+    let _ = profile;
+    let Ok(text) = std::fs::read_to_string(bun.join("cordis.patch.yml")) else {
+        return false;
+    };
+    let python_path = read_bundle_scalar(&text, "pythonPath").unwrap_or_default();
+    let bridge_dir = read_bundle_scalar(&text, "bridgeDir").unwrap_or_default();
+    let cwd = read_bundle_scalar(&text, "cwd").unwrap_or_default();
+
+    let ok = |v: &str| !v.trim().is_empty() && Path::new(v).is_file();
+    let ok_dir = |v: &str| !v.trim().is_empty() && Path::new(v).is_dir();
+
+    // pythonPath 必须是**文件**；bridgeDir / cwd 必须是**目录**
+    ok(&python_path) && ok_dir(&bridge_dir) && ok_dir(&cwd) && bd.is_dir()
 }
 
 // ---------- 注册 ----------
@@ -939,6 +1088,136 @@ mod tests {
         let text = std::fs::read_to_string(&patch).unwrap();
         // YAML 单引号串里，' 要写成 ''，否则 YAML 解析直接坏掉
         assert!(text.contains(r"pythonPath: 'C:\it''s\python.exe'"), "实际: {text}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 回归：**已经填过的旧路径必须能被新路径替换**。
+    ///
+    /// 真机故障（2026-10-18）：用户换了 Python 后，cordis.patch.yml 里留着
+    /// 指向已删除目录的旧 pythonPath，而旧实现只做 `"pythonPath: ''"` 的字面
+    /// 替换 —— 值一旦非空，第二次调用就找不到锚点、静默什么都不做。
+    /// 于是桥接每次 spawn 都 ENOENT，而配置永远修不好。
+    #[test]
+    fn bundle_config_replaces_stale_path() {
+        let tmp = std::env::temp_dir().join(format!("dsh-bundle-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let patch = tmp.join("cordis.patch.yml");
+        std::fs::write(&patch, BUNDLE_FILES[1].1).unwrap();
+        let bd = tmp.join("py-bridge");
+
+        // 第一次：空 → 旧路径
+        write_bundle_config(&tmp, r"D:\Programs\Python\python.exe", &bd).unwrap();
+        let t1 = std::fs::read_to_string(&patch).unwrap();
+        assert!(t1.contains(r"pythonPath: 'D:\Programs\Python\python.exe'"), "实际: {t1}");
+
+        // 第二次：旧路径 → 新路径（这一步在旧实现里是**静默失败**的）
+        write_bundle_config(&tmp, r"D:\Programs\Python313\python.exe", &bd).unwrap();
+        let t2 = std::fs::read_to_string(&patch).unwrap();
+        assert!(
+            t2.contains(r"pythonPath: 'D:\Programs\Python313\python.exe'"),
+            "旧路径没被替换掉，实际: {t2}"
+        );
+        assert!(
+            !t2.contains(r"D:\Programs\Python\python.exe"),
+            "旧路径仍然存在，实际: {t2}"
+        );
+        assert_eq!(t2.matches("pythonPath:").count(), 1, "不该重复插入");
+
+        // 第三次：同一个值再写一遍仍然幂等
+        write_bundle_config(&tmp, r"D:\Programs\Python313\python.exe", &bd).unwrap();
+        let t3 = std::fs::read_to_string(&patch).unwrap();
+        assert_eq!(t3, t2, "重复写入同一路径应完全不变");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 回归：读取器要能还原写进去的路径（含 YAML 单引号转义）。
+    #[test]
+    fn bundle_config_roundtrips_through_reader() {
+        let tmp = std::env::temp_dir().join(format!("dsh-bundle-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let patch = tmp.join("cordis.patch.yml");
+        std::fs::write(&patch, BUNDLE_FILES[1].1).unwrap();
+        let bd = tmp.join("py-bridge");
+
+        // 空值时应读到空串（= 没配过）
+        let empty = read_bundle_python_path(&tmp).expect("应该有 pythonPath 这一行");
+        assert!(empty.is_empty(), "初始应为空串，实际: {empty:?}");
+
+        // 写进去 → 读出来必须一致（含单引号这种要转义的字符）
+        let weird = r"C:\it's\Python 3.13\python.exe";
+        write_bundle_config(&tmp, weird, &bd).unwrap();
+        let got = read_bundle_python_path(&tmp).expect("应该能读回");
+        assert_eq!(got, weird, "写读往返不一致");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 回归：**三个路径都要验**，不能只看 pythonPath。
+    ///
+    /// 真机故障（2026-10-18）：用户删了整个 `%APPDATA%\com.dsh.desktop`，
+    /// 于是 `py-bridge\` 目录没了、`bridgeDir`/`cwd` 双双失效，而
+    /// `pythonPath`（D:\Programs\Python\python.exe）**完好**。
+    /// 只查 pythonPath 的实现会把这种状态判成「配置可用」→ 不修 → 永远 ENOENT。
+    ///
+    /// 顺带记住 `spawn ENOENT` 的陷阱：cwd 不存在时报的也是 ENOENT，
+    /// 且 `path` 字段显示 exe 路径 —— 极易误判成「Python 被删了」。
+    #[test]
+    fn config_usable_requires_all_three_paths() {
+        let tmp = std::env::temp_dir().join(format!("dsh-usable-{}", std::process::id()));
+        let bun = tmp.join("py-bridge-bundle");
+        let bd = tmp.join("py-bridge");
+        std::fs::create_dir_all(&bun).unwrap();
+        std::fs::create_dir_all(&bd).unwrap();
+
+        // 造一个真实存在的「解释器」文件（内容无所谓，只要求 is_file()）
+        let fake_py = tmp.join("python.exe");
+        std::fs::write(&fake_py, b"stub").unwrap();
+        let py_s = fake_py.to_string_lossy().to_string();
+        let bd_s = bd.to_string_lossy().to_string();
+
+        let write = |python: &str, bridge: &str, cwd: &str| {
+            std::fs::write(bun.join("cordis.patch.yml"), BUNDLE_FILES[1].1).unwrap();
+            let text = std::fs::read_to_string(bun.join("cordis.patch.yml")).unwrap();
+            let out = patch_bundle_config(&text, python, bridge)
+                .replace(
+                    "cwd: ''",
+                    &format!("cwd: '{}'", cwd.replace('\'', "''")),
+                );
+            std::fs::write(bun.join("cordis.patch.yml"), out).unwrap();
+        };
+
+        // ① 三个都对 → 可用
+        write(&py_s, &bd_s, &bd_s);
+        assert!(
+            bridge_config_usable("web", &bun, &bd),
+            "三路径都存在时应判可用"
+        );
+
+        // ② bridgeDir 指向不存在的目录 → 不可用（用户真机就是这个状态）
+        let ghost = tmp.join("does-not-exist").to_string_lossy().to_string();
+        write(&py_s, &ghost, &ghost);
+        assert!(
+            !bridge_config_usable("web", &bun, &bd),
+            "bridgeDir/cwd 不存在时必须判不可用（否则永远不修）"
+        );
+
+        // ③ 只有 cwd 坏（bridgeDir 好）→ 仍不可用
+        write(&py_s, &bd_s, &ghost);
+        assert!(
+            !bridge_config_usable("web", &bun, &bd),
+            "cwd 失效也必须判不可用 —— spawn ENOENT 就是它造成的"
+        );
+
+        // ④ pythonPath 指向不存在的文件 → 不可用
+        let ghost_py = tmp.join("nope.exe").to_string_lossy().to_string();
+        write(&ghost_py, &bd_s, &bd_s);
+        assert!(!bridge_config_usable("web", &bun, &bd), "pythonPath 不存在时必须判不可用");
+
+        // ⑤ 空值 → 不可用
+        std::fs::write(bun.join("cordis.patch.yml"), BUNDLE_FILES[1].1).unwrap();
+        assert!(!bridge_config_usable("web", &bun, &bd), "空配置必须判不可用");
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

@@ -213,7 +213,7 @@
               <button id="btn-music-clear" class="btn small" data-i18n="btn_music_builtin">恢复内置</button>
             </div>
           </label>
-          <div class="hint" data-i18n="note_music">内置曲是程序用 Web Audio 现场合成的五声音阶琶音（不联网、不读任何文件）；自选曲在启动等待页循环播放，DSH 一就绪就随诗行一起淡出。支持 mp3 / wav / m4a / ogg / flac（WebView2 能解码的格式），单个文件不超过 32 MB。文件不在了或读不出来时会自动回落到内置曲，并在日志里说明原因。</div>
+          <div class="hint" data-i18n="note_music">内置曲是程序用 Web Audio 现场合成的五声音阶琶音（不联网、不读任何文件），一段约 7 秒的乐句；自选曲整首播放。两者都只播一遍、不循环：曲子先于 DSH 就绪播完，剩余等待就是静音；DSH 先就绪，曲子继续播完这一遍再停。支持 mp3 / wav / m4a / ogg / flac（WebView2 能解码的格式），单个文件不超过 32 MB。文件不在了或读不出来时会自动回落到内置曲，并在日志里说明原因。</div>
         </div>
         <!-- npm 缓存位置 / 包源 registry 两块也在「开机自动启动」下方（与上面的程序自身设置分开）：
              它们都属于"外部工具（npm / pnpm）的行为配置"。 -->
@@ -320,7 +320,7 @@
         <div class="hint" data-i18n-html="set_hint_html">
           配置保存于：<span id="set-config-path"></span><br />
           路径留空或失效时会自动检测本机的 Node / npm / DSH（npm / dsh 的程序路径不在此处提供修改入口 —— 它们会被<b>执行</b>，由程序自动检测更安全）；也可点上方「自动检测」。<br />
-          家目录是 DSH 摆放配置文件的地方（通过 DSH_HOME 传给 DSH；只要它不是默认值，保存后就会自动写进你的用户环境变量，让你自己开的终端里的 dsh 也用同一个家目录，改回默认值则自动删掉）；进程工作目录自动取其上一级，DSH 的工作区在网页内随意指定。端口 / 参数修改在<b>下次启动 DSH</b> 时生效；语言切换即时生效，并同步写入 DSH 的 settings.yaml（DSH 界面语言在其重启后变化）；外观同样写入 settings.yaml（ui-theme.preference），DSH 页面<b>实时</b>跟随切换。<br />Desktop 日志：同目录 desktop.log；DSH 输出日志：&lt;家目录&gt;\logs\dsh.log。
+          家目录是 DSH 摆放配置文件的地方（通过 DSH_HOME 传给 DSH；只要它不是默认值，保存后就会自动写进你的用户环境变量，让你自己开的终端里的 dsh 也用同一个家目录，改回默认值则自动删掉）；进程工作目录自动取其上一级，DSH 的工作区在网页内随意指定。端口 / 参数修改在<b>下次启动 DSH</b> 时生效；语言切换即时生效，并同步写入 DSH 的 cordis.patch.yml（旧版 settings.yaml 一并写出；DSH 界面语言在其重启后变化）；外观同样写入（ui-theme.preference），旧版 DSH 页面<b>实时</b>跟随，新版 DSH 在其下次启动后生效。<br />Desktop 日志：同目录 desktop.log；DSH 输出日志：&lt;家目录&gt;\logs\dsh.log。
         </div>
         <div class="row gap">
           <button id="btn-detect-package" class="btn small" data-i18n="btn_detect_pkg">检测全局包名（npm list -g）</button>
@@ -557,7 +557,7 @@
     <div class="setup-card">
       <!-- 第一步：选择界面语言。固定双语展示（不挂 data-i18n），
            选择后立即生效：向导后续文案、Desktop 主界面、托盘菜单、
-           DSH 自身界面（写入 settings.yaml）与安装提示全部跟随。 -->
+           DSH 自身界面（写入 cordis.patch.yml）与安装提示全部跟随。 -->
       <div id="wiz-step-lang" class="wiz-step lang-step">
         <div class="wiz-step-title lang-title">Language / 语言</div>
         <div class="wiz-step-body lang-note">

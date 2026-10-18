@@ -33,8 +33,8 @@ DSH Desktop wraps the locally installed `dsh` CLI into a native window:
 - Start with Windows (official autostart plugin, HKCU registry only, no admin rights); autostart runs silently in tray and delays DSH launch by 12 s to avoid the boot-time IO spike
 - First-run setup wizard: detects Node.js/npm/DSH/pnpm and can guide installation (official nodejs.org LTS installer download or `npm install -g @deepseek-ai/dsh`), with a **choosable Node.js / DSH install location** (e.g. onto another drive); Node / npm / DSH steps are fully skippable. Once Node.js is found it also checks **pnpm — which must be ≥ 10**: a missing or too-old pnpm raises its own step and keeps the wizard's "Done" button disabled until it is installed or updated; the guided Node.js install **automatically runs `npm install -g pnpm`** afterwards (so DSH plugins can be installed later)
 - **Node.js minimum-version guard (22.19.0)**: detects an installed-but-too-old Node.js, warns with the exact versions, offers a one-click upgrade to the official LTS (same verified installer flow), keeps a "download it myself" link and a "keep this version and continue" escape hatch, and refuses to start DSH with a plain-language reason instead of letting it die on an opaque error — see [Node.js version check](#nodejs-version-check)
-- **Bilingual UI (Chinese / English)**: choose a language in Preferences; the whole launcher (toolbar, status, dialogs, logs, tray menu) switches, and DSH's own web UI follows via its `settings.yaml`
-- **Light / Dark / Follow-system appearance**: pick it in Preferences; the launcher (toolbar, dialogs, wizard, native title bar) and the embedded DSH page switch together through `ui-theme.preference` in DSH's `settings.yaml` — open DSH pages follow **live, no DSH restart needed**
+- **Bilingual UI (Chinese / English)**: choose a language in Preferences; the whole launcher (toolbar, status, dialogs, logs, tray menu) switches, and DSH's own web UI follows via its `cordis.patch.yml` (`locale.preference`; the legacy `settings.yaml` is written too)
+- **Light / Dark / Follow-system appearance**: pick it in Preferences; the launcher (toolbar, dialogs, wizard, native title bar) and the embedded DSH page switch together through `ui-theme.preference` in DSH's `cordis.patch.yml` — older DSH pages follow **live, no DSH restart needed**; DSH 0.2.x applies the change at its next start
 - **Window layout memory**: the main window's size, position and maximized state are remembered and restored on the next launch (official `tauri-plugin-window-state`); the plugin validates coordinates against the monitors that are actually attached, so a window can never come back off-screen after a monitor is unplugged — see [Window layout](#window-layout)
 - **Toolbar display mode (pinned / auto-hide)**: keep the toolbar always visible, or let it tuck away above the window and slide down when the mouse reaches the top 8px strip; leaving the toolbar hides it again half a second later (in auto mode the content area fills the whole window and the toolbar floats above it). `Ctrl+Shift+H` toggles it. **Safe Mode always forces pinned** — see [Toolbar display mode](#toolbar-display-mode)
 - Single-instance lock: launching a second copy just focuses the existing window
@@ -241,7 +241,7 @@ Open **⚙ 首选项 (Preferences)** from the toolbar. The paths of the two prog
 | npm cache location | empty (npm config untouched) | written into npm's own `~/.npmrc` (the `cache` line), so terminal npm follows it too — see *npm cache location* |
 | Package sources (registry) | read-only hint, **changed only on click** | the status line compares the registry npm and pnpm would each use in the DSH working dir; the button appears only when they differ; touches pnpm only — see *Package sources (registry)* |
 | Python environment | off by default | a status line plus **基本安装 / 额外安装** buttons, and a capability-bridge row that exposes the installed libraries as AI tools — see [Python environment](#python-environment) |
-| Interface language | `zh` (中文) | `zh` / `en`; switches the whole launcher and syncs DSH's `settings.yaml` — see [Language](#language) |
+| Interface language | `zh` (中文) | `zh` / `en`; switches the whole launcher and syncs DSH's `cordis.patch.yml` (`locale.preference`; legacy `settings.yaml` too) — see [Language](#language) |
 | Appearance | `system` (follow system) | `light` / `dark` / `system`; switches the launcher and syncs DSH's `ui-theme.preference` — see [Appearance](#appearance) |
 | Startup music | on, volume 60, built-in tune | Switch / volume / custom file as one group — see [Background music on the startup page](#background-music-on-the-startup-poem-page) |
 
@@ -335,7 +335,7 @@ On Windows npm keeps its cache in **`%LOCALAPPDATA%\npm-cache`** (`C:\Users\<you
 This one setting is different in kind from the rest: **it edits npm's own file.**
 
 - **It writes the `cache` line in `~/.npmrc`** (the path comes from `npm config get userconfig`, not a guess), so terminal npm uses the same location. On top of that, every npm the app runs itself (install/update DSH, package list, version query) passes `--cache <dir>` explicitly, so the command in the log behaves identically when copy-pasted.
-- **Only that one line is touched; everything else is preserved verbatim** — comments, `registry=`, `_authToken=`, … (minimal line edit plus an atomic replace, the same rule the app follows for DSH's `settings.yaml`). It deliberately does **not** call `npm config set`: npm's ini writer was measured to drop comments from the file.
+- **Only that one line is touched; everything else is preserved verbatim** — comments, `registry=`, `_authToken=`, … (minimal line edit plus an atomic replace, the same rule the app follows for DSH's `cordis.patch.yml` and its legacy `settings.yaml`). It deliberately does **not** call `npm config set`: npm's ini writer was measured to drop comments from the file.
 - **Empty = delete the line**, falling back to npm's default location (rather than pinning the default explicitly).
 - **Value rules**: absolute, no `..`, drive must exist, no `< > " | ? *`, not inside `Windows` / `ProgramData`, no `%` or `!` (the value travels through `cmd.exe`), **no `#` or `;`** (npm's ini parser treats them as comment starts — measured: `cache=D:\a#b` reads back as `D:\a`, i.e. silently a different folder), and a **100-character limit**: npm writes content-addressed paths 158 characters deep below the cache root (measured), and beyond the classic 260-character limit Explorer/PowerShell can no longer delete that tree — npm itself still works, but "cannot be cleaned up" is the worse outcome.
 - **The app does not create the folder** — npm does that itself (measured: pointing at a non-existent directory still installs fine).
@@ -405,7 +405,7 @@ It is still remembered, because **Connect to existing service** and **re-open pa
 
 ### Config writes are atomic
 
-`config.json`, the `ui-language` sidecar and DSH's `settings.yaml` are written **atomically** (security review L-6): the new content goes to a temp file in the *same directory*, is flushed with `fsync`, and is then moved over the target with `rename`. A crash, power loss or kill in the middle therefore leaves the *previous* file intact instead of a half-written one. That matters because the old code used a plain overwrite — it is "open + truncate + write" — and a truncated `config.json` is silently swallowed by `unwrap_or_default()` on load, i.e. one badly-timed crash away from "all my settings are gone".
+`config.json`, the `ui-language` sidecar, the profile's `cordis.patch.yml` and DSH's legacy `settings.yaml` are written **atomically** (security review L-6): the new content goes to a temp file in the *same directory*, is flushed with `fsync`, and is then moved over the target with `rename`. A crash, power loss or kill in the middle therefore leaves the *previous* file intact instead of a half-written one. That matters because the old code used a plain overwrite — it is "open + truncate + write" — and a truncated `config.json` is silently swallowed by `unwrap_or_default()` on load, i.e. one badly-timed crash away from "all my settings are gone".
 
 - The temp file is created with `create_new`, so a name that already exists (possibly a symlink someone pre-placed) makes the write **fail** rather than being followed. It also lives next to the target on purpose: `rename` only replaces atomically within one volume, so a temp file in `%TEMP%` would defeat the whole exercise.
 - If the final `rename` is refused because a scanner, backup or sync tool is holding the target open, it is retried a few times and then reported as an ordinary write failure. It **never** degrades to a non-atomic direct overwrite. Note this is a robustness fix, not a privilege boundary: the failure mode it removes is lost settings, not escalated access.
@@ -422,14 +422,16 @@ It is still remembered, because **Connect to existing service** and **re-open pa
 The launcher UI is bilingual (Simplified Chinese / English).
 
 - Pick **语言 / Language → English** in **⚙ Preferences** and save. The toolbar, status area, dialogs, tray menu and every launcher-generated log line switch to English; choosing **中文** switches everything back. A restart is not required (and after restarting Desktop everything stays in your chosen language, read from `config.json`).
-- **DSH's own web interface**: on save, the app also writes the matching value into `<DSH home dir>\settings.yaml`:
+- **DSH's own web interface**: on save, the app also writes the matching value into the profile's `cordis.patch.yml` (DSH 0.2.x reads its preferences from this patch layer — it no longer reads the old `<DSH home dir>\settings.yaml`):
 
   ```yaml
-  locale:
-    preference: en   # or: zh
+  - id: locale
+    name: "@deepseek-ai/dsh-client-locale"
+    config:
+      preference: en   # or: zh
   ```
 
-  This is done as a minimal, targeted line edit — any other keys you keep in `settings.yaml` are preserved. DSH reads this file when it starts, so **restart DSH** (toolbar ⟳ Restart, or Stop + Start) for its interface language to change. If DSH is running when you change the language, the app logs a hint telling you a DSH restart is needed.
+  The legacy `<DSH home dir>\settings.yaml` (`locale: preference:`) is written **too**, so DSH versions that still read it keep following. Either way this is a minimal, targeted line edit — every other entry in `cordis.patch.yml` (providers, API keys, comments) is preserved verbatim. DSH applies the patch when it starts, so **restart DSH** (toolbar ⟳ Restart, or Stop + Start) for its interface language to change. If DSH is running when you change the language, the app logs a hint telling you a DSH restart is needed.
 - The first-run setup wizard follows the same rule: it renders in Chinese by default; switch to English any time in Preferences.
 - DSH's raw `stdout`/`stderr` and npm's output are third-party program output — they appear verbatim in the log (never rewritten).
 
@@ -438,16 +440,18 @@ The launcher UI is bilingual (Simplified Chinese / English).
 Same three-way semantics as DSH's own "General settings → Appearance", with the launcher and the DSH page kept in sync:
 
 - Pick **⚙ Preferences → Appearance** and save. The toolbar, status area, dialogs, first-run wizard and the native title bar re-skin immediately; **Follow system** subscribes to the OS light/dark flip and reacts in real time. No Desktop restart required (and after restarting, the choice is read from `config.json`).
-- **The DSH page follows live**: on save, the app writes the matching value into `<DSH home dir>\settings.yaml`:
+- **The DSH page follows**: on save, the app writes the matching value into the profile's `cordis.patch.yml`:
 
   ```yaml
-  ui-theme:
-    preference: dark   # or: light / system (sibling keys like fontSize are preserved)
+  - id: ui-theme
+    name: "@deepseek-ai/dsh-client-ui-theme"
+    config:
+      preference: dark   # or: light / system (sibling keys like fontSize are preserved)
   ```
 
-  DSH's settings-file provider watches this file and pushes the change to already-open pages, so **no DSH restart is needed** — the page re-skins instantly (unlike the interface language, which needs a restart).
-- Like the language sync, this is a minimal, targeted line edit: only `ui-theme.preference` is added/changed; everything else in `settings.yaml` is preserved.
-- Upgrade compatibility: an old `config.json` without the appearance field inherits DSH's current theme on first load (reading `settings.yaml`), so upgrading the launcher never re-skins your DSH page by itself. From then on, saving in Preferences takes over the value.
+  The legacy `<DSH home dir>\settings.yaml` (`ui-theme: preference:`) gets the same value. DSH 0.2.x parses the patch layer at startup and has no file watcher, so the new value applies at DSH's next start; on older DSH the settings-file provider watched `settings.yaml` and already-open pages re-skinned **live**.
+- Like the language sync, this is a minimal, targeted line edit: only `preference` inside the `ui-theme` entry (and the legacy block) is added/changed; everything else — the `fontSize` sibling key included — is preserved.
+- Upgrade compatibility: an old `config.json` without the appearance field inherits DSH's current theme on first load (reading `cordis.patch.yml` first, then the legacy `settings.yaml`), so upgrading the launcher never re-skins your DSH page by itself. From then on, saving in Preferences takes over the value.
 - Changing the appearance inside DSH's own settings affects the DSH page only; the launcher keeps whatever was last saved in its Preferences.
 
 ## Background music on the startup (poem) page
@@ -455,7 +459,7 @@ Same three-way semantics as DSH's own "General settings → Appearance", with th
 The waiting page that shows poem lines while DSH starts stays up for tens of seconds (minutes on a cold boot), so it can carry background music. Three settings live together in **⚙ Preferences → Startup music**, stored as `startup_music_enabled` / `startup_music_volume` / `startup_music_path` in `config.json`:
 
 - **Switch** (on by default) and **volume** (60 by default): dragging the volume changes what is *currently playing* immediately — you don't have to press Save first; saving just persists it.
-- **Custom music file** (empty = built-in tune): pick an mp3 / wav / m4a / ogg / flac (≤ 32 MB) and it loops on the waiting page; "Use built-in" clears the field and switches back.
+- **Custom music file** (empty = built-in tune): pick an mp3 / wav / m4a / ogg / flac (≤ 32 MB) and it plays once on the waiting page (no looping); "Use built-in" clears the field and switches back.
 
 | | Built-in tune (default) | Custom file |
 |---|---|---|
@@ -463,7 +467,7 @@ The waiting page that shows poem lines while DSH starts stays up for tens of sec
 | Needs | Nothing — no audio asset is shipped, no network, no system codecs | One of the five containers WebView2 can decode |
 | Stops working | Never | File deleted/moved, over 32 MB, unreadable disk |
 
-Music joins the poem but **never gets cut off mid-phrase**: it fades in on the waiting page, and when DSH becomes ready (or the page goes away on errors / port conflicts) it **finishes the current pass before stopping** — the custom track drops its loop and plays to the end of the file (the remainder may be 30 seconds or 4 minutes, whatever the track has left), and the built-in tune completes the current phrase and decays naturally. Track length and startup speed don't change this. To silence immediately, drag the volume to 0 in Preferences (takes effect live), or click Start again — a new startup hard-stops the previous round first.
+Music **plays exactly once and never loops**: it fades in on the waiting page. If the track ends before DSH is ready, the rest of the wait is silent; if DSH becomes ready first (or the page goes away on errors / port conflicts), the track finishes this one pass before stopping — the remainder may be 30 seconds or 4 minutes, whatever the track has left, and the built-in tune is a single ~7 s phrase. To silence immediately, drag the volume to 0 in Preferences (takes effect live), or click Start again — a new startup hard-stops the previous round first.
 
 **Nothing fails silently**: an unreadable custom file falls back to the built-in tune and says why in the log; if the system's autoplay policy blocks it (the autostart path has no user gesture at all) the app tells you and starts on your next click.
 

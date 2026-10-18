@@ -2371,12 +2371,12 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     }
 
     // 语言切换即时生效：本会话后续的 launcher 日志、托盘菜单文字（前端自行切换界面文案）。
-    // DSH 自身界面语言通过 settings.yaml 联动，需 DSH 重启后变化。
+    // DSH 自身界面语言通过 cordis.patch.yml（旧版 settings.yaml 一并写出）联动，需 DSH 重启后变化。
     i18n::set_lang(&config.language);
     crate::refresh_tray_texts(&app);
     // 安全模式激活时窗口标题带本地化前缀（[安全模式] / [Safe Mode]），语言切换后同步刷新
     crate::safe::refresh_title_if_active(&app);
-    // 同步 DSH 家目录 settings.yaml → locale.preference
+    // 同步 DSH 的偏好 → locale.preference（profile 的 cordis.patch.yml；旧版 settings.yaml 一并写出）
     match config::sync_dsh_locale(&config.dsh_home_dir, &config.language) {
         Ok(()) => emit_log(
             &app,
@@ -2389,9 +2389,9 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
             i18n::fmt("err_locale_sync_fail", &[&e]),
         ),
     }
-    // 同步 DSH 家目录 settings.yaml → ui-theme.preference。
-    // DSH 的 settings-file 提供器监视该文件并把变化实时推送到已打开的页面，
-    // 因此 DSH 端无需重启即可跟随换肤（区别于语言需要重启才生效）。
+    // 同步 DSH 的偏好 → ui-theme.preference（cordis.patch.yml；旧版 settings.yaml 一并写出）。
+    // 旧版 DSH 的 settings-file 提供器监视文件、已打开的页面实时换肤；新版 DSH（0.2.x）
+    // 在启动时解析补丁层、没有文件监视器，主题在其下次启动后生效（语言两条路径都需重启）。
     match config::sync_dsh_theme(&config.dsh_home_dir, &config.appearance) {
         Ok(()) => emit_log(
             &app,
@@ -6884,7 +6884,7 @@ pub fn finish_setup(app: AppHandle) -> Result<ConfigReport, String> {
     let cfg = config::load(&app);
     config::save(&app, &cfg)?;
     // 引导完成后按用户配置同步一次 DSH 界面语言与外观（外观值此时已继承自
-    // settings.yaml 或默认 system，写回等价于确认，不会覆盖 DSH 现有主题）
+    // DSH 现有配置或默认 system，写回等价于确认，不会覆盖 DSH 现有主题）
     let _ = config::sync_dsh_locale(&cfg.dsh_home_dir, &cfg.language);
     let _ = config::sync_dsh_theme(&cfg.dsh_home_dir, &cfg.appearance);
     log_launcher(&app, i18n::t("log_setup_done"));
@@ -6892,7 +6892,7 @@ pub fn finish_setup(app: AppHandle) -> Result<ConfigReport, String> {
 }
 
 /// 向导第一步「选择语言」：立即切换本进程与托盘文案，同步 DSH 的
-/// settings.yaml，并把选择持久化到 ui-language sidecar（config.json 生成前
+/// 偏好（cordis.patch.yml；旧版 settings.yaml 一并写出），并把选择持久化到 ui-language sidecar（config.json 生成前
 /// 的唯一载体；finish_setup 之后以 config.json 为准）。
 /// 不写 config.json —— 否则 first_run 语义被破坏，用户中途中断重开后向导会消失。
 #[tauri::command]

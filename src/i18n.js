@@ -149,7 +149,7 @@
     ph_extra: '例如: --trusted-host example.com',
     lbl_pkg_name: 'DSH 的 npm 包名（用于查询 dist-tags 与拼装更新命令）',
     lbl_update_cmd_fixed: '更新命令固定为 npm install -g <包名>@<频道>；频道（latest / next）在点「更新 DSH」时选择，不再单独设置参数。',
-    set_hint_html: '配置保存于：<span id="set-config-path"></span><br />路径留空或失效时会自动检测本机的 Node / npm / DSH（npm / dsh 的程序路径不在此处提供修改入口 —— 它们会被<b>执行</b>，由程序自动检测更安全）；也可点上方「自动检测」。<br />家目录是 DSH 摆放配置文件的地方（通过 DSH_HOME 传给 DSH；只要它不是默认值，保存后就会自动写进你的用户环境变量，让你自己开的终端里的 dsh 也用同一个家目录，改回默认值则自动删掉）；进程工作目录自动取其上一级，DSH 的工作区在网页内随意指定。端口 / 参数修改在<b>下次启动 DSH</b> 时生效；语言切换即时生效，并同步写入 DSH 的 settings.yaml（DSH 界面语言在其重启后变化）；外观同样写入 settings.yaml（ui-theme.preference），DSH 页面<b>实时</b>跟随切换。<br />Desktop 日志：同目录 desktop.log；DSH 输出日志：&lt;家目录&gt;\\logs\\dsh.log。',
+    set_hint_html: '配置保存于：<span id="set-config-path"></span><br />路径留空或失效时会自动检测本机的 Node / npm / DSH（npm / dsh 的程序路径不在此处提供修改入口 —— 它们会被<b>执行</b>，由程序自动检测更安全）；也可点上方「自动检测」。<br />家目录是 DSH 摆放配置文件的地方（通过 DSH_HOME 传给 DSH；只要它不是默认值，保存后就会自动写进你的用户环境变量，让你自己开的终端里的 dsh 也用同一个家目录，改回默认值则自动删掉）；进程工作目录自动取其上一级，DSH 的工作区在网页内随意指定。端口 / 参数修改在<b>下次启动 DSH</b> 时生效；语言切换即时生效，并同步写入 DSH 的 cordis.patch.yml（旧版 settings.yaml 一并写出；DSH 界面语言在其重启后变化）；外观同样写入（ui-theme.preference），旧版 DSH 页面<b>实时</b>跟随，新版 DSH 在其下次启动后生效。<br />Desktop 日志：同目录 desktop.log；DSH 输出日志：&lt;家目录&gt;\\logs\\dsh.log。',
     btn_detect_pkg: '检测全局包名（npm list -g）',
     btn_cancel: '取消', btn_save: '保存',
     flag_exists: '✔ 存在', flag_missing: '✘ 未找到',
@@ -157,7 +157,7 @@
     toast_saved_note: '已保存；端口/参数在下次启动 DSH 时生效',
     toast_save_fail: '保存失败: {0}',
     toast_port_invalid: '端口无效：必须是 1 到 65535 之间的数字',
-    confirm_restart_dsh: 'DSH 正在运行。其界面语言已写入 settings.yaml，需要重启 DSH 才会切换。立即重启 DSH 吗？',
+    confirm_restart_dsh: 'DSH 正在运行。其界面语言已写入 DSH 的 cordis.patch.yml，需要重启 DSH 才会切换。立即重启 DSH 吗？',
     // 日志弹窗
     log_title: '日志', autoscroll: '自动滚动',
     btn_open_logdir: '打开日志目录', btn_copy_log: '复制日志',
@@ -344,7 +344,7 @@
     toast_setup_save_fail: '保存初始配置失败: {0}',
     toast_lang_fail: '语言切换失败（本次会话仍会跟随您的选择，重启后恢复）: {0}',
     toast_detect_fail_short: '检测失败: {0}',
-    log_locale_synced: '[launcher] DSH 界面语言已同步写入 settings.yaml，点工具栏「重启」即可切换 DSH 界面语言。',
+    log_locale_synced: '[launcher] DSH 界面语言已同步写入 DSH 的 cordis.patch.yml（旧版 settings.yaml 一并写出），点工具栏「重启」即可切换 DSH 界面语言。',
 
     // ---------- Node.js 版本下限（DSH 需要 ≥ 22.19.0；低于它会启动失败） ----------
     wiz_node_old_title: '⚠ Node.js 版本过低',
@@ -400,7 +400,7 @@
     lbl_music_file: '自选音乐文件（留空 = 内置曲）',
     ph_music_path: '留空 = 使用内置曲目',
     btn_music_builtin: '恢复内置',
-    note_music: '内置曲是程序用 Web Audio 现场合成的五声音阶琶音（不联网、不读任何文件）；自选曲在启动等待页循环播放，DSH 一就绪就随诗行一起淡出。支持 mp3 / wav / m4a / ogg / flac（WebView2 能解码的格式），单个文件不超过 32 MB。文件不在了或读不出来时会自动回落到内置曲，并在日志里说明原因。',
+    note_music: '内置曲是程序用 Web Audio 现场合成的五声音阶琶音（不联网、不读任何文件），一段约 7 秒的乐句；自选曲整首播放。两者都只播一遍、不循环：曲子先于 DSH 就绪播完，剩余等待就是静音；DSH 先就绪，曲子继续播完这一遍再停。支持 mp3 / wav / m4a / ogg / flac（WebView2 能解码的格式），单个文件不超过 32 MB。文件不在了或读不出来时会自动回落到内置曲，并在日志里说明原因。',
     // 状态行右侧的小标志：告诉用户此刻到底是哪一段在（可能）播
     music_flag_off: '已关闭',
     music_flag_builtin: '内置曲',
@@ -553,7 +553,7 @@
     ph_extra: 'e.g. --trusted-host example.com',
     lbl_pkg_name: 'DSH npm package name (used for dist-tags queries and the update command)',
     lbl_update_cmd_fixed: 'The update command is fixed to npm install -g <package>@<channel>; pick the channel (latest / next) in the "Update DSH" dialog instead.',
-    set_hint_html: 'Configuration is saved to: <span id="set-config-path"></span><br />Empty or invalid paths are auto-detected on this machine (Node / npm / DSH); the npm / dsh program paths have no editing field here — they are <b>executed</b>, so letting the app detect them is safer. You can also click "Auto-detect" above.<br />The home dir is where DSH keeps its config (passed to DSH as DSH_HOME; while it is not the default, it is automatically written into your user environment variable on save so `dsh` in a terminal you open yourself follows it — changing it back to the default removes it again); the process working dir is its parent — the DSH workspace is chosen inside the web UI. Port / argument changes take effect on the <b>next DSH start</b>; language applies immediately and is also synced into DSH\'s settings.yaml (DSH\'s own UI changes after DSH restarts); appearance is likewise written to settings.yaml (ui-theme.preference) and the DSH page follows it <b>live</b>.<br />Desktop log: desktop.log in the same folder; DSH output log: &lt;home&gt;\\logs\\dsh.log.',
+    set_hint_html: 'Configuration is saved to: <span id="set-config-path"></span><br />Empty or invalid paths are auto-detected on this machine (Node / npm / DSH); the npm / dsh program paths have no editing field here — they are <b>executed</b>, so letting the app detect them is safer. You can also click "Auto-detect" above.<br />The home dir is where DSH keeps its config (passed to DSH as DSH_HOME; while it is not the default, it is automatically written into your user environment variable on save so `dsh` in a terminal you open yourself follows it — changing it back to the default removes it again); the process working dir is its parent — the DSH workspace is chosen inside the web UI. Port / argument changes take effect on the <b>next DSH start</b>; language applies immediately and is also synced into DSH\'s cordis.patch.yml (the legacy settings.yaml is written too; DSH\'s own UI changes after DSH restarts); appearance is likewise written (ui-theme.preference) — older DSH follows it <b>live</b>, DSH 0.2.x applies it at its next start.<br />Desktop log: desktop.log in the same folder; DSH output log: &lt;home&gt;\\logs\\dsh.log.',
     btn_detect_pkg: 'Detect global package (npm list -g)',
     btn_cancel: 'Cancel', btn_save: 'Save',
     flag_exists: '✔ found', flag_missing: '✘ not found',
@@ -561,7 +561,7 @@
     toast_saved_note: 'Saved; port/args take effect on the next DSH start',
     toast_save_fail: 'Save failed: {0}',
     toast_port_invalid: 'Invalid port: must be a number from 1 to 65535',
-    confirm_restart_dsh: 'DSH is running. Its UI language was written to settings.yaml and needs a DSH restart to switch. Restart DSH now?',
+    confirm_restart_dsh: 'DSH is running. Its UI language was written to DSH\'s cordis.patch.yml and needs a DSH restart to switch. Restart DSH now?',
     log_title: 'Log', autoscroll: 'Auto-scroll',
     btn_open_logdir: 'Open log folder', btn_copy_log: 'Copy log',
     btn_clear_log: 'Clear', btn_close_log: 'Close',
@@ -737,7 +737,7 @@
     toast_setup_save_fail: 'Failed to save the initial config: {0}',
     toast_lang_fail: 'Failed to switch the language (this session still follows your choice; it reverts after a restart): {0}',
     toast_detect_fail_short: 'Check failed: {0}',
-    log_locale_synced: '[launcher] DSH UI language synced into settings.yaml — click "Restart" in the toolbar to switch DSH\'s own interface language.',
+    log_locale_synced: '[launcher] DSH UI language synced into DSH\'s cordis.patch.yml (legacy settings.yaml written too) — click "Restart" in the toolbar to switch DSH\'s own interface language.',
 
     // ---------- Node.js minimum version (DSH needs >= 22.19.0; older versions fail to start) ----------
     wiz_node_old_title: '⚠ Node.js version too old',
@@ -793,7 +793,7 @@
     lbl_music_file: 'Custom music file (empty = built-in tune)',
     ph_music_path: 'Empty = use the built-in tune',
     btn_music_builtin: 'Use built-in',
-    note_music: 'The built-in tune is synthesized on the fly with Web Audio (no network, no file to ship); a custom file loops on the startup page and fades out together with the poem lines once DSH is ready. Supported: mp3 / wav / m4a / ogg / flac (whatever WebView2 can decode), up to 32 MB per file. If the file is missing or unreadable it falls back to the built-in tune and says so in the log.',
+    note_music: 'The built-in tune is synthesized on the fly with Web Audio (no network, no file to ship) — a single ~7 s phrase; a custom file plays in full. Both play exactly once and never loop: if the track ends before DSH is ready, the rest of the wait is silent; if DSH is ready first, the track finishes this one pass before stopping. Supported: mp3 / wav / m4a / ogg / flac (whatever WebView2 can decode), up to 32 MB per file. If the file is missing or unreadable it falls back to the built-in tune and says so in the log.',
     // Small status flag: tells the user which track is (or would be) playing
     music_flag_off: 'Off',
     music_flag_builtin: 'Built-in',

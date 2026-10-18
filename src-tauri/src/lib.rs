@@ -359,7 +359,7 @@ pub fn refresh_tray_texts(app: &tauri::AppHandle) {
 /// 把外观设置映射到原生窗口主题（标题栏深浅）。
 /// light/dark 强制对应主题；system → None 表示跟随操作系统。
 /// 这会影响窗口内所有 webview 的 prefers-color-scheme，但内嵌 DSH 页面自身的
-/// 深浅由 settings.yaml 的 ui-theme.preference 决定（已在 process::save_config 同步），
+/// 深浅由 DSH 配置的 ui-theme.preference 决定（cordis.patch.yml；已在 process::save_config 同步），
 /// 两者取值一致，不会打架。
 fn theme_for(appearance: &str) -> Option<tauri::Theme> {
     match config::normalize_appearance(appearance) {

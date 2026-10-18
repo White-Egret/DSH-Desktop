@@ -49,14 +49,16 @@ pub struct Config {
     /// 点击主窗口 X 时的行为："tray" = 隐藏到托盘（默认），"quit" = 退出程序
     pub close_action: String,
     /// 界面语言："zh" = 中文（默认），"en" = English。
-    /// 保存时同步写入 DSH 家目录 settings.yaml 的 locale.preference，
-    /// 让 DSH 自身的 Web 界面跟随中英文切换。
+    /// 保存时同步写入 DSH 偏好层（profile 的 cordis.patch.yml；旧版 settings.yaml
+    /// 一并写出）的 locale.preference，让 DSH 自身的 Web 界面跟随中英文切换。
     pub language: String,
     /// 外观："light" = 浅色，"dark" = 深色，"system" = 跟随系统（默认）。
     /// 同时控制桌面端界面（前端 data-theme + 原生标题栏 set_theme）与 DSH Web 界面：
-    /// 保存时写入 settings.yaml 的 ui-theme.preference，DSH 的 settings-file 提供器
-    /// 监视该文件并把变化实时推送到已打开的页面，无需重启 DSH。
-    /// 老配置（无此字段）首次加载时继承 DSH settings.yaml 里的现有主题，避免升级即覆盖。
+    /// 保存时写入 ui-theme.preference（cordis.patch.yml；旧版 settings.yaml 一并写出）。
+    /// 旧版 DSH 的 settings-file 提供器监视文件、已打开的页面实时换肤；
+    /// 新版 DSH（0.2.x）在启动时解析补丁层，主题在其下次启动后生效。
+    /// 老配置（无此字段）首次加载时继承 DSH 现有主题（cordis.patch.yml，回落旧版
+    /// settings.yaml），避免升级即覆盖。
     pub appearance: String,
     /// 最近一次交给内嵌 WebView 的 DSH 页面完整地址，**以 DPAPI 密文（十六进制）存放**
     /// （地址可能带 `?token=<base64url>` 会话令牌，明文绝不落盘 —— 安全审查 MEDIUM-2，
@@ -251,7 +253,7 @@ pub fn cwd_of_home(home_dir: &str) -> Result<String, String> {
 //
 // 为什么必须校验：配置里的这几个路径不是「只是个字符串」，它们各自是一个能力：
 // - dsh_home_dir → DSH_HOME 环境变量、DSH 进程工作目录的父级（workspace_cwd）、
-//   create_dir_all + settings.yaml 写入位置（本文件 sync_dsh_locale）、
+//   create_dir_all + settings.yaml / profiles\web\cordis.patch.yml 写入位置（本文件 sync_dsh_locale）、
 //   以及 <home>\logs\dsh.log 的镜像写入位置（logger.rs）。
 //   合起来就是「在家目录之外没有任何约束的任意目录创建 + 写文件」原语，
 //   而且 cwd 落在哪里还决定了 DSH（一个有文件/shell 工具的 Agent）能看到什么。
@@ -1117,17 +1119,49 @@ pub fn normalize_toolbar_mode(raw: &str) -> &'static str {
     }
 }
 
-/// 把界面语言写入 `<DSH 家目录>\settings.yaml` 的 locale.preference。
+/// 把界面语言同步进 DSH 的配置。
+///
+/// DSH 0.2.x 起 `settings.yaml` 不再被读取（其 lib 里已无一处引用）：locale /
+/// ui-theme 偏好迁到了 **profile 的 `cordis.patch.yml`**（顶层 YAML 数组，
+/// `- id: locale` 条目）。这里**两个文件都写**：patch 文件给新版 DSH；
+/// `<家目录>\settings.yaml` 的扁平块照旧写出，旧版 DSH（latest 通道）依旧联动。
+/// 任一失败都会如实报错 —— 只报其一，会让「看起来成功」的那侧掩盖另一侧。
 pub fn sync_dsh_locale(home_dir: &str, language: &str) -> Result<(), String> {
     let pref = if language.eq_ignore_ascii_case("en") { "en" } else { "zh" };
-    sync_dsh_setting(home_dir, "locale", pref)
+    write_dsh_preference(home_dir, "locale", "@deepseek-ai/dsh-client-locale", pref)
 }
 
-/// 把外观写入 `<DSH 家目录>\settings.yaml` 的 ui-theme.preference。
-/// DSH 的 settings-file 提供器用文件监视器热加载该文件并把变化推送给已打开的
-/// 页面（客户端 ThemeRuntime 订阅 settings scope），因此无需重启 DSH 即可换肤。
+/// 把外观同步进 DSH 的配置（同 sync_dsh_locale 的双写策略）。
+/// 注意：新版 DSH 的补丁层在启动时解析、lib 里没有任何文件监视器 —— 只有旧版
+/// DSH 的 settings-file 提供器才做实时热加载。对新版 DSH，主题在其下次启动后生效。
 pub fn sync_dsh_theme(home_dir: &str, appearance: &str) -> Result<(), String> {
-    sync_dsh_setting(home_dir, "ui-theme", normalize_appearance(appearance))
+    write_dsh_preference(
+        home_dir,
+        "ui-theme",
+        "@deepseek-ai/dsh-client-ui-theme",
+        normalize_appearance(appearance),
+    )
+}
+
+/// 双写：新版 DSH 读 profile 的 cordis.patch.yml，旧版读家目录的 settings.yaml。
+/// 两个落点写的是同一个键（`preference`），值也一致。
+fn write_dsh_preference(home_dir: &str, id: &str, name: &str, pref: &str) -> Result<(), String> {
+    let home = validate_home_dir(home_dir)?;
+    let patch = sync_patch_preference(&dsh_profile_dir(&home), id, name, pref);
+    let legacy = sync_dsh_setting(&home, id, pref);
+    match (patch, legacy) {
+        (Ok(()), Ok(())) => Ok(()),
+        (patch, legacy) => {
+            let mut errs: Vec<String> = Vec::new();
+            if let Err(e) = patch {
+                errs.push(e);
+            }
+            if let Err(e) = legacy {
+                errs.push(e);
+            }
+            Err(errs.join("; "))
+        }
+    }
 }
 
 /// 把 `preference: <pref>` 写入 `<DSH 家目录>\settings.yaml` 的 `<block>:` 块
@@ -1207,13 +1241,249 @@ fn sync_dsh_setting(home_dir: &str, block: &str, pref: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// 从 `<DSH 家目录>\settings.yaml` 的 ui-theme 块读取 preference（light/dark/system）。
+// ---------- profile 的 cordis.patch.yml（DSH 0.2.x 的偏好层） ----------
+
+/// profile 目录（cordis.patch.yml 所在）。
+///
+/// 与 py_bridge::probe_profile 同一优先级，但不依赖 AppHandle（config.rs 不碰它）：
+/// ① `DSH_PROFILE_DIR`（最权威 —— 它就是正在跑的那个 profile 的目录）；
+/// ② `<家目录>\profiles\` 下**实际存在**的 web / default（桌面端起的是 `dsh web`）；
+/// ③ 兜底 `<家目录>\profiles\web`（新建 profile 的标准位置，写前会建目录）。
+fn dsh_profile_dir(home_dir: &str) -> PathBuf {
+    if let Ok(p) = std::env::var("DSH_PROFILE_DIR") {
+        let t = p.trim();
+        if !t.is_empty() {
+            return PathBuf::from(t);
+        }
+    }
+    let home = PathBuf::from(home_dir);
+    for name in ["web", "default"] {
+        let dir = home.join("profiles").join(name);
+        if dir.is_dir() {
+            return dir;
+        }
+    }
+    home.join("profiles").join("web")
+}
+
+/// 一个顶层条目在 patch 文件里的定位结果。
+/// `end` 不含（下一条目首行或 EOF）；`config_line` / `preference_line` 缺失时为 None。
+struct PatchEntryPos {
+    start: usize,
+    end: usize,
+    key_indent: usize,
+    config_line: Option<usize>,
+    preference_line: Option<usize>,
+}
+
+/// 在顶层 YAML 数组里定位 `- id: <id>` 条目（列 0 的数组项；嵌套的缩进 `- `
+/// 一律不算 —— 真实文件里 providers 的 models 列表全是缩进的 `- id:`）。
+/// `config:` 优先按「与条目键同级」匹配，退而求其次接受条目内更深缩进的
+/// 同名键 —— 防止手改过的文件被误判成「没有 config 块」而插出重复键。
+fn locate_patch_entry(lines: &[&str], id: &str) -> Option<PatchEntryPos> {
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let is_entry_start = |line: &str| -> bool {
+        let Some(rest) = line.strip_prefix("- ") else {
+            return false;
+        };
+        let Some(rest) = rest.strip_prefix("id:") else {
+            return false;
+        };
+        let rest = match rest.find('#') {
+            Some(p) => &rest[..p],
+            None => rest,
+        };
+        rest.trim() == id
+    };
+    let mut start = None;
+    for (i, raw) in lines.iter().enumerate() {
+        // 首行可能带 BOM：只影响第一行的匹配，比较前剥掉（重建时原样保留）
+        let line: &str = if i == 0 {
+            raw.trim_start_matches('\u{feff}')
+        } else {
+            *raw
+        };
+        if is_entry_start(line) {
+            start = Some(i);
+            break;
+        }
+    }
+    let s = start?;
+    let mut end = lines.len();
+    for (j, l) in lines.iter().enumerate().skip(s + 1) {
+        if l.starts_with("- ") {
+            end = j;
+            break;
+        }
+    }
+    let key_indent = lines[s + 1..end]
+        .iter()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| indent(l))
+        .unwrap_or(2);
+    let config_line = lines[s + 1..end]
+        .iter()
+        .position(|l| !l.trim().is_empty() && l.trim() == "config:" && indent(l) == key_indent)
+        .or_else(|| {
+            lines[s + 1..end]
+                .iter()
+                .position(|l| l.trim() == "config:" && indent(l) > 0)
+        })
+        .map(|p| s + 1 + p);
+    let preference_line = config_line.and_then(|k| {
+        let ci = indent(lines[k]);
+        lines[k + 1..end]
+            .iter()
+            .take_while(|l| l.trim().is_empty() || indent(l) > ci)
+            .position(|l| l.trim_start().starts_with("preference:"))
+            .map(|p| k + 1 + p)
+    });
+    Some(PatchEntryPos {
+        start: s,
+        end,
+        key_indent,
+        config_line,
+        preference_line,
+    })
+}
+
+/// 在 patch 文件文本里写入（或更新）`id` 条目的 `config.preference`。
+/// 替换 / 插入 / 追加三选一，**条目之外的每一行逐字保留** —— 这是 DSH 自己在
+/// 维护的文件（providers、apiKeyEnv、注释都在里面），任何多余的重排都会被
+/// DSH 侧的下一次写入放大。
+fn upsert_patch_entry(content: &str, id: &str, name: &str, pref: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 5);
+    match locate_patch_entry(&lines, id) {
+        Some(pos) => {
+            for l in &lines[..pos.start] {
+                out.push((*l).to_string());
+            }
+            out.push(lines[pos.start].to_string());
+            match (pos.config_line, pos.preference_line) {
+                (Some(_), Some(p)) => {
+                    // 已有 preference：只换那一行，保留它自己的缩进
+                    for l in &lines[pos.start + 1..p] {
+                        out.push((*l).to_string());
+                    }
+                    let lead = &lines[p][..lines[p].len() - lines[p].trim_start().len()];
+                    out.push(format!("{}preference: {}", lead, pref));
+                    for l in &lines[p + 1..] {
+                        out.push((*l).to_string());
+                    }
+                }
+                (Some(k), None) => {
+                    // config: 块内没有 preference：插到 config: 行之后，
+                    // 缩进取块内首个非空行的缩进（块为空时用键缩进 + 2）
+                    for l in &lines[pos.start + 1..=k] {
+                        out.push((*l).to_string());
+                    }
+                    let ins: String = lines[k + 1..pos.end]
+                        .iter()
+                        .find(|l| !l.trim().is_empty())
+                        .map(|l| l[..l.len() - l.trim_start().len()].to_string())
+                        .unwrap_or_else(|| " ".repeat(pos.key_indent + 2));
+                    out.push(format!("{}preference: {}", ins, pref));
+                    for l in &lines[k + 1..] {
+                        out.push((*l).to_string());
+                    }
+                }
+                (None, _) => {
+                    // 条目存在但没有 config: 块：把整块补在条目末尾（下一条目之前）
+                    for l in &lines[pos.start + 1..pos.end] {
+                        out.push((*l).to_string());
+                    }
+                    let ws = " ".repeat(pos.key_indent);
+                    out.push(format!("{}config:", ws));
+                    out.push(format!(
+                        "{}preference: {}",
+                        " ".repeat(pos.key_indent + 2),
+                        pref
+                    ));
+                    for l in &lines[pos.end..] {
+                        out.push((*l).to_string());
+                    }
+                }
+            }
+        }
+        None => {
+            // 条目不存在：文件末尾追加（全新文件附一行说明头）
+            for l in &lines {
+                out.push((*l).to_string());
+            }
+            if content.trim().is_empty() {
+                out.push(
+                    "# 由 DSH Desktop 写入：本 profile 的 locale / ui-theme 偏好；其余条目请交给 DSH 自己的设置页维护。"
+                        .to_string(),
+                );
+            } else if out.last().map(|l| !l.trim().is_empty()).unwrap_or(false) {
+                out.push(String::new());
+            }
+            out.push(format!("- id: {}", id));
+            out.push(format!("  name: \"{}\"", name));
+            out.push("  config:".to_string());
+            out.push(format!("    preference: {}", pref));
+        }
+    }
+    let mut text = out.join("\n");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
+/// 写 profile 的 cordis.patch.yml：目录不存在就建，文件不存在就建（仅含该条目）。
+fn sync_patch_preference(
+    profile_dir: &Path,
+    id: &str,
+    name: &str,
+    pref: &str,
+) -> Result<(), String> {
+    std::fs::create_dir_all(profile_dir)
+        .map_err(|e| format!("{}: {}", profile_dir.display(), e))?;
+    let path = profile_dir.join("cordis.patch.yml");
+    let content = if path.is_file() {
+        std::fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?
+    } else {
+        String::new()
+    };
+    let text = upsert_patch_entry(&content, id, name, pref);
+    // 原子替换（L-6），与 settings.yaml 的写入同一纪律：半截 patch 文件 DSH 会整个拒收
+    write_atomic(&path, text.as_bytes()).map_err(|e| format!("{}: {}", path.display(), e))?;
+    Ok(())
+}
+
+/// 从 profile 的 cordis.patch.yml 读 `id` 条目的 preference（去引号后的原值）。
+/// 文件 / 条目 / 键任一缺失 → None，调用方自行决定回落。
+fn read_patch_preference(profile_dir: &Path, id: &str) -> Option<String> {
+    let content = std::fs::read_to_string(profile_dir.join("cordis.patch.yml")).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    let pos = locate_patch_entry(&lines, id)?;
+    let p = pos.preference_line?;
+    let v = lines[p].trim_start().strip_prefix("preference:")?.trim();
+    let v = match v.find('#') {
+        Some(i) => v[..i].trim(),
+        None => v,
+    };
+    Some(v.trim_matches('"').trim_matches('\'').to_string())
+}
+
+/// 从 DSH 的配置读取 ui-theme preference（light/dark/system）。
 /// 仅用于「老配置没有 appearance 字段时继承 DSH 现有主题」：文件缺失、块缺失、
 /// 值非法一律返回 None（调用方保持自己的默认值），绝不在此处写盘。
+/// 新版 DSH（0.2.x）读 profile 的 cordis.patch.yml；旧版读 `<家目录>\settings.yaml`。
 pub fn read_dsh_theme(home_dir: &str) -> Option<String> {
     let home = home_dir.trim();
     if home.is_empty() {
         return None; // 未配置家目录：绝不回退到相对路径去读进程 CWD 里的同名文件
+    }
+    // 新版 DSH：patch 层的 ui-theme 条目。条目存在但值认不出 → 按无现有主题处理、
+    // 不再回落 settings.yaml —— 那一侧属于旧版 DSH，两套值可能各自漂移。
+    if let Some(v) = read_patch_preference(&dsh_profile_dir(home), "ui-theme") {
+        return match normalize_appearance(&v) {
+            "system" if !v.eq_ignore_ascii_case("system") => None,
+            other => Some(other.to_string()),
+        };
     }
     let path = PathBuf::from(home).join("settings.yaml");
     let content = std::fs::read_to_string(&path).ok()?;
@@ -1286,7 +1556,7 @@ pub fn load(app: &AppHandle) -> Config {
     let mut legacy_last_url: Option<String> = None;
     let mut cfg = if let Ok(s) = std::fs::read_to_string(&path) {
         // 老版本 config.json 没有 appearance 字段：先探一下键是否存在（合法字符串值），
-        // 缺失时下面再从 DSH settings.yaml 继承现有主题，避免升级即把 DSH 页面改色。
+        // 缺失时下面再从 DSH 现有配置继承主题（cordis.patch.yml，回落旧版 settings.yaml），避免升级即把 DSH 页面改色。
         let raw = serde_json::from_str::<serde_json::Value>(&s).ok();
         has_appearance = raw
             .as_ref()
@@ -1322,7 +1592,7 @@ pub fn load(app: &AppHandle) -> Config {
             }
         }
         match migrated {
-            // 迁移：旧配置必然没有 appearance 字段——先从 DSH settings.yaml 继承
+            // 迁移：旧配置必然没有 appearance 字段——先从 DSH 现有配置继承
             // 现有主题，再写盘，保证磁盘与内存一致（否则下次加载读到 system 会翻回去）
             Some(mut c) => {
                 if let Some(t) = read_dsh_theme(&c.dsh_home_dir) {
@@ -1347,7 +1617,7 @@ pub fn load(app: &AppHandle) -> Config {
     // 缺失/失效的路径用本机检测结果补齐（不写盘，写盘仍由用户「保存」触发）
     autofill_from_detection(&mut cfg);
     // 升级兼容：config.json 里没有 appearance 字段（老版本首次升级、或首次运行
-    // 尚未走完向导）时，继承 DSH settings.yaml 的现有主题；读不到则保持默认 system。
+    // 尚未走完向导）时，继承 DSH 现有主题（cordis.patch.yml，回落旧版 settings.yaml）；读不到则保持默认 system。
     // 这样升级桌面端不会把用户已经在 DSH 页面里选好的外观改掉。
     if !has_appearance {
         if let Some(t) = read_dsh_theme(&cfg.dsh_home_dir) {
@@ -1371,7 +1641,7 @@ pub fn load(app: &AppHandle) -> Config {
 // 崩溃 / 断电 / 被杀进程恰好发生在这中间时，磁盘上留下的是**半截**文件。
 // 加载侧对 config.json 用的是 `serde_json::from_str(...).unwrap_or_default()`，
 // 读到半截 JSON 就静默回落默认值 —— 用户一次崩溃就换来「所有设置被抹掉」
-// （不构成提权，但属于会真实发生的数据丢失）；settings.yaml 那侧更麻烦，
+// （不构成提权，但属于会真实发生的数据丢失）；settings.yaml / cordis.patch.yml 那侧更麻烦，
 // 因为我们只做「最小行编辑」，半截 YAML 会被 DSH 自己读进去。
 
 /// 同一进程内保证每次调用用的临时文件名都不同（跨进程靠 pid 区分）。
@@ -1781,6 +2051,148 @@ mod tests {
         let current: Config =
             serde_json::from_str(r#"{"toolbar_mode":"auto"}"#).expect("新配置应能解析");
         assert_eq!(current.toolbar_mode, "auto");
+    }
+
+    // ---------- cordis.patch.yml（DSH 0.2.x 的 profile 偏好层） ----------
+
+    /// 条目存在且有 preference：只替换那一行（保留原缩进）；同块兄弟键、其它
+    /// 条目、文件头注释逐字保留 —— 这是 DSH 自己在维护的文件。
+    #[test]
+    fn patch_entry_replaces_preference_and_preserves_the_rest() {
+        let src = "# 顶部注释\n- id: ui-settings-general\n  config:\n    welcomeNoticeVersion: 1\n- id: ui-theme\n  name: \"@deepseek-ai/dsh-client-ui-theme\"\n  config:\n    preference: light\n    fontSize: 14\n- id: locale\n  name: \"@deepseek-ai/dsh-client-locale\"\n  config:\n    preference: zh\n- id: github\n  disabled: false\n";
+        let out = upsert_patch_entry(src, "locale", "@deepseek-ai/dsh-client-locale", "en");
+        assert!(
+            out.contains("    preference: en\n"),
+            "locale 的 preference 应被替换：\n{out}"
+        );
+        assert!(!out.contains("preference: zh"), "旧值必须消失：\n{out}");
+        assert!(
+            out.contains("    preference: light\n    fontSize: 14\n"),
+            "ui-theme 条目不得被波及：\n{out}"
+        );
+        assert!(out.starts_with("# 顶部注释\n"), "文件头注释必须逐字保留");
+        assert!(
+            out.ends_with("- id: github\n  disabled: false\n"),
+            "后续条目必须逐字保留：\n{out}"
+        );
+        assert_eq!(out.matches("- id: locale").count(), 1, "不得追加重复条目");
+    }
+
+    /// config: 块存在但没有 preference：插在块首（缩进取块内首个非空行）。
+    #[test]
+    fn patch_entry_inserts_preference_into_existing_config_block() {
+        let src = "- id: locale\n  name: \"@deepseek-ai/dsh-client-locale\"\n  config:\n    fontSize: 14\n";
+        let out = upsert_patch_entry(src, "locale", "x", "zh");
+        assert!(
+            out.contains("  config:\n    preference: zh\n    fontSize: 14\n"),
+            "应插在 config: 块首、fontSize 之前：\n{out}"
+        );
+    }
+
+    /// 条目存在但没有 config: 块：整块补在条目末尾（下一条目之前）。
+    #[test]
+    fn patch_entry_inserts_config_block_when_entry_lacks_it() {
+        let src = "- id: locale\n  name: \"@deepseek-ai/dsh-client-locale\"\n- id: github\n  disabled: false\n";
+        let out = upsert_patch_entry(src, "locale", "@deepseek-ai/dsh-client-locale", "zh");
+        assert!(
+            out.contains("- id: locale\n  name: \"@deepseek-ai/dsh-client-locale\"\n  config:\n    preference: zh\n"),
+            "config 块应补在条目键层：\n{out}"
+        );
+        assert!(
+            out.contains("\n- id: github\n  disabled: false\n"),
+            "github 条目必须原样保留：\n{out}"
+        );
+    }
+
+    /// 条目不存在：空一行后追加到文件末尾，已有内容原样保留。
+    #[test]
+    fn patch_entry_appends_when_missing() {
+        let src = "- id: ui-theme\n  config:\n    preference: light\n";
+        let out = upsert_patch_entry(src, "locale", "@deepseek-ai/dsh-client-locale", "zh");
+        assert!(
+            out.ends_with("\n- id: locale\n  name: \"@deepseek-ai/dsh-client-locale\"\n  config:\n    preference: zh\n"),
+            "新条目应空一行后追加到末尾：\n{out}"
+        );
+        assert!(out.starts_with("- id: ui-theme\n"), "已有内容不得被动过");
+    }
+
+    /// 全新文件：说明头 + 仅含该条目。
+    #[test]
+    fn patch_entry_creates_new_file_shape() {
+        let out = upsert_patch_entry("", "locale", "@deepseek-ai/dsh-client-locale", "zh");
+        assert!(
+            out.starts_with("# 由 DSH Desktop 写入"),
+            "全新文件要有一行说明头：\n{out}"
+        );
+        assert!(
+            out.contains("- id: locale\n  name: \"@deepseek-ai/dsh-client-locale\"\n  config:\n    preference: zh\n")
+        );
+    }
+
+    /// 首行带 BOM 不得让定位失败 —— 否则会追加出重复条目（重复 id 在 YAML 层是
+    /// 未定义行为，DSH 侧可能拒收整份补丁）。
+    #[test]
+    fn patch_entry_matches_first_line_with_bom() {
+        let src = "\u{feff}- id: locale\n  config:\n    preference: zh\n";
+        let out = upsert_patch_entry(src, "locale", "x", "en");
+        assert!(out.contains("preference: en"));
+        assert_eq!(
+            out.matches("- id: locale").count(),
+            1,
+            "BOM 不得让匹配失败、追加出重复条目：\n{out}"
+        );
+    }
+
+    /// 嵌套的缩进 `- id:` 列表不是条目边界 —— 真实文件里 providers 的 models
+    /// 全是这种形状，定位必须只认列 0 的数组项。
+    #[test]
+    fn patch_entry_nested_list_items_are_not_entry_boundaries() {
+        let src = "- id: llm-pi-ai\n  config:\n    providers:\n      qwen:\n        models:\n          - id: a\n          - id: b\n- id: locale\n  config:\n    preference: zh\n";
+        let out = upsert_patch_entry(src, "locale", "x", "en");
+        assert!(
+            out.contains("          - id: b\n- id: locale\n  config:\n    preference: en\n"),
+            "嵌套列表必须逐字保留且条目边界不被误判：\n{out}"
+        );
+    }
+
+    /// 读取路径：从真实文件形状里读出各条目的 preference，缺失条目返回 None。
+    #[test]
+    fn patch_preference_read_roundtrip() {
+        let _g = lock();
+        let dir = scratch_dir("patch-read");
+        std::fs::write(
+            dir.join("cordis.patch.yml"),
+            bytes("- id: ui-theme\n  config:\n    preference: light\n    fontSize: 14\n- id: locale\n  config:\n    preference: zh\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            read_patch_preference(&dir, "ui-theme").as_deref(),
+            Some("light")
+        );
+        assert_eq!(read_patch_preference(&dir, "locale").as_deref(), Some("zh"));
+        assert_eq!(read_patch_preference(&dir, "missing"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 写入路径：目录与文件都不存在时创建；二次写入走「替换」而非追加。
+    #[test]
+    fn sync_patch_preference_creates_then_rewrites() {
+        let _g = lock();
+        let dir = scratch_dir("patch-write");
+        sync_patch_preference(&dir, "locale", "@deepseek-ai/dsh-client-locale", "en")
+            .expect("首写");
+        assert_eq!(
+            read_patch_preference(&dir, "locale").as_deref(),
+            Some("en")
+        );
+        sync_patch_preference(&dir, "locale", "@deepseek-ai/dsh-client-locale", "zh")
+            .expect("覆写");
+        let text = std::fs::read_to_string(dir.join("cordis.patch.yml")).unwrap();
+        assert!(
+            text.contains("preference: zh") && !text.contains("preference: en"),
+            "覆写后不得残留旧值：\n{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---------- 引导安装 Node.js 的自定义安装目录 ----------

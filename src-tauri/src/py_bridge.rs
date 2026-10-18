@@ -1176,14 +1176,17 @@ mod tests {
         let py_s = fake_py.to_string_lossy().to_string();
         let bd_s = bd.to_string_lossy().to_string();
 
+        // ⚠ 直接按模板替换三行，**不要**用 patch_bundle_config：
+        // 那个函数把 bridgeDir 与 cwd 写成**同一个值**，于是造不出
+        // 「bridgeDir 好、cwd 坏」这种组合（本测试第一次就栽在这里 ——
+        // 用例 ③ 实际变成了用例 ①，断言在 CI 上失败）。
         let write = |python: &str, bridge: &str, cwd: &str| {
-            std::fs::write(bun.join("cordis.patch.yml"), BUNDLE_FILES[1].1).unwrap();
-            let text = std::fs::read_to_string(bun.join("cordis.patch.yml")).unwrap();
-            let out = patch_bundle_config(&text, python, bridge)
-                .replace(
-                    "cwd: ''",
-                    &format!("cwd: '{}'", cwd.replace('\'', "''")),
-                );
+            let q = |s: &str| s.replace('\'', "''");
+            let out = BUNDLE_FILES[1]
+                .1
+                .replace("pythonPath: ''", &format!("pythonPath: '{}'", q(python)))
+                .replace("bridgeDir: ''", &format!("bridgeDir: '{}'", q(bridge)))
+                .replace("cwd: ''", &format!("cwd: '{}'", q(cwd)));
             std::fs::write(bun.join("cordis.patch.yml"), out).unwrap();
         };
 

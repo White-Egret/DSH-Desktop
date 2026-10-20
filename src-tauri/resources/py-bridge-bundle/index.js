@@ -259,7 +259,11 @@ export function apply(ctx, config = {}) {
   const pythonPath = (config.pythonPath ?? '').trim()
   const entryModule = (config.entryModule ?? 'bridge_entry').trim() || 'bridge_entry'
   const bridgeDir = (config.bridgeDir ?? '').trim()
-  const cwdRaw = (config.cwd ?? '').trim() || bridgeDir
+  // ⚠ cwd 刻意**不回退到 bridgeDir**（真机故障 2026-10-20）：
+  // Windows 上进程的 cwd 会锁住那个目录，「卸载办公包」时桌面端就删不掉它
+  // （os error 32，只留下一个空壳目录）。模块查找由 PYTHONPATH 负责，
+  // 所以 cwd 用哪都行 —— 但**不能**是 bridgeDir。
+  const cwdRaw = (config.cwd ?? '').trim()
 
   // 没装桥接就安静地什么都不做：DSH 必须照常可用（插件不是 DSH 的启动依赖）
   if (!pythonPath || !bridgeDir) {
@@ -292,17 +296,29 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * 工作目录：**必须是真实存在的目录**。
+   * 工作目录：**必须是真实存在的目录**，而且**不能是 bridgeDir**。
    *
    * 真机教训（2026-10-18）：`spawn` 的 ENOENT 不只表示「可执行文件不存在」——
    * 当 `cwd` 选项指向一个**已删除的目录**时，Node 报的同样是
    * `Error: spawn <python.exe> ENOENT`，且 `path` 字段显示的是 exe 路径，
    * 极易误判成「Python 被删了」。实测该机器上 Python 3.14.7 完好无损。
    *
-   * 策略：cwd 失效就退到 bridgeDir，再失效就退到用户主目录，
-   * 最后兜底 `process.cwd()` —— **绝不把失效路径交给 spawn**。
+   * 策略：cwd 失效就退到用户主目录，再退到当前进程 cwd，
+   * 最后兜底 `undefined`（= 交给 Node 用默认 cwd）—— **绝不把失效路径交给 spawn**。
+   *
+   * ⚠⚠ **cwd 刻意避开 bridgeDir**（真机故障 2026-10-20）：
+   * Windows 上，一个进程的 cwd 会**锁住**那个目录 —— 别的进程对它
+   * `RemoveDirectoryW` 会拿到 `os error 32`（另一个程序正在使用此文件）。
+   * 于是「卸载办公包」时：桥接进程还活着（它的 cwd 正是 bridgeDir），
+   * 桌面端删不掉那个目录，只能留下一个**空壳目录**（文件全被删了，目录壳子留着）。
+   *
+   * 解法：cwd 用别处，靠 **PYTHONPATH** 把 bridgeDir 送进 `sys.path` ——
+   * Python 照样能 `import bridge_entry` 与平铺导入同目录的各工具模块
+   * （`sys.path` 的第一项就是 PYTHONPATH），而 bridgeDir **不再被任何进程占用**。
+   * 本机实测：cwd 在别处 + PYTHONPATH 指向该目录 → `-m dsh_bridge.runtime bridge_entry`
+   * 正常启动，且 `remove_dir_all` 一次就把目录删干净了。
    */
-  const cwd = pickUsableCwd(cwdRaw, bridgeDir, ctx)
+  const cwd = pickUsableCwd(cwdRaw, ctx)
 
   /** @type {BridgeConnection | null} */
   let conn = null
@@ -361,6 +377,17 @@ export function apply(ctx, config = {}) {
             ...process.env,
             // 桥接产物目录：Python 侧落盘长结果时用得到
             DSH_PY_BRIDGE_HOME: bridgeDir,
+            // ⚠ PYTHONPATH 指向 bridgeDir —— 这是「cwd 不再用 bridgeDir」的前提。
+            // Python 靠 sys.path 找 `-m dsh_bridge.runtime bridge_entry` 里的
+            // `bridge_entry` 模块，以及它平铺导入的同目录各工具模块；
+            // sys.path 的第一项正是 PYTHONPATH，所以 cwd 在哪都不影响 import。
+            // 反过来，cwd 若落在 bridgeDir，那个目录就被进程锁住，
+            // 桌面端「卸载办公包」时删不掉它（真机故障 2026-10-20）。
+            //
+            // 已有 PYTHONPATH 时**追加**而不是覆盖：那是用户自己设的，别弄丢。
+            PYTHONPATH: process.env.PYTHONPATH
+              ? `${process.env.PYTHONPATH}${path.delimiter}${bridgeDir}`
+              : bridgeDir,
             PYTHONIOENCODING: 'utf-8',
             PYTHONUTF8: '1',
           },

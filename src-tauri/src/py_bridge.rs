@@ -161,6 +161,11 @@ impl BridgePhase {
 
 /// 从三个事实推出界面状态。**纯函数**：pending 状态机必须能单测，
 /// 而它的全部输入就是这三个布尔。
+///
+/// ⚠ `python_ok` 的语义是「**桥接运行时**（`dsh_bridge` 那个 pip 包）在不在」，
+/// 不是「有没有 Python 解释器」。解释器在而运行时被卸掉（正是「卸载办公包」
+/// 干的事）时，桥接确实没装，状态该是 `NotInstalled` 而不是 `NeedsRelease`
+/// —— 后者会说「Python 库已装好」，而库其实也被卸了。
 pub fn bridge_phase(python_ok: bool, released: bool, registered: bool) -> BridgePhase {
     match (python_ok, released, registered) {
         (false, _, _) => BridgePhase::NotInstalled,
@@ -221,6 +226,13 @@ fn bridge_status_blocking(app: &AppHandle) -> BridgeStatus {
     let bd = bridge_dir(&cfg_dir);
     let bun = bundle_dir(&cfg_dir);
     let py = detect::find_python();
+    // `python_ok` 判的是「**桥接运行时**在不在」，不是「有没有 Python 解释器」。
+    // 解释器在、运行时被卸了（正是「卸载办公包」干的事）—— 那时桥接确实没装，
+    // 状态行该说「未安装」，而不是「Python 库已装好，但代码还没部署」。
+    let python_ok = match &py {
+        Some(p) => crate::process::bridge_runtime_present(p),
+        None => false,
+    };
     let released = bd.join("bridge_entry.py").is_file();
     let profile = probe_profile(app);
     let registered = match &profile {
@@ -234,7 +246,7 @@ fn bridge_status_blocking(app: &AppHandle) -> BridgeStatus {
     // 用户会以为不用再管。pending 只作为**降级依据**：`registered` 查不到落点
     // （profile 没探测出来）时，退回「待激活」而不是误报「未部署」。
     let effective_registered = registered || (pending && profile.is_none());
-    let phase = bridge_phase(py.is_some(), released, effective_registered);
+    let phase = bridge_phase(python_ok, released, effective_registered);
     let message = bridge_phase_message(phase, pending, profile.as_deref());
     BridgeStatus {
         phase: phase.as_str().to_string(),
@@ -371,16 +383,96 @@ pub fn uninstall_bundle(app: &AppHandle) -> Result<String, String> {
     // ③ 删掉释放出来的两份代码
     for dir in [&bd, &bun] {
         if dir.exists() {
-            match std::fs::remove_dir_all(dir) {
+            match remove_bridge_dir(dir) {
                 Ok(()) => notes.push(i18n::fmt("py_bridge_dir_removed", &[&dir.to_string_lossy()])),
-                Err(e) => notes.push(i18n::fmt(
-                    "py_bridge_dir_remove_fail",
-                    &[&dir.to_string_lossy(), &e.to_string()],
-                )),
+                Err((e, locked)) => {
+                    // 「被占用」与别的错误要分开说：前者不是坏事 —— 文件已经删光，
+                    // 剩下的空壳会在下次启动 DSH 时自动清掉（见 cleanup_stale_bridge_dirs）。
+                    let key = if locked {
+                        "py_bridge_dir_remove_locked"
+                    } else {
+                        "py_bridge_dir_remove_fail"
+                    };
+                    notes.push(i18n::fmt(key, &[&dir.to_string_lossy(), &e]));
+                }
             }
         }
     }
     Ok(notes.join("\n"))
+}
+
+/// 删掉一个桥接代码目录。
+///
+/// 返回 `Err((说明, 是否被占用))` —— 「被占用」要单独标出来，因为它是**预期内**
+/// 的情况（见下），给用户的话术也不一样。
+///
+/// 真机现场（2026-10-20）：卸载时桥接进程还在跑，而它的 **cwd 就在 py-bridge
+/// 目录里**（旧版 index.js 把 `cwd` 设成 bridgeDir）。Windows 上一个进程的 cwd
+/// 会**锁住**那个目录，于是 `remove_dir_all` 报 `os error 32`
+/// （另一个程序正在使用此文件）—— **文件全被删了，目录壳子删不掉**。
+///
+/// ⚠ **改名绕不过去**（本机实测，2026-10-20）：对一个正被当作 cwd 的目录，
+/// `MoveFileExW` 同样返回 err=32。改名只在「目录已经被删空、只剩壳子」时才有意义，
+/// 而那不是这里的情形。所以这里**不做改名重试**，失败就如实报出来。
+///
+/// 真正的解法在 **index.js 那一侧**：cwd 改用别处，模块查找交给 PYTHONPATH，
+/// 于是 bridgeDir 不再被任何进程占用，`remove_dir_all` 一次就删干净。
+/// 那要重启 DSH 才生效 —— 所以「旧 DSH 还在跑时卸载」这一步仍可能删不掉，
+/// 留下一个**空壳目录**（里面的文件已被删光）。
+///
+/// 空壳目录**不影响任何判定**：`released` 看的是 `bridge_entry.py` 是不是文件
+/// （空壳里没有 → `released = false` → 状态正确显示「未安装」），
+/// 下次「基本安装」的 `release_sources` 覆盖写入即可。
+///
+/// 所以这里的返回值是**给用户看的实话**：删不掉就说删不掉，
+/// 并说明重启后会清掉（`cleanup_stale_bridge_dirs` 在进门时做这件事）。
+fn remove_bridge_dir(dir: &Path) -> Result<(), (String, bool)> {
+    // 目录本来就不在：什么都不用做（幂等）
+    if !dir.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(dir).map_err(|e| {
+        // 32 = ERROR_SHARING_VIOLATION（被占用），5 = ERROR_ACCESS_DENIED（权限）。
+        // 两者对用户来说是同一件事：「有东西占着，删不掉，重启后会清掉」。
+        let locked = matches!(e.raw_os_error(), Some(32) | Some(5))
+            || e.kind() == std::io::ErrorKind::PermissionDenied;
+        (e.to_string(), locked)
+    })
+}
+
+/// 清理**残留的空壳目录**（上次卸载时桥接进程还占着，目录壳子删不掉）。
+///
+/// 进门时调用 —— 那时 DSH 刚起来，**还没有**桥接进程在跑（它由插件 spawn，
+/// 在这次调用之后），所以目录不再被锁，删得掉。
+///
+/// 只删**空目录**：里面还有文件说明它是有效的桥接代码（或者是用户放的东西），
+/// 那就一个字都不动。
+pub fn cleanup_stale_bridge_dirs(app: &AppHandle) -> Option<String> {
+    let cfg_dir = config::config_dir(app);
+    let mut removed: Vec<String> = Vec::new();
+    for dir in [bridge_dir(&cfg_dir), bundle_dir(&cfg_dir)] {
+        if !dir.exists() {
+            continue;
+        }
+        // 非空 → 有效的桥接代码，不动
+        match std::fs::read_dir(&dir) {
+            Ok(mut entries) => {
+                if entries.next().is_some() {
+                    continue;
+                }
+            }
+            Err(_) => continue,
+        }
+        if std::fs::remove_dir(&dir).is_ok() {
+            removed.push(dir.to_string_lossy().to_string());
+        }
+    }
+    if removed.is_empty() {
+        return None;
+    }
+    let line = i18n::fmt("py_bridge_stale_dirs_removed", &[&removed.join(", ")]);
+    logger::append_line(&logger::desktop_log_path(app), &line);
+    Some(line)
 }
 
 /// `dsh plugin --profile <p> remove @local/dsh-desktop-python-bridge`。
@@ -653,8 +745,14 @@ fn patch_bundle_config(text: &str, python_path: &str, bridge_dir: &str) -> Strin
             out.push_str(&format!("bridgeDir: '{dir}'\n"));
         } else if let Some(rest) = trimmed.strip_prefix("cwd:") {
             let _ = rest;
+            // ⚠ 刻意**留空**，不写 bridgeDir（真机故障 2026-10-20）：
+            // Windows 上进程的 cwd 会**锁住**那个目录，于是「卸载办公包」时
+            // 桌面端删不掉 py-bridge\（os error 32），只能留下一个空壳目录
+            // （里面的文件全被删了，目录壳子留着）。
+            // 模块查找改由 index.js 注入的 PYTHONPATH 负责（sys.path 的第一项），
+            // cwd 在哪都不影响 `import bridge_entry` 与它的平铺导入。
             out.push_str(indent);
-            out.push_str(&format!("cwd: '{dir}'\n"));
+            out.push_str("cwd: ''\n");
         } else {
             out.push_str(line);
             out.push('\n');
@@ -1548,5 +1646,80 @@ mod tests {
     fn the_reserved_desktop_profile_is_still_refused_for_removal() {
         assert!(!profile_name_usable("desktop"));
         assert!(profile_name_usable("web"));
+    }
+
+    /// `remove_bridge_dir` 删掉一个普通的目录树。
+    ///
+    /// 真机故障的对照组：没有进程占着时，一步就删干净。
+    #[test]
+    fn removing_an_unlocked_bridge_dir_leaves_nothing_behind() {
+        let base = std::env::temp_dir().join(format!("dsh-bridge-rm-{}", std::process::id()));
+        let dir = base.join("py-bridge");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("bridge_entry.py"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("__pycache__")).unwrap();
+        std::fs::write(dir.join("__pycache__").join("a.pyc"), "y").unwrap();
+
+        remove_bridge_dir(&dir).expect("remove should succeed");
+
+        assert!(!dir.exists(), "目录必须没了");
+        assert!(!base.exists(), "父目录不该留下残骸");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 目录不存在时是**幂等**的，不报错 —— 重复点「卸载」不该炸。
+    #[test]
+    fn removing_a_missing_bridge_dir_is_a_no_op() {
+        let missing = std::env::temp_dir().join("dsh-bridge-does-not-exist-xyz");
+        assert!(remove_bridge_dir(&missing).is_ok());
+    }
+
+    /// 「被占用」要能被单独识别出来 —— 用户话术不同（重启后会清掉），
+    /// 而别的错误（如路径非法）得当成真故障报出去。
+    #[test]
+    fn the_busy_flag_distinguishes_a_locked_dir_from_other_failures() {
+        // 造一个「删不掉」的情形：拿一个**文件**当目录去删 ——
+        // remove_dir_all 对非目录会报 NotADirectory，不是「被占用」。
+        let base = std::env::temp_dir().join(format!("dsh-bridge-busy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let file = base.join("not-a-dir");
+        std::fs::write(&file, "x").unwrap();
+        let err = remove_bridge_dir(&file).expect_err("must fail");
+        assert!(
+            !err.1,
+            "「不是目录」这种错误不该被当成「被占用」（后者有专门的话术）"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 「清理残留」只删**空目录**：里面还有文件说明它是有效的桥接代码，
+    /// 或者用户自己放了东西 —— 那就一个字都不动。
+    ///
+    /// 这条钉住「只删空壳」这条边界。删错了就是把用户的桥接代码/资料删了。
+    #[test]
+    fn the_stale_cleanup_only_touches_empty_folders() {
+        let base = std::env::temp_dir().join(format!("dsh-bridge-stale-{}", std::process::id()));
+        let empty = base.join("empty-dir");
+        let full = base.join("full-dir");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(&full).unwrap();
+        std::fs::write(full.join("bridge_entry.py"), "x").unwrap();
+
+        // 判据与 cleanup_stale_bridge_dirs 一致：read_dir 为空 → 可删
+        let is_empty =
+            |p: &Path| std::fs::read_dir(p).map(|mut e| e.next().is_none()).unwrap_or(false);
+        assert!(is_empty(&empty));
+        assert!(!is_empty(&full));
+
+        // 删空的那个，非空的留着
+        std::fs::remove_dir(&empty).unwrap();
+        assert!(!empty.exists());
+        assert!(full.exists(), "有文件的目录必须留着");
+        assert!(full.join("bridge_entry.py").is_file());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

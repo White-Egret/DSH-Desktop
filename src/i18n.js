@@ -143,7 +143,7 @@
     py_uninstall_cmd_extra:
       'python -m pip uninstall -y numpy pandas python-dateutil tzdata',
     py_uninstall_keeps_basic:
-      'Python 本体（用系统的软件管理机制卸载）、你的会话与配置、DSH 本身，以及其它所有 Python 包。',
+      'Python 本体（请用系统的软件管理机制卸载）、你的会话与配置、DSH 本身，以及其它所有 Python 包。',
     py_uninstall_keeps_extra:
       'Python 本体、办公文档读写库、AI 调用能力桥接与它的 12 个工具，以及其它所有 Python 包。',
     py_uninstall_extra_still_there:
@@ -573,7 +573,7 @@
     py_uninstall_cmd_extra:
       'python -m pip uninstall -y numpy pandas python-dateutil tzdata',
     py_uninstall_keeps_basic:
-      'The Python interpreter itself (uninstall it through your system\'s software manager), your sessions and configuration, DSH itself, and every other Python package.',
+      'The Python interpreter itself (please uninstall it through your system\'s software manager), your sessions and configuration, DSH itself, and every other Python package.',
     py_uninstall_keeps_extra:
       'The Python interpreter, the office-document libraries, the AI capability bridge with its 12 tools, and every other Python package.',
     py_uninstall_extra_still_there:

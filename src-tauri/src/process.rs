@@ -431,6 +431,10 @@ pub(crate) fn set_status(app: &AppHandle, status: &str, message: Option<String>)
     if status == "running" {
         let app2 = app.clone();
         std::thread::spawn(move || {
+            // 先进门清理：上次「卸载办公包」时桥接进程还占着 py-bridge 目录，
+            // 删不掉、留下一个空壳目录。此刻 DSH 刚起来、桥接进程**还没**被
+            // 插件 spawn，目录不再被锁，空壳可以删掉。
+            crate::py_bridge::cleanup_stale_bridge_dirs(&app2);
             crate::py_bridge::activate_pending(&app2);
         });
     }
@@ -3676,6 +3680,30 @@ fn probe_python_packages(py: &detect::PythonExe) -> (bool, bool) {
         .collect();
     let missing = |modules: &str| modules.split_whitespace().any(|m| miss.contains(&m));
     (!missing(PY_BASIC_MODULES), !missing(PY_EXTRA_MODULES))
+}
+
+/// 桥接运行时（`dsh-python-bridge` 那个 pip 包）在本机装没装。
+///
+/// 桥接状态机里的 `python_ok` 以前只看「有没有 Python 解释器」，于是
+/// **卸载办公包之后**状态行会说「Python 库已装好，但能力桥接代码还没有部署」——
+/// 库其实也被卸了（`dsh-python-bridge` 在卸载清单里）。判据换成「桥接运行时
+/// 还在不在」就准了：运行时没了 = 桥接确实没装。
+///
+/// 只查**一个**模块，脚本很短，跑得也快。
+pub(crate) fn bridge_runtime_present(py: &detect::PythonExe) -> bool {
+    let code = "import importlib.util as u\n\
+                print('__BR__' + ('1' if u.find_spec('dsh_bridge') else '0'))";
+    let args = py.full_args(&["-c", code.as_str()]);
+    let Ok((true, out)) =
+        run_cmd_capture(&py.program.to_string_lossy(), &args, "", Duration::from_secs(60))
+    else {
+        return false;
+    };
+    out.lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("__BR__"))
+        .map(|l| l.trim_start_matches("__BR__") == "1")
+        .unwrap_or(false)
 }
 
 /// 「基本安装」按钮：确保本机有可用的 Python（**已装且够新就跳过本体**），

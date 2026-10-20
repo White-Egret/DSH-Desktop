@@ -459,6 +459,8 @@ pub fn t(key: &str) -> &'static str {
         "py_bridge_no_profile" => if en { "Could not determine which profile the bridge was registered in, so the plugin was not removed (the released code was still deleted)." } else { "没能确定桥接注册在哪个 profile 里，因此插件未摘除（已释放的代码仍然删掉了）。" },
         "py_bridge_dir_removed" => if en { "Deleted {0}" } else { "已删除 {0}" },
         "py_bridge_dir_remove_fail" => if en { "Cannot delete {0}: {1}" } else { "无法删除 {0}：{1}" },
+        "py_bridge_dir_remove_locked" => if en { "Could not delete {0} ({1}) — the bridge process was still running and holding that folder. The files inside are gone; the empty folder will be removed the next time DSH starts." } else { "无法删除 {0}（{1}）—— 桥接进程当时还在运行、占着那个目录。里面的文件已经删光，空目录会在下次启动 DSH 时清掉。" },
+        "py_bridge_stale_dirs_removed" => if en { "Cleaned up leftover empty bridge folders: {0}" } else { "已清理残留的空桥接目录：{0}" },
         // 状态行（前端只显示 message，不自己拼文案）
         "py_bridge_not_installed" => if en { "Not installed: click \"Basic install\" first." } else { "尚未安装：请先点「基本安装」。" },
         "py_bridge_needs_release" => if en { "The Python libraries are installed; the capability bridge code has not been deployed yet." } else { "Python 库已装好，但能力桥接代码还没有部署。" },

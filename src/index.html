@@ -279,8 +279,11 @@
             </div>
           </div>
           <div class="row gap">
-            <button id="btn-python-basic" class="btn primary" data-i18n="btn_py_basic">基本安装（Python 本体 + 办公文档读写包）</button>
-            <button id="btn-python-extra" class="btn" data-i18n="btn_py_extra">数据分析扩展包</button>
+            <!-- 这两颗按钮是**动态文案**（装好了会变成「卸载…」），刻意不挂 data-i18n ——
+                 挂上的话 applyDom 会用词典把动态文案覆盖掉。文字与样式由
+                 renderPythonButtons 按探测结果写，见 main.js。 -->
+            <button id="btn-python-basic" class="btn primary">基本安装（Python 本体 + 办公文档读写包）</button>
+            <button id="btn-python-extra" class="btn">数据分析扩展包</button>
           </div>
           <div class="hint" data-i18n-html="py_packages_html">基本安装：先安装最新稳定版 Python（系统已装则跳过本体），再安装 python-docx / python-pptx / openpyxl / XlsxWriter / lxml / Pillow / et_xmlfile / typing_extensions；需要数据分析的，可在基本安装完成后再点「数据分析扩展包」安装 numpy / pandas / python-dateutil / tzdata / six。</div>
           <!-- 能力桥接：装好的库本身 AI 调不到，要靠它挂成 DSH 的工具。
@@ -451,6 +454,32 @@
       <div class="modal-actions">
         <button id="btn-uninstall-cancel" class="btn" data-i18n="btn_cancel">取消</button>
         <button id="btn-uninstall-confirm" class="btn danger" data-i18n="btn_uninstall_confirm">确认卸载</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 卸载 Python 包的确认框（首选项「Python 环境」里的两颗按钮 → 这里 → 执行）。
+       两颗按钮装好了就变成「卸载…」，卸载是破坏性操作，所以都要先过这个框。
+       与「卸载 DSH」刻意不共用一个框：那颗卸的是全局 npm 包，这两颗卸的是
+       本机 Python 里的库 + 一个 profile 插件，要说的话完全不同。 -->
+  <div id="py-uninstall-modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-title" id="py-uninstall-title">卸载</div>
+      <div class="modal-body">
+        <div id="py-uninstall-body"></div>
+        <div class="upd-cmd-label" data-i18n="uninstall_will_run">将执行：</div>
+        <code class="block-code" id="py-uninstall-cmd"></code>
+        <div class="upd-backup">
+          <div class="upd-backup-title" data-i18n="uninstall_keeps_title">不会被删除</div>
+          <div class="upd-backup-note" id="py-uninstall-keeps"></div>
+        </div>
+        <!-- 「扩展包还在，卸办公包要不要顺手一起卸」的三选项 -->
+        <div class="hint hidden" id="py-uninstall-extra-note"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-py-uninstall-cancel" class="btn" data-i18n="btn_cancel">取消</button>
+        <button id="btn-py-uninstall-extra-first" class="btn hidden" data-i18n="btn_py_uninstall_extra_first">先卸载扩展包，再卸办公包</button>
+        <button id="btn-py-uninstall-confirm" class="btn danger" data-i18n="btn_py_uninstall_confirm">确认卸载</button>
       </div>
     </div>
   </div>

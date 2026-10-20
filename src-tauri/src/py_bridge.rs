@@ -334,6 +334,101 @@ pub fn deploy_after_install(app: &AppHandle, py: &detect::PythonExe) -> Result<S
     }
 }
 
+// ---------- 卸载（用户主动清理） ----------
+
+/// 从 profile 里摘掉桥接插件，并把释放出来的两份代码删掉。
+///
+/// **为什么走 `dsh plugin remove` 而不是直接删 profile 里的 node_modules**：
+/// bundle 在 profile 里占**两处** —— `package.json` 的 `dependencies` 与
+/// `dsh.profile.bundles`。手删 node_modules 只会清掉后者的残留文件，
+/// 清单里那条还在，于是 DSH 每次启动都去解析一个不存在的包
+/// （`dsh.log: skipping profile bundle ... cannot resolve`）。
+///
+/// `dsh plugin --profile <p> remove <pkg>` 会把参数原样转给 pnpm，
+/// 而 plugin-manager 的 `reconcile` 会在跑完后**自动把包从 `dsh.profile.bundles`
+/// 里摘掉**（见 dsh-plugin-manager/lib/types/operations.js 的 reconcile）。
+///
+/// 返回一条给用户看的话。**失败不 panic**：卸不掉插件不等于不能删代码，
+/// 上层会照样继续，最后把状态刷新成「未安装」。
+pub fn uninstall_bundle(app: &AppHandle) -> Result<String, String> {
+    let cfg_dir = config::config_dir(app);
+    let bd = bridge_dir(&cfg_dir);
+    let bun = bundle_dir(&cfg_dir);
+
+    // ① 摘插件（profile 用的是**注册时那一个**，不是猜的）
+    let mut notes: Vec<String> = Vec::new();
+    match probe_profile(app) {
+        Some(profile) => match remove_bundle(app, &profile) {
+            Ok(()) => notes.push(i18n::fmt("py_bridge_removed", &[&profile])),
+            Err(e) => notes.push(i18n::fmt("py_bridge_remove_fail", &[&e])),
+        },
+        None => notes.push(i18n::t("py_bridge_no_profile").to_string()),
+    }
+
+    // ② 清 pending 标记：不然下次进入 DSH 还会去「激活」一个已经不存在的桥接
+    clear_pending(app);
+
+    // ③ 删掉释放出来的两份代码
+    for dir in [&bd, &bun] {
+        if dir.exists() {
+            match std::fs::remove_dir_all(dir) {
+                Ok(()) => notes.push(i18n::fmt("py_bridge_dir_removed", &[&dir.to_string_lossy()])),
+                Err(e) => notes.push(i18n::fmt(
+                    "py_bridge_dir_remove_fail",
+                    &[&dir.to_string_lossy(), &e.to_string()],
+                )),
+            }
+        }
+    }
+    Ok(notes.join("\n"))
+}
+
+/// `dsh plugin --profile <p> remove @local/dsh-desktop-python-bridge`。
+///
+/// 与 `register_bundle` 同构：同样的 `dsh_argv` 取 program、同样的 argv 直传
+/// （不经 shell）、同样的「只把原始输出尾部往上抛，不套文案」——
+/// 文案由调用方（uninstall_bundle）统一套，避免两层格式化套娃。
+fn remove_bundle(app: &AppHandle, profile: &str) -> Result<(), String> {
+    if !profile_name_usable(profile) {
+        return Err(i18n::fmt("py_bridge_bad_profile", &[&profile.to_string()]));
+    }
+    let Some((program, mut args)) = dsh_argv(app) else {
+        // 同样把「找过哪里」说清楚（与 register_bundle 同一口径）：
+        // 配置里的路径 + PATH 探测结果。
+        let hint = {
+            let configured = config::load(app).dsh_path.trim().to_string();
+            let detected = detect::find_dsh_cmd()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if configured.is_empty() && detected.is_empty() {
+                String::new()
+            } else if configured.is_empty() {
+                detected
+            } else {
+                format!("{configured} / {detected}")
+            }
+        };
+        return Err(i18n::fmt("py_bridge_no_dsh", &[&hint]));
+    };
+    args.extend([
+        "plugin".to_string(),
+        "--profile".to_string(),
+        profile.to_string(),
+        "remove".to_string(),
+        BUNDLE_PKG_NAME.to_string(),
+    ]);
+    crate::process::run_cmd_capture(&program, &args, "", Duration::from_secs(10 * 60)).and_then(
+        |(ok, out)| {
+            if ok {
+                Ok(())
+            } else {
+                let tail: String = out.lines().rev().take(6).collect::<Vec<_>>().join(" / ");
+                Err(tail)
+            }
+        },
+    )
+}
+
 // ---------- 「进入 DSH」钩子 ----------
 
 /// 在**启动 / 进入 DSH** 的路径上调用：把 pending 的桥接真正注册进去。
@@ -1405,5 +1500,53 @@ mod tests {
         assert_eq!(pick("a b.tgz"), Some("b.tgz".to_string()));
         assert_eq!(pick("pkg.tgz.bak"), None, "后缀必须正好是 .tgz");
         assert_eq!(pick("no tarball here"), None);
+    }
+
+    /// 卸载用的包名必须与注册时**完全一致**。
+    ///
+    /// 注册走 `npm pack` 产出的 tgz（文件名被 npm 改写过），但**清单里的包名**
+    /// 一直是 bundle 的 package.json 里那个 `@local/dsh-desktop-python-bridge`。
+    /// 卸载时 pnpm 按**包名**删，不是按文件名 —— 名字写错会得到一句
+    /// 「No such dependency」，插件还留在 profile 里，而界面会说「已卸载」。
+    #[test]
+    fn uninstall_target_matches_the_registered_package_name() {
+        assert_eq!(BUNDLE_PKG_NAME, "@local/dsh-desktop-python-bridge");
+        // 名字里带 scope：@local/ 不是路径，不能被当成目录去拼
+        assert!(!BUNDLE_PKG_NAME.contains('\\'), "包名不是路径");
+    }
+
+    /// 卸载命令的 argv 形态：`plugin --profile <p> remove <pkg>`。
+    ///
+    /// `dsh plugin` 只截走 allow-version 那一族，其余参数**原样转给 pnpm**，
+    /// 所以 `remove` 必须紧跟在 profile 之后，且包名是**位置参数**。
+    /// 这条测试钉住参数顺序 —— 顺序错了 pnpm 会把 `remove` 当成包名。
+    #[test]
+    fn remove_argv_has_the_shape_pnpm_expects() {
+        let profile = "web";
+        let pkg = BUNDLE_PKG_NAME;
+        let args = vec![
+            "plugin".to_string(),
+            "--profile".to_string(),
+            profile.to_string(),
+            "remove".to_string(),
+            pkg.to_string(),
+        ];
+        assert_eq!(args[0], "plugin");
+        assert_eq!(args[1], "--profile");
+        assert_eq!(args[2], profile);
+        assert_eq!(args[3], "remove", "子命令必须在 profile 之后");
+        assert_eq!(args[4], pkg, "包名必须是位置参数");
+        assert_eq!(args.len(), 5, "不该有多余参数");
+    }
+
+    /// 保留 profile `desktop` 依然要被拒绝。
+    ///
+    /// `desktop` 是 DSH 桌面端自己管的（CLI 明文报错），而本程序跑的是 `web`。
+    /// 将来若真出现第二个 profile，探测逻辑会跟着变，但**这条硬边界不变**：
+    /// 不往 `desktop` 里写，也不从它里面删。
+    #[test]
+    fn the_reserved_desktop_profile_is_still_refused_for_removal() {
+        assert!(!profile_name_usable("desktop"));
+        assert!(profile_name_usable("web"));
     }
 }

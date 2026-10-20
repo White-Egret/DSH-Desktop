@@ -1408,6 +1408,9 @@ function applyLanguage(lang) {
   if (safeMode && !$('safe-modal').classList.contains('hidden')) fillSafeModal(safeReport);
   // 首选项里的 Python 状态行是动态文案（版本号 + 路径 + 包状态），切语言后按新词典重绘
   if (!$('settings-modal').classList.contains('hidden')) refreshPythonStatus();
+  // 两颗 Python 按钮的文案也是动态的（「安装…」/「卸载…」随探测结果变），
+  // 不挂 data-i18n —— applyDom 管不到它们，得在这里手动重绘
+  renderPythonButtons();
   // 「用户环境变量 DSH_HOME」那行小字同样没挂 data-i18n（值是问后端拿的），切语言后重绘
   if (!$('settings-modal').classList.contains('hidden')) refreshHomeEnvInfo();
   // 搬家警告的显隐按「这一格有没有被改过」判（与语言无关），但正文是 data-i18n-html，
@@ -1678,23 +1681,32 @@ function appendPythonLog(line) {
 }
 
 function renderPythonButtons() {
-  // 蓝色（primary）= 当前**该做**的那一步，白色 = 已完成、不需要再点：
-  //   基本安装（本体 + 办公文档读写包）没到位 → 基本安装亮蓝，数据分析留白；
-  //   基本安装到位 → 基本安装回白，数据分析亮蓝；
-  //   两组都到位 → 两个都回白，页面上不再有「还欠一步」的暗示。
-  // 数据分析反而先装好的机器也照这条办：欠的是办公包，该亮蓝的仍是基本安装。
+  // 两颗按钮各有「装」与「卸」两态，态由探测结果决定：
+  //   基本包没装齐 → 「安装办公包…」（primary = 该做的那一步）
+  //   基本包装齐   → 「卸载办公包…」（subtle = 已完成，灰着但可点）
+  // 扩展包同理；它依赖基本包（没装基本包时扩展包装着也没意义），
+  // 所以扩展包的「已装」判定沿用后端给的 extra_ok（后端已经与 basic_ok 取过与）。
+  //
+  // 文案与样式**刻意不挂 data-i18n**：动态文案被 applyDom 用词典覆盖，
+  // 切语言时会打回默认。跟 renderSafeButton 同一套路 —— 动态文案手动重绘。
   const basicDone = pythonState.basic_ok;
   const extraDone = basicDone && pythonState.extra_ok;
-  const setPrimary = (id, on) => {
+
+  const setBtn = (id, { label, primary }) => {
     const b = $(id);
-    if (b) b.classList.toggle('primary', !!on);
+    if (!b) return;
+    b.textContent = label;
+    b.classList.toggle('primary', !!primary);
+    b.classList.toggle('subtle', !primary);
+    b.disabled = pythonTask.active;
   };
-  setPrimary('btn-python-basic', !basicDone);
-  setPrimary('btn-python-extra', basicDone && !extraDone);
-  ['btn-python-basic', 'btn-python-extra'].forEach((id) => {
-    const b = $(id);
-    if (b) b.disabled = pythonTask.active;
-  });
+
+  setBtn('btn-python-basic', basicDone
+    ? { label: t('btn_py_basic_uninstall'), primary: false }
+    : { label: t('btn_py_basic'), primary: true });
+  setBtn('btn-python-extra', extraDone
+    ? { label: t('btn_py_extra_uninstall'), primary: false }
+    : { label: t('btn_py_extra'), primary: basicDone });
 }
 
 /// 两个安装按钮共用的入口：起后端任务，进度与结果由事件驱动。
@@ -1734,6 +1746,101 @@ async function runPythonInstall(set) {
   }
 }
 
+/// 卸载的待办：记下这次要卸哪一组，等用户在确认框里点定。
+///
+/// 存在模块级变量而不是塞进 onclick 的闭包里，是因为「先卸扩展包再卸办公包」
+/// 那条路要连续起两个后端任务 —— 中间不能弹别的框把状态弄丢。
+let pyUninstallTarget = null;
+
+/// 卸载任务进行中，等待下一步（先卸扩展包 → 再卸办公包）。
+///
+/// 声明必须在 `doPyUninstall` **之前**：`let` 有暂时性死区，赋值语句在
+/// 声明之前执行会抛 ReferenceError（浏览器里表现为「点了没反应」）。
+let pyUninstallPending = null;
+
+/// 点「卸载…」：开确认框，不直接动手。
+///
+/// 扩展包还在时要多问一句（用户的要求）：先卸扩展包会让 numpy/pandas 不再
+/// 变成「没有桥接可用的孤儿」，但两件事**没有依赖关系** —— 卸完办公包后
+/// 沙箱里跑 pandas 仍然可用（那正是扩展包的用途），所以「直接只卸办公包」
+/// 也是一个正当选项，不能把用户堵在必须先卸扩展包上。
+function openPyUninstallConfirm(which) {
+  if (pythonTask.active) {
+    toast(t('py_busy'), true);
+    return;
+  }
+  const isBasic = which === 'basic';
+  pyUninstallTarget = which;
+
+  $('py-uninstall-title').textContent = isBasic
+    ? t('py_uninstall_title_basic')
+    : t('py_uninstall_title_extra');
+  $('py-uninstall-body').textContent = isBasic
+    ? t('py_uninstall_body_basic')
+    : t('py_uninstall_body_extra');
+  $('py-uninstall-cmd').textContent = isBasic
+    ? t('py_uninstall_cmd_basic')
+    : t('py_uninstall_cmd_extra');
+  $('py-uninstall-keeps').textContent = isBasic
+    ? t('py_uninstall_keeps_basic')
+    : t('py_uninstall_keeps_extra');
+
+  // 三选项只在「卸办公包且扩展包还在」时出现
+  const extraStillThere = isBasic && pythonState.extra_ok;
+  $('btn-py-uninstall-extra-first').classList.toggle('hidden', !extraStillThere);
+  $('py-uninstall-extra-note').classList.toggle('hidden', !extraStillThere);
+  if (extraStillThere) {
+    $('py-uninstall-extra-note').textContent = t('py_uninstall_extra_still_there');
+  }
+  $('btn-py-uninstall-confirm').textContent = isBasic
+    ? t('btn_py_uninstall_confirm')
+    : t('btn_py_uninstall_confirm_extra');
+  showModal('py-uninstall-modal');
+}
+
+/// 确认框里点「确认卸载」（或「先卸扩展包再卸办公包」）后起后端任务。
+///
+/// `withExtra` 为 true 时先跑扩展包卸载、**等它真的结束**再跑办公包卸载 ——
+/// 两个都是后台任务（各自 emit setup-result），所以这里要按 target 区分结果，
+/// 不能简单地「发起两个 invoke 就完事」。
+async function doPyUninstall(withExtra) {
+  if (pythonTask.active) {
+    toast(t('py_busy'), true);
+    return;
+  }
+  const which = pyUninstallTarget;
+  if (!which) return;
+  hideModal('py-uninstall-modal');
+
+  if (withExtra) {
+    // 先卸扩展包：等它结束（onPythonResult 把 pythonTask.active 复位）再卸办公包
+    pyUninstallPending = { phase: 'basic', which: 'basic' };
+    startPyUninstall('extra');
+    return;
+  }
+  startPyUninstall(which);
+}
+
+/// 起一个卸载任务。
+function startPyUninstall(which) {
+  pythonTask.active = true;
+  renderPythonButtons();
+  $('python-log').textContent = '';
+  $('python-log').classList.add('hidden');
+  setPythonProgress(true, t(which === 'basic' ? 'py_uninstall_progress_basic' : 'py_uninstall_progress_extra'));
+  setPythonSpinner(true);
+  invoke(which === 'basic' ? 'setup_uninstall_python' : 'setup_uninstall_python_extra')
+    .catch((e) => {
+      pythonTask.active = false;
+      pyUninstallPending = null;
+      renderPythonButtons();
+      setPythonSpinner(false);
+      setPythonProgress(true, String(e));
+      appendPythonLog(String(e));
+      toast(String(e), true);
+    });
+}
+
 function onPythonResult(p) {
   pythonTask.active = false;
   renderPythonButtons();
@@ -1743,6 +1850,21 @@ function onPythonResult(p) {
   setPythonSpinner(false);
   appendPythonLog(msg);
   toast(msg, !p.success);
+
+  // 「先卸扩展包，再卸办公包」的第二步：扩展包这一步真的结束了才接着卸办公包。
+  // 失败也要往下走 —— 扩展包没卸掉不代表办公包不能卸（两者没有依赖关系），
+  // 卡在这里反而让用户以为整个操作废了。
+  if (pyUninstallPending && pyUninstallPending.phase === 'basic') {
+    const next = pyUninstallPending.which;
+    pyUninstallPending = null;
+    // 状态行要在这时就刷：扩展包已经卸掉了，状态行还写着「已安装」的话，
+    // 用户会以为扩展包没卸成功（第二步要跑一会儿才结束）。
+    refreshPythonStatus();
+    refreshBridgeStatus();
+    startPyUninstall(next);
+    return;
+  }
+
   // 装完 Python 本体 / 装完包之后，状态行与「安装位置」的显隐都要跟着变；
   // 桥接状态同样会变（从「待部署」变成「已注册 / 待激活」），所以一起刷新
   refreshPythonStatus();
@@ -3010,8 +3132,19 @@ function bindUI() {
   };
 
   // ---- 首选项：Python 建议安装块（状态行由 openSettings 拉取，这里只管两个按钮）----
-  $('btn-python-basic').onclick = () => runPythonInstall('basic');
-  $('btn-python-extra').onclick = () => runPythonInstall('extra');
+  $('btn-python-basic').onclick = () => (pythonState.basic_ok
+    ? openPyUninstallConfirm('basic')
+    : runPythonInstall('basic'));
+  $('btn-python-extra').onclick = () => (pythonState.extra_ok
+    ? openPyUninstallConfirm('extra')
+    : runPythonInstall('extra'));
+  // 卸载确认框的三颗按钮
+  $('btn-py-uninstall-cancel').onclick = () => {
+    pyUninstallTarget = null;
+    hideModal('py-uninstall-modal');
+  };
+  $('btn-py-uninstall-confirm').onclick = () => doPyUninstall(false);
+  $('btn-py-uninstall-extra-first').onclick = () => doPyUninstall(true);
   // 能力桥接**没有按钮**：释放 + 注册由「进入 DSH 时自动激活」承担，见 refreshBridgeStatus
 
   // 检测全局包名

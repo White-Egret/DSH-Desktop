@@ -3704,6 +3704,76 @@ pub async fn setup_install_python_extra(app: AppHandle) -> Result<(), String> {
     })
 }
 
+/// 「卸载数据分析扩展包」按钮：只卸扩展包的 4 个包，**不动办公包、不动桥接**。
+///
+/// 卸完之后 12 个工具**仍在**（它们是桥接插件提供的，与 pandas 无关），
+/// 只是 `execute_python_sandbox` 里跑 pandas 会得到一句「该模块在沙箱白名单内，
+/// 但当前 Python 环境里没装」——那是设计好的降级，不是故障。
+///
+/// 桥接插件**不动**是刻意的：数据分析能力正是这条沙箱路径提供的，
+/// 把它一起卸掉等于连同「用沙箱跑 pandas」这条路一起取消。
+#[tauri::command]
+pub async fn setup_uninstall_python_extra(app: AppHandle) -> Result<(), String> {
+    spawn_python_task(app, "python-extra", |a| {
+        let py = detect::find_python().ok_or_else(|| i18n::t("setup_py_missing").to_string())?;
+        let list = PY_EXTRA_PKGS.join(" ");
+        setup_progress(a, "install", &i18n::fmt("setup_py_unpip_start", &[&list]));
+        pip_uninstall_blocking(a, &py, &PY_EXTRA_PKGS)
+    })
+}
+
+/// 「卸载办公包」按钮：摘桥接插件 → 删桥接代码 → 卸 13 个包（办公库 + 桥接运行时）。
+///
+/// **Python 本体不卸** —— 那要留给系统自己的软件管理机制（用户明确定的要求）。
+///
+/// 顺序是有讲究的：**先摘插件再卸包**。反过来会有一个窗口期，
+/// 插件还在 profile 里（DSH 随时可能加载它），而它依赖的库已经被删了 ——
+/// 桥接进程起来就 import 失败。摘掉插件之后，桥接就不会再被加载，
+/// 这时卸包才是安全的。
+#[tauri::command]
+pub async fn setup_uninstall_python(app: AppHandle) -> Result<(), String> {
+    spawn_python_task(app, "python", |a| {
+        let py = detect::find_python().ok_or_else(|| i18n::t("setup_py_missing").to_string())?;
+        // ① 桥接插件 + 释放出来的代码
+        setup_progress(a, "install", i18n::t("setup_py_uninstall_bridge"));
+        let bridge_notes = py_bridge::uninstall_bundle(a)?;
+        // ② 办公库 + 桥接运行时（dsh-python-bridge 是 pip 装的运行时，与代码目录是两回事）
+        let pkgs = basic_install_pkgs();
+        setup_progress(a, "install", &i18n::fmt("setup_py_unpip_start", &[&pkgs.join(" ")]));
+        let pip_msg = pip_uninstall_blocking(a, &py, &pkgs)?;
+        Ok(format!("{bridge_notes}\n{pip_msg}"))
+    })
+}
+
+/// `python -m pip uninstall -y <包...>`：逐行把 pip 的输出送到 `python-log`。
+///
+/// 与 `pip_install_blocking` 的区别只有两点：**子命令是 uninstall**、**带 `-y`**
+/// （否则 pip 会逐个包问「Proceed (Y/n)?」，在无 stdin 的后台任务里必然卡死）。
+///
+/// `pip uninstall` **只删点名的包，不动依赖** —— 这正是我们要的：
+/// 卸办公包不该顺手带走用户自己装的别的东西；那些包会变成孤儿，
+/// 要清理得由用户自己决定（`pip autoremove` 会连用户装的一起删，风险太大）。
+fn pip_uninstall_blocking(
+    app: &AppHandle,
+    py: &detect::PythonExe,
+    pkgs: &[&str],
+) -> Result<String, String> {
+    let mut args = py.full_args(&["-m", "pip", "uninstall", "-y"]);
+    args.extend(pkgs.iter().map(|s| (*s).to_string()));
+    let ok = run_cmd_streaming(
+        app,
+        &py.program.to_string_lossy(),
+        &args,
+        Duration::from_secs(30 * 60),
+    )?;
+    if !ok {
+        return Err(i18n::fmt("setup_py_pip_fail", &[&pkgs.join(" ")]));
+    }
+    let msg = i18n::fmt("setup_py_unpip_ok", &[&pkgs.join(" ")]);
+    setup_progress(app, "install", &msg);
+    Ok(msg)
+}
+
 /// 抢 `setup_busy` → 开线程跑安装 → 统一回传 `setup-result` → **无论如何释放 busy**。
 /// 两颗按钮共用这一条收尾：busy 忘了复位会让设置页永久卡在「安装中」。
 fn spawn_python_task(
@@ -6959,6 +7029,54 @@ pub fn remember_node_min_version_notice(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 「卸载办公包」要卸的包集合：**办公库 + 桥接运行时**。
+    ///
+    /// 少了 `dsh-python-bridge` 会留下一个「代码目录没了、运行时还在」的半吊子；
+    /// 多了任何一个**不在**基本清单里的包，都会顺手删掉用户自己装的东西
+    /// （`pip uninstall` 只删点名的包，但点名单是我们写死的）。
+    ///
+    /// 这条测试钉住两件事：桥接运行时在集合里；集合与「基本安装」用的那个**一致**
+    /// —— 两边不同步就会出现「装 A 卸 B」。
+    #[test]
+    fn the_office_uninstall_set_matches_the_basic_install_set() {
+        let pkgs = basic_install_pkgs();
+        assert!(
+            pkgs.contains(&"dsh-python-bridge"),
+            "桥接运行时必须一起卸掉，否则留下半个桥接"
+        );
+        assert!(pkgs.contains(&"markitdown"));
+        assert!(pkgs.contains(&"mammoth"));
+        assert!(pkgs.contains(&"pdfplumber"));
+        // 基本安装也是这个集合：装什么就卸什么，不多不少
+        assert_eq!(pkgs.len(), PY_BASIC_PKGS.len() + PY_BRIDGE_PKGS.len());
+        // 扩展包**不在**里面 —— 卸办公包不该动 numpy/pandas
+        for p in PY_EXTRA_PKGS {
+            assert!(
+                !pkgs.contains(&p),
+                "扩展包不该被「卸载办公包」带走：{p}"
+            );
+        }
+    }
+
+    /// 「卸载数据分析扩展包」要卸的正好是那 4 个，且**一个都不多**。
+    ///
+    /// 多一个就会误伤：比如把 `magika` 放进来 —— 它是裸 markitdown 的**硬依赖**，
+    /// 删了它 markitdown 直接坏掉，用户的文档转换能力会无声地消失。
+    #[test]
+    fn the_extra_uninstall_set_is_exactly_the_four_extras() {
+        assert_eq!(PY_EXTRA_PKGS.len(), 4);
+        for p in ["numpy", "pandas", "python-dateutil", "tzdata"] {
+            assert!(PY_EXTRA_PKGS.contains(&p), "扩展包清单缺 {p}");
+        }
+        // 办公库一个都不该在这里
+        for p in ["markitdown", "mammoth", "pdfplumber", "dsh-python-bridge"] {
+            assert!(
+                !PY_EXTRA_PKGS.contains(&p),
+                "「卸载扩展包」不该动办公包：{p}"
+            );
+        }
+    }
 
     #[test]
     fn extracts_plain_url() {

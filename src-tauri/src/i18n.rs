@@ -433,6 +433,10 @@ pub fn t(key: &str) -> &'static str {
         "setup_py_pip_ok" => if en { "Python packages installed: {0}" } else { "Python 包安装完成：{0}" },
         "setup_py_pip_fail" => if en { "pip failed for: {0} — see the output above for the reason (usually no network, or this Python is too old for that package version)." } else { "pip 安装失败：{0} —— 具体原因见上方输出（通常是无网络，或这个 Python 版本过老装不了该包的新版本）。" },
         "setup_py_result_line" => if en { "[setup] Python setup {0}: {1}" } else { "[setup] Python 环境{0}：{1}" },
+        // —— pip uninstall（用户主动清理；只删点名的包，不动依赖） ——
+        "setup_py_unpip_start" => if en { "Uninstalling Python packages: {0}" } else { "正在卸载 Python 包：{0}" },
+        "setup_py_unpip_ok" => if en { "Python packages uninstalled: {0}" } else { "Python 包卸载完成：{0}" },
+        "setup_py_uninstall_bridge" => if en { "Removing the Python capability bridge (plugin + released code)…" } else { "正在移除 Python 能力桥接（插件 + 已释放的代码）…" },
         // 安装线程 panic 时的兜底文案：不发这一条，前端的两颗按钮会永远停在「安装中」
         "setup_py_panicked" => if en { "The install task hit an internal error (panic) and was aborted; the busy state has been released so you can retry. Details are in desktop.log." } else { "安装任务内部出错（panic），已中止并释放「安装中」状态，可重试。详情见 desktop.log。" },
 
@@ -449,6 +453,12 @@ pub fn t(key: &str) -> &'static str {
         "py_bridge_pack_fail" => if en { "Could not package the Python bridge bundle (npm pack): {0}." } else { "打包 Python 能力桥接失败（npm pack）：{0}。" },
         "py_bridge_bad_profile" => if en { "Refusing to use profile \"{0}\": it is either the reserved \"desktop\" profile or not a valid profile name." } else { "拒绝使用 profile「{0}」：它要么是保留的「desktop」，要么不是合法的 profile 名。" },
         "py_bridge_write_fail" => if en { "Cannot write {0}: {1}" } else { "无法写入 {0}：{1}" },
+        // —— 卸载（用户主动清理） ——
+        "py_bridge_removed" => if en { "Removed the Python bridge plugin from profile \"{0}\". Restart DSH to drop its tools from the current session." } else { "已把 Python 桥接插件从 profile「{0}」里摘掉。重启 DSH 后本会话里的那些工具才会消失。" },
+        "py_bridge_remove_fail" => if en { "Could not remove the Python bridge plugin: {0}. The released code was still deleted; the profile may still list the plugin." } else { "摘掉 Python 桥接插件失败：{0}。已释放的代码仍然删掉了，但 profile 里可能还留着这条插件记录。" },
+        "py_bridge_no_profile" => if en { "Could not determine which profile the bridge was registered in, so the plugin was not removed (the released code was still deleted)." } else { "没能确定桥接注册在哪个 profile 里，因此插件未摘除（已释放的代码仍然删掉了）。" },
+        "py_bridge_dir_removed" => if en { "Deleted {0}" } else { "已删除 {0}" },
+        "py_bridge_dir_remove_fail" => if en { "Cannot delete {0}: {1}" } else { "无法删除 {0}：{1}" },
         // 状态行（前端只显示 message，不自己拼文案）
         "py_bridge_not_installed" => if en { "Not installed: click \"Basic install\" first." } else { "尚未安装：请先点「基本安装」。" },
         "py_bridge_needs_release" => if en { "The Python libraries are installed; the capability bridge code has not been deployed yet." } else { "Python 库已装好，但能力桥接代码还没有部署。" },

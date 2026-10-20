@@ -127,6 +127,32 @@
     ph_python_dir: '留空 = Python 官方默认安装位置',
     btn_py_basic: '基本安装（Python 本体 + 办公文档读写包）',
     btn_py_extra: '数据分析扩展包',
+    // —— 装好了就变成「卸载…」：这两条是**动态文案**，不挂 data-i18n ——
+    //    由 renderPythonButtons 按探测结果写，切语言时手动重绘。
+    btn_py_basic_uninstall: '卸载办公包…',
+    btn_py_extra_uninstall: '卸载数据分析扩展包…',
+    // —— 卸载确认框 ——
+    py_uninstall_title_basic: '卸载办公包',
+    py_uninstall_title_extra: '卸载数据分析扩展包',
+    py_uninstall_body_basic:
+      '将卸载本机 Python 里的办公文档读写库，并把 AI 调用能力桥接（convert_file_to_markdown 等 12 个工具）从 DSH 里摘掉。',
+    py_uninstall_body_extra:
+      '将卸载本机 Python 里的数据分析库（numpy / pandas 等）。AI 调用能力桥接与 12 个工具**不受影响**，仍然可用。',
+    py_uninstall_cmd_basic:
+      'dsh plugin --profile web remove @local/dsh-desktop-python-bridge\npython -m pip uninstall -y markitdown pdfminer-six pdfplumber mammoth olefile python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile dsh-python-bridge',
+    py_uninstall_cmd_extra:
+      'python -m pip uninstall -y numpy pandas python-dateutil tzdata',
+    py_uninstall_keeps_basic:
+      'Python 本体（用系统的软件管理机制卸载）、你的会话与配置、DSH 本身，以及其它所有 Python 包。',
+    py_uninstall_keeps_extra:
+      'Python 本体、办公文档读写库、AI 调用能力桥接与它的 12 个工具，以及其它所有 Python 包。',
+    py_uninstall_extra_still_there:
+      '数据分析扩展包还装着。卸完办公包后 numpy / pandas 会留在机器上没人用（沙箱工具也没了）——建议先卸扩展包再卸办公包。当然，直接只卸办公包也行：沙箱里跑 pandas 仍然可用。',
+    btn_py_uninstall_confirm: '确认卸载办公包',
+    btn_py_uninstall_confirm_extra: '确认卸载扩展包',
+    btn_py_uninstall_extra_first: '先卸载扩展包，再卸办公包',
+    py_uninstall_progress_basic: '正在卸载办公包与能力桥接…',
+    py_uninstall_progress_extra: '正在卸载数据分析扩展包…',
     py_packages_html: '基本安装：先安装最新稳定版 Python（系统已装 ≥ 3.10 则跳过本体），再安装 markitdown / pdfminer-six / pdfplumber / mammoth / olefile / python-docx / python-pptx / openpyxl / XlsxWriter / lxml / Pillow / et_xmlfile，以及把这些库挂成 AI 工具的桥接运行时 dsh-python-bridge；需要数据分析的，可在基本安装完成后再点「数据分析扩展包」安装 numpy / pandas / python-dateutil / tzdata。',
     py_busy: 'Python 安装任务正在进行，请等待完成…',
     py_progress_start: '正在准备 Python 安装…',
@@ -531,6 +557,32 @@
     ph_python_dir: 'empty = the Python official default location',
     btn_py_basic: 'Basic install (Python + office document packages)',
     btn_py_extra: 'Data-analysis extras',
+    // —— Once installed these become "Uninstall…": **dynamic** labels, not data-i18n —
+    //    renderPythonButtons writes them from the probe result and redraws on language change.
+    btn_py_basic_uninstall: 'Uninstall office packages…',
+    btn_py_extra_uninstall: 'Uninstall data-analysis extras…',
+    // —— Uninstall confirmation dialog ——
+    py_uninstall_title_basic: 'Uninstall office packages',
+    py_uninstall_title_extra: 'Uninstall data-analysis extras',
+    py_uninstall_body_basic:
+      'Removes the office-document libraries from this machine\'s Python and drops the AI capability bridge (convert_file_to_markdown and the other 11 tools) from DSH.',
+    py_uninstall_body_extra:
+      'Removes the data-analysis libraries (numpy / pandas …) from this machine\'s Python. The AI capability bridge and its 12 tools are **not** affected and stay usable.',
+    py_uninstall_cmd_basic:
+      'dsh plugin --profile web remove @local/dsh-desktop-python-bridge\npython -m pip uninstall -y markitdown pdfminer-six pdfplumber mammoth olefile python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile dsh-python-bridge',
+    py_uninstall_cmd_extra:
+      'python -m pip uninstall -y numpy pandas python-dateutil tzdata',
+    py_uninstall_keeps_basic:
+      'The Python interpreter itself (uninstall it through your system\'s software manager), your sessions and configuration, DSH itself, and every other Python package.',
+    py_uninstall_keeps_extra:
+      'The Python interpreter, the office-document libraries, the AI capability bridge with its 12 tools, and every other Python package.',
+    py_uninstall_extra_still_there:
+      'The data-analysis extras are still installed. Unloading the office packages first leaves numpy / pandas on the machine with nothing using them (the sandbox tool goes away too), so removing the extras first is tidier. Either way is fine: the sandbox can still run pandas.',
+    btn_py_uninstall_confirm: 'Uninstall office packages',
+    btn_py_uninstall_confirm_extra: 'Uninstall extras',
+    btn_py_uninstall_extra_first: 'Uninstall extras first, then office packages',
+    py_uninstall_progress_basic: 'Removing the office packages and the capability bridge…',
+    py_uninstall_progress_extra: 'Removing the data-analysis extras…',
     py_packages_html: 'Basic install: installs the latest stable Python first (skipped when one of ≥ 3.10 is already present), then markitdown / pdfminer-six / pdfplumber / mammoth / olefile / python-docx / python-pptx / openpyxl / XlsxWriter / lxml / Pillow / et_xmlfile, plus dsh-python-bridge — the bridge runtime that exposes those libraries as AI tools. For data analysis, click “Data-analysis extras” afterwards to add numpy / pandas / python-dateutil / tzdata.',
     py_busy: 'A Python install task is already running; please wait for it to finish…',
     py_progress_start: 'Preparing the Python install…',

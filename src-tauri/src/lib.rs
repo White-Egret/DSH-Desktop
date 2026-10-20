@@ -115,6 +115,9 @@ pub fn run(launched_by_autostart: bool) {
             process::python_status,
             process::setup_install_python,
             process::setup_install_python_extra,
+            // 卸载：两颗按钮装好了就变成「卸载…」，走同一套任务管道
+            process::setup_uninstall_python,
+            process::setup_uninstall_python_extra,
             // Python 能力桥接：只读查状态（释放 + 注册由「进入 DSH 时自动激活」承担，
             // 刻意不提供手动部署命令 —— 它与自动激活完全重叠，多一颗按钮只会
             // 让人误以为「装完还得再点一下」）

@@ -258,6 +258,11 @@ pnpm 安装命令示例:     npm install -g pnpm
 - **状态行** —— 本机有没有可用的 Python（≥ 3.10）、版本与路径，以及两组推荐包装没装。判断用 `importlib.util.find_spec` 真去 import 而不是看 `pip list`：装了但用不了的算没装；Python 2 与 Microsoft Store 那个「点了去应用商店」的 `python.exe` 执行别名都算没有。
 - **基本安装** —— 本机已有可用解释器就**跳过本体**；否则从 python.org 下载最新稳定版 CPython（版本解析自下载页，失败时回落到内置的固定版本），**先从该版本的官方发布页取 SHA-256 校验通过才执行**（拿不到哈希就不装，与 Node.js 那条路同一条纪律），然后用 `/passive InstallAllUsers=0 PrependPath=1 Include_test=0` 跑官方安装程序 —— 装给当前用户、不弹 UAC、自写 PATH、自带进度窗口，最后执行 `pip install markitdown pdfminer-six pdfplumber mammoth olefile python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile dsh-python-bridge`。
 - **数据分析扩展包** —— 在基本包装完之后再加 `numpy pandas python-dateutil tzdata`。
+- **装好之后这两颗按钮会变成「卸载…」** —— 同一颗按钮，按当前状态在「装」与「卸」之间切换。卸载是破坏性操作，所以**都要先过一道确认框**，框里列出将执行的命令、以及**不会被删掉**的东西。
+  - **卸载办公包** = 摘掉 AI 能力桥接插件（`dsh plugin --profile <profile> remove @local/dsh-desktop-python-bridge`）+ 删掉释放出来的桥接代码 + 卸掉上表那 13 个包。摘插件走 `dsh plugin` 而不是手删 profile 里的 `node_modules` —— 后者会留下「清单里还挂着、文件已没了」的幽灵条目，DSH 每次启动都去解析一个不存在的包。
+  - **卸载数据分析扩展包** = 只卸那 4 个包，**不动桥接与它的 12 个工具**。数据分析能力正是 `execute_python_sandbox` 这条沙箱路径提供的，卸掉桥接会让它变成没人用的孤儿。
+  - **Python 本体一律不卸** —— 那交给系统自己的软件管理机制。
+  - 卸办公包时若扩展包还装着，会多问一句：先卸扩展包更干净（免得 numpy / pandas 留在机器上没人用），但**直接只卸办公包也完全可行** —— 沙箱里跑 pandas 仍然可用。
 - **安装位置** —— 只在还没装 Python 本体时出现。留空 = Python 官方默认；填上（或点「浏览」）可装到如 `D:\Python314`。它以 `TargetDir=…` 交给官方安装程序，**装完核对落点**：安装器报成功却没把 `python.exe` 放进指定目录的，会如实报错而不是报成功。`Program Files` **连同其子目录会被当场拒绝** —— 本程序是「装给当前用户、不弹 UAC」的，那个权限本来就写不进去；与其等到下载与哈希校验全过之后才抛一句「退出码 5」，不如现在就把规则说清楚。
 
 面板里实时显示进度（下载百分比、安装程序退出、`pip` 的逐行输出），与首次运行向导共用同一把「同一时刻只跑一个」的锁，每一步都会写进 `desktop.log`。

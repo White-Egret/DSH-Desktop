@@ -547,7 +547,21 @@ mod tests {
             eprintln!("DPAPI 在该环境不可用，跳过往返断言");
             return;
         };
-        assert!(!hex.contains("abc"), "密文里不得出现明文令牌");
+
+        // ⚠ 判据必须是**按字节**比，不能对 hex 字符串做 `contains`（这条断言曾这么写，
+        // CI 上红过）：`hex` 的字母表就是 `0-9a-f`，`"abc"` 是它合法的三连子串，
+        // 在 200 个随机 hex 字符里出现的概率约 4.7% —— 平均每 20 次构建就误报一次，
+        // 而它跟加密实现对不对毫无关系。
+        //
+        // 真正的性质是：**明文的字节序列不出现在密文里**。DPAPI 输出头部之后是
+        // 随机数据，41 字节明文原样重现的概率是 2^-328 量级，所以这条断言不会误报。
+        let blob = from_hex(&hex).expect("seal 产出的必须是合法 hex");
+        let needle = url.as_bytes();
+        assert!(
+            !blob.windows(needle.len()).any(|w| w == needle),
+            "密文里出现了完整的明文：{url}"
+        );
+
         assert_eq!(unseal(&hex).as_deref(), Some(url));
     }
 }

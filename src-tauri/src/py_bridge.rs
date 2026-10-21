@@ -1689,7 +1689,17 @@ mod tests {
         remove_bridge_dir(&dir).expect("remove should succeed");
 
         assert!(!dir.exists(), "目录必须没了");
-        assert!(!base.exists(), "父目录不该留下残骸");
+        // ⚠ 这里**不能**断言 `!base.exists()`（这条断言曾经这么写，CI 上红过）：
+        // `remove_bridge_dir` 删的是传进去的那一个目录，**绝不**向上删父目录 ——
+        // 生产里父目录就是 `%APPDATA%\com.dsh.desktop`，让实现去满足
+        // 「父目录也消失」等于把整个应用配置目录删掉。
+        //
+        // 真正该钉住的是「没留下残骸」：父目录还在，但**必须是空的**。
+        let leftovers: Vec<_> = std::fs::read_dir(&base)
+            .expect("父目录应当还在")
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(leftovers.is_empty(), "父目录里不该留下残骸，实际还有：{leftovers:?}");
         let _ = std::fs::remove_dir_all(&base);
     }
 

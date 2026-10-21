@@ -898,6 +898,17 @@ function onStatus(p) {
     prev !== 'running' && prev !== 'running-external'
   ) {
     autoCheckVersions();
+    // 同一次「进入运行态」还要清掉上一轮安装/卸载的进度残留。
+    // 用户反馈（2026-10-21）：卸载完点工具栏「⟳ 重启」，首选项里那句「已卸载…」
+    // 还在，非得整个退出 Desktop 再打开才消失 —— 因为那两块是**前端 DOM 状态**，
+    // 而「重启」只换 DSH 服务、不重建前端。
+    resetPythonProgress();
+    // 设置页开着时（例如从托盘/快捷键触发重启）顺手把状态行重问一次：
+    // 桥接的 `activate_pending` 就挂在后端 `set_status("running")` 上，此刻
+    // 可能刚把插件注册进 profile，状态行不重查会停在「待激活」。
+    // 只在面板**可见**时才问 —— 关着的时候 openSettings() 本来就会拉一次，
+    // 没必要为每次启动多起一个 Python 探测进程。
+    if (!$('settings-modal').classList.contains('hidden')) refreshPythonStatus();
   }
 
   // 工具栏显示模式重新结算：它依赖「DSH 页面是否已就绪」（见 syncToolbarForStatus）
@@ -1666,6 +1677,29 @@ function setPythonProgress(show, text) {
 function setPythonSpinner(show) {
   const sp = document.querySelector('#python-progress .spinner');
   if (sp) sp.classList.toggle('hidden', !show);
+}
+
+/// 清掉上一轮「安装/卸载完成」的进度画面与逐行日志。
+///
+/// 为什么需要它（用户反馈 2026-10-21）：那两块内容是**上一次操作的残留**，
+/// 只有关掉整个 Desktop 再打开才会消失 —— 因为它们是前端 DOM 状态，
+/// 而后端重启 DSH 服务时前端并不重建。于是「点重启 → 打开首选项」看到的
+/// 还是上一轮的「已卸载…」，很容易被当成「这次重启没生效」。
+///
+/// 只在**进入运行态**时清：那正是「上一轮操作已经翻篇」的时刻。
+/// 不在 openSettings 里清 —— 用户可能刚做完一次安装、正想回头看那几行 pip 输出，
+/// 关掉再开首选项不该把它抹掉。
+function resetPythonProgress() {
+  // 任务还在跑就一个字都不动：那时进度区是「正在发生的事」，不是残留
+  if (pythonTask.active) return;
+  const prog = $('python-progress');
+  if (prog) prog.classList.add('hidden');
+  const log = $('python-log');
+  if (log) {
+    log.textContent = '';
+    log.classList.add('hidden');
+  }
+  setPythonSpinner(false);
 }
 
 /// 安装过程的逐行输出（pip 的实时输出走 python-log 事件）。行数封顶：

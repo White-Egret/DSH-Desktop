@@ -3693,7 +3693,11 @@ fn probe_python_packages(py: &detect::PythonExe) -> (bool, bool) {
 pub(crate) fn bridge_runtime_present(py: &detect::PythonExe) -> bool {
     let code = "import importlib.util as u\n\
                 print('__BR__' + ('1' if u.find_spec('dsh_bridge') else '0'))";
-    let args = py.full_args(&["-c", code.as_str()]);
+    // `code` 本身就是 `&str`，直接传；写成 `code.as_str()` 会调到 `&str::as_str()`
+    // —— 那是 nightly-only 的 unstable feature（`str_as_str`，E0658）。
+    // 上一行 `probe_python_packages` 里同名变量是 `format!` 产出的 `String`，
+    // 那里 `.as_str()` 是稳定的 `String::as_str`，两者不能照抄。
+    let args = py.full_args(&["-c", code]);
     let Ok((true, out)) =
         run_cmd_capture(&py.program.to_string_lossy(), &args, "", Duration::from_secs(60))
     else {

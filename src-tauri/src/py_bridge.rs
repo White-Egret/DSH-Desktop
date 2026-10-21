@@ -792,16 +792,25 @@ fn read_bundle_python_path(bun: &Path) -> Option<String> {
     read_bundle_scalar(&text, "pythonPath")
 }
 
-/// 当前配置是否**真的可用**：三个路径都必须非空且真实存在。
+/// 当前配置是否**真的可用**：`pythonPath` / `bridgeDir` 必须非空且真实存在，
+/// `cwd` 允许留空。
 ///
-/// 为什么三个都要查（真机故障 2026-10-18）：
+/// 为什么这几项要查（真机故障 2026-10-18）：
 ///   · `pythonPath` 不存在 → spawn ENOENT；
-///   · `cwd` 不存在 → **同样** spawn ENOENT，且报错里显示的是 exe 路径，
-///     极易误判成「Python 被删了」（实测 Python 完好，只是 cwd 指向了旧 home）；
+///   · `cwd` 指向一个**已删除的目录** → **同样** spawn ENOENT，且报错里显示的是
+///     exe 路径，极易误判成「Python 被删了」（实测 Python 完好，只是 cwd 失效）；
 ///   · `bridgeDir` 不存在 → Python 侧 `-m dsh_bridge.runtime` 找不到模块。
 ///
 /// 只查 `pythonPath` 是**不够的** —— 这正是上一版修复的漏洞：它重写了路径，
 /// 但用户那次故障的 cwd 也是失效的，重写完照样 ENOENT。
+///
+/// ⚠ **空 `cwd` 是合法状态，不是失效**（真机故障 2026-10-20 的另一半）：
+/// `patch_bundle_config` 现在**刻意**把 `cwd` 写成空串（cwd 落在 bridgeDir 会锁住
+/// 那个目录，卸载时删不掉），由 index.js 的 `pickUsableCwd` 在运行期挑一个可用的
+/// 目录。所以这里若还要求 `cwd` 非空，就会把**每一台正常机器**都判成「配置失效」，
+/// 于是每次进 DSH 都重跑一遍 `npm pack` + `dsh plugin add`（pnpm 安装，几十秒起）
+/// —— 而且是在 DSH 已经跑起来之后重装它正在加载的插件。
+/// 判据因此改成：**非空就必须是目录；空 = 交给 index.js 兜底**。
 fn bridge_config_usable(profile: &str, bun: &Path, bd: &Path) -> bool {
     let _ = profile;
     let Ok(text) = std::fs::read_to_string(bun.join("cordis.patch.yml")) else {
@@ -813,9 +822,11 @@ fn bridge_config_usable(profile: &str, bun: &Path, bd: &Path) -> bool {
 
     let ok = |v: &str| !v.trim().is_empty() && Path::new(v).is_file();
     let ok_dir = |v: &str| !v.trim().is_empty() && Path::new(v).is_dir();
+    // 空 = 合法（运行期兜底）；非空则必须是真实目录
+    let ok_optional_dir = |v: &str| v.trim().is_empty() || Path::new(v).is_dir();
 
-    // pythonPath 必须是**文件**；bridgeDir / cwd 必须是**目录**
-    ok(&python_path) && ok_dir(&bridge_dir) && ok_dir(&cwd) && bd.is_dir()
+    // pythonPath 必须是**文件**；bridgeDir 必须是**目录**；cwd 可空
+    ok(&python_path) && ok_dir(&bridge_dir) && ok_optional_dir(&cwd) && bd.is_dir()
 }
 
 // ---------- 注册 ----------
@@ -1346,17 +1357,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// 回归：**三个路径都要验**，不能只看 pythonPath。
+    /// 回归：`pythonPath` / `bridgeDir` 必须验，`cwd` **允许为空**。
     ///
     /// 真机故障（2026-10-18）：用户删了整个 `%APPDATA%\com.dsh.desktop`，
-    /// 于是 `py-bridge\` 目录没了、`bridgeDir`/`cwd` 双双失效，而
+    /// 于是 `py-bridge\` 目录没了、`bridgeDir` 失效，而
     /// `pythonPath`（D:\Programs\Python\python.exe）**完好**。
     /// 只查 pythonPath 的实现会把这种状态判成「配置可用」→ 不修 → 永远 ENOENT。
     ///
     /// 顺带记住 `spawn ENOENT` 的陷阱：cwd 不存在时报的也是 ENOENT，
     /// 且 `path` 字段显示 exe 路径 —— 极易误判成「Python 被删了」。
+    ///
+    /// ⚠ 但**空 cwd 是合法状态**（2026-10-20 起 cwd 刻意不再写 bridgeDir，
+    /// 见 `patch_bundle_config`）。所以这里的判据是「非空则必须是目录」。
     #[test]
-    fn config_usable_requires_all_three_paths() {
+    fn config_usable_requires_python_and_bridge_dir_but_not_cwd() {
         let tmp = std::env::temp_dir().join(format!("dsh-usable-{}", std::process::id()));
         let bun = tmp.join("py-bridge-bundle");
         let bd = tmp.join("py-bridge");
@@ -1370,8 +1384,8 @@ mod tests {
         let bd_s = bd.to_string_lossy().to_string();
 
         // ⚠ 直接按模板替换三行，**不要**用 patch_bundle_config：
-        // 那个函数把 bridgeDir 与 cwd 写成**同一个值**，于是造不出
-        // 「bridgeDir 好、cwd 坏」这种组合（本测试第一次就栽在这里 ——
+        // 那个函数现在把 cwd 一律写成空串（2026-10-20 起），于是造不出
+        // 「bridgeDir 好、cwd 坏」这种组合（本测试最早就是栽在这里 ——
         // 用例 ③ 实际变成了用例 ①，断言在 CI 上失败）。
         let write = |python: &str, bridge: &str, cwd: &str| {
             let q = |s: &str| s.replace('\'', "''");
@@ -1395,14 +1409,14 @@ mod tests {
         write(&py_s, &ghost, &ghost);
         assert!(
             !bridge_config_usable("web", &bun, &bd),
-            "bridgeDir/cwd 不存在时必须判不可用（否则永远不修）"
+            "bridgeDir 不存在时必须判不可用（否则永远不修，Python 侧找不到入口模块）"
         );
 
         // ③ 只有 cwd 坏（bridgeDir 好）→ 仍不可用
         write(&py_s, &bd_s, &ghost);
         assert!(
             !bridge_config_usable("web", &bun, &bd),
-            "cwd 失效也必须判不可用 —— spawn ENOENT 就是它造成的"
+            "cwd 指向已删除的目录也必须判不可用 —— spawn ENOENT 就是它造成的"
         );
 
         // ④ pythonPath 指向不存在的文件 → 不可用
@@ -1413,6 +1427,17 @@ mod tests {
         // ⑤ 空值 → 不可用
         std::fs::write(bun.join("cordis.patch.yml"), BUNDLE_FILES[1].1).unwrap();
         assert!(!bridge_config_usable("web", &bun, &bd), "空配置必须判不可用");
+
+        // ⑥ **cwd 留空 = 合法**（真机故障 2026-10-20）：
+        // `patch_bundle_config` 刻意把 cwd 写成空串（cwd 落在 bridgeDir 会锁住目录，
+        // 卸载时删不掉），由 index.js 的 pickUsableCwd 在运行期兜底。
+        // 这一项若还要求非空，每一台正常机器都会被判成「配置失效」→ 每次进 DSH
+        // 都重跑一遍 pnpm 安装去覆盖它正在加载的插件。
+        write(&py_s, &bd_s, "");
+        assert!(
+            bridge_config_usable("web", &bun, &bd),
+            "空 cwd 是设计内的正常状态，不能判成失效（否则每次启动都白装一遍插件）"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

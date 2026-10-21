@@ -180,11 +180,14 @@ class BridgeConnection {
 }
 
 /** runtime 侧报「这个文件不是模块」/「找不到模块」时的兜底提示。 */
-function describeStartupFailure(err, pythonPath, cwd) {
+function describeStartupFailure(err, pythonPath, bridgeDir) {
   const raw = String(err?.message ?? err)
   if (/Cannot find module|No module named/i.test(raw)) {
+    // ⚠ 这里要说 bridgeDir，**不是 cwd**（2026-10-20 起两者彻底分家）：
+    // cwd 已经刻意挪到 bridgeDir 之外（避免锁住那个目录），入口模块在哪由
+    // PYTHONPATH 决定 —— 报 cwd 只会把用户指向一个跟问题无关的目录。
     return `Python 侧缺少 dsh_bridge（解释器 ${pythonPath} 没装 dsh-python-bridge），` +
-      `或入口模块不在 ${cwd}。请在 DSH 首选项「Python 环境」里重新点一次「基本安装」。`
+      `或入口模块不在 ${bridgeDir}。请在 DSH 首选项「Python 环境」里重新点一次「基本安装」。`
   }
   if (/protocol-mismatch|-32006/i.test(raw)) {
     return `dsh-python-bridge 版本与宿主不匹配（客户端 ${CLIENT_VERSION}）：${raw}`
@@ -204,7 +207,10 @@ function describeStartupFailure(err, pythonPath, cwd) {
  * 表现成「Python 被删了」，实际 Python 完好。桥接是可选功能，**绝不能因为
  * 一个失效的工作目录就让整个 DSH 起不来**。
  *
- * 回退顺序：配置值 → bridgeDir → 用户主目录 → 当前进程 cwd。
+ * 回退顺序：配置值 → 用户主目录 → 当前进程 cwd。
+ * ⚠ **刻意不含 bridgeDir**（真机故障 2026-10-20）：Windows 上一个进程的 cwd 会
+ * 锁住那个目录，于是「卸载办公包」时桌面端删不掉 py-bridge\（os error 32），
+ * 只留下一个空壳。模块查找改由下面 spawn 时注入的 PYTHONPATH 负责。
  * 全都不可用时返回 undefined（= 交给 Node 用默认 cwd），而不是传一个坏路径。
  */
 function pickUsableCwd(...candidates) {
@@ -277,10 +283,10 @@ export function apply(ctx, config = {}) {
    * 真机故障（2026-10-18）：用户机器上 `%APPDATA%\com.dsh.desktop\py-bridge\`
    * 整个目录被删了（很可能是卸载旧版或手工清理），但 profile 里的插件还在、
    * cordis.patch.yml 里还写着那个路径。后果有两层：
-   *   ① `cwd` 指向不存在的目录 → `spawn` 报 **ENOENT**（且报的是 exe 路径，
-   *      看起来像「Python 被删了」，实测 Python 完好）；
-   *   ② 即使 cwd 回退成功、进程起来了，Python 侧也会
-   *      `No module named dsh_bridge.runtime` —— 代码文件根本不在。
+   *   ① 若 cwd 恰好指向那个已删除的目录 → `spawn` 报 **ENOENT**（且报的是 exe
+   *      路径，看起来像「Python 被删了」，实测 Python 完好）；
+   *   ② 即使进程起来了，Python 侧也会 `No module named dsh_bridge.runtime`
+   *      —— 代码文件根本不在。
    *
    * 所以这里**先看文件在不在**，比 spawn 失败后再猜要准确得多。
    * 缺了只记一句能行动的日志，然后安静退出（DSH 照常可用）。
@@ -403,7 +409,7 @@ export function apply(ctx, config = {}) {
           // 这条路径必须只记一句能行动的日志，然后安静下来（工具不可用，
           // 但 DSH 照常工作）。用户换回解释器后重启 DSH 即可恢复。
           if (spawnError) {
-            log('ERROR', describeStartupFailure(spawnError, pythonPath, cwd))
+            log('ERROR', describeStartupFailure(spawnError, pythonPath, bridgeDir))
             return
           }
           restart()
@@ -422,7 +428,7 @@ export function apply(ctx, config = {}) {
       } catch (err) {
         conn.kill()
         conn = null
-        throw new Error(describeStartupFailure(err, pythonPath, cwd))
+        throw new Error(describeStartupFailure(err, pythonPath, bridgeDir))
       }
 
       const manifest = result?.manifest ?? {}

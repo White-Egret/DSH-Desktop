@@ -2242,9 +2242,16 @@ function renderUpdateModal(resetSelection) {
 }
 
 function confirmUpdate() {
+  // 每次打开都把上一次失败的诊断区收起来：那是「上次」的事，不该让这次误以为已经失败
+  hideUpdateFail();
   renderUpdateModal(true);
   showModal('update-modal');
 }
+
+/// 这次更新实际要用的 npm 源（空串 = 不传 --registry，用 `.npmrc` 里那个）。
+///
+/// 只有「失败后换源重试」那条路会返回非空值；首次更新永远是空串。
+let updateRegistryOverride = '';
 
 async function doUpdate() {
   const tag = selectedTag();
@@ -2260,14 +2267,22 @@ async function doUpdate() {
   $('update-progress-text').textContent = t('upd_prog_prepare');
   panel.classList.remove('hidden');
   appendLog('update', t('log_update_begin', tag));
+  const registry = updateRegistryOverride;
   try {
-    await invoke('update_dsh', { tag });
+    // 参数名是单词 `registry`：与 Rust 侧同一条纪律（多词名会被 Tauri 的
+    // camelCase/snake_case 转换绕晕，Option<String> 会静默变成 None）。
+    // 空串传 null，让后端走「不加 --registry」的默认路径。
+    await invoke('update_dsh', { tag, registry: registry || null });
   } catch (err) {
     updating = false;
     refreshButtons();
     panel.classList.add('hidden');
     toast(t('toast_update_fail_start', err), true);
     appendLog('update', t('log_update_start_fail', err));
+  } finally {
+    // 无论成败都清掉：下一次从「更新 DSH」按钮进入时必须是默认源，
+    // 否则用户会莫名其妙地沿用上次临时填的源。
+    updateRegistryOverride = '';
   }
 }
 
@@ -2277,12 +2292,39 @@ function onUpdateProgress(p) {
   if (el) el.textContent = p.message;
 }
 
+/// 收起「更新失败」诊断区（打开更新弹窗 / 重新开始更新时调用）
+function hideUpdateFail() {
+  const box = $('upd-fail-box');
+  if (box) box.classList.add('hidden');
+}
+
+/// 显示「更新失败」诊断区：原因（人话）+ 源输入框 + 重试按钮。
+///
+/// `p.error_hint` 是后端把 npm 错误码翻译好的一句建议（认不出来时为空串）；
+/// `p.registry_used` 是这次实际用的源，用来预填输入框 —— 让用户「改一下再试」
+/// 而不是从空白开始。
+function showUpdateFail(p) {
+  const box = $('upd-fail-box');
+  const hintEl = $('upd-fail-hint');
+  const input = $('upd-retry-registry');
+  if (!box || !hintEl || !input) return;
+
+  // 有翻译好的原因就显示它；没有就退回一句「没认出原因」，
+  // 并指向日志 —— 不编造一个可能误导用户的原因。
+  const hint = (p.error_hint || '').trim();
+  hintEl.textContent = hint || t('upd_fail_no_hint');
+  // 预填这次用的源：用户多半只是想「换个更快的」，从现值改起比空白好
+  input.value = (p.registry_used || '').trim();
+  box.classList.remove('hidden');
+}
+
 async function onUpdateFinished(p) {
   updating = false;
   refreshButtons();
   // 更新结束（无论成败）收起页面进度面板；完整输出仍保留在「日志」里
   $('update-progress').classList.add('hidden');
   if (p.success) {
+    hideUpdateFail();
     appendLog('update', t('log_update_done_restart'));
     toast(t('toast_update_restarting'));
     try {
@@ -2294,6 +2336,12 @@ async function onUpdateFinished(p) {
     }
   } else {
     toast(t('toast_update_failed_detail', p.message), true);
+    // 失败后把「原因 + 换源重试」重新摆出来。
+    // 弹窗在 doUpdate 里就被关掉了，所以这里要连弹窗一起重新打开 ——
+    // 否则用户得自己再点一次「更新 DSH」才能看到重试入口。
+    renderUpdateModal(false);
+    showUpdateFail(p);
+    showModal('update-modal');
   }
 }
 
@@ -3090,6 +3138,30 @@ function bindUI() {
   $('btn-clear-log').onclick = () => { logBody.innerHTML = ''; };
   $('btn-cancel-update').onclick = () => hideModal('update-modal');
   $('btn-confirm-update').onclick = doUpdate;
+  // 「换源重试」：只把输入框里的源用于**这一次**，不写任何配置文件。
+  // 校验交给后端（config::validate_registry_url，与首选项「包源 registry」同一套），
+  // 非法值会以 toast 形式报出来，且不会开始更新。
+  $('btn-upd-retry').onclick = () => {
+    const el = $('upd-retry-registry');
+    const v = el ? el.value.trim() : '';
+    // 与「没填」等价：留空 = 用 .npmrc 里那个源
+    updateRegistryOverride = v;
+    doUpdate();
+  };
+  // 「复制命令」：给愿意自己开终端的人一条**当前参数**的命令。
+  // 不复用 update-cmd-preview：那个是「将执行」的预览，不含 --registry。
+  $('btn-upd-copy-cmd').onclick = async () => {
+    const el = $('upd-retry-registry');
+    const reg = el ? el.value.trim() : '';
+    const tag = selectedTag();
+    const pkg = (config && config.package_name) || '@deepseek-ai/dsh';
+    let cmd = 'npm install -g';
+    if (config && config.npm_cache_dir) cmd += ` --cache "${config.npm_cache_dir}"`;
+    if (reg) cmd += ` --registry ${reg}`;
+    cmd += ` ${pkg}@${tag}`;
+    const ok = await copyText(cmd);
+    toast(ok ? t('toast_copied') : cmd, !ok);
+  };
   // 切换频道时同步刷新「将执行」的命令预览
   document.querySelectorAll('input[name="upd-channel"]').forEach((r) => {
     r.onchange = renderUpdateCmd;

@@ -13,6 +13,15 @@ use tauri::{AppHandle, Emitter, Manager};
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// 「更新 DSH」失败诊断时保留多少行 npm 输出。
+///
+/// 为什么只留尾部：npm 一次全局安装会打几千行 http fetch，而**错误码总在结尾**
+/// （`error code EIDLETIMEOUT` / `verbose stack Error: …`）。真机实测一次失败
+/// 的更新有 4700+ 行，全留下既占内存又没意义。
+///
+/// 200 行足够覆盖「npm error」到「verbose exit」这一整段收尾信息。
+const LOG_TAIL_LINES: usize = 200;
+
 /// 主窗口顶部工具栏高度（逻辑像素），必须与前端 CSS 中 header 的 height 保持一致
 pub const TOOLBAR_H: f64 = 43.2;
 
@@ -301,6 +310,17 @@ pub struct StatusEvent {
 pub struct UpdateFinished {
     pub success: bool,
     pub message: String,
+    /// 失败时的**可操作建议**（已本地化，可直接显示）；成功或没有识别出原因时为空串。
+    ///
+    /// 为什么需要它：npm 失败时只给一个退出码，真正的原因（`EIDLETIMEOUT` /
+    /// `EPERM` / `ENOSPC`…）埋在几百行 http fetch 日志里。用户看到「退出码 1」
+    /// 完全不知道该干什么 —— 真机实测（2026-10-22）：一次 8 分钟的更新以
+    /// `Idle timeout reached for host registry.npmjs.org:443` 失败，而界面上
+    /// 只有「请查看日志」。这里把常见错误码翻成人话。
+    pub error_hint: String,
+    /// 失败时，本次实际使用的 npm 源（供前端预填「换源重试」的输入框）。
+    /// 成功或读不到时为空串。
+    pub registry_used: String,
 }
 
 /// 「更新 DSH」进行中的实时进度（每秒回报一次，供页面进度区显示）
@@ -566,6 +586,9 @@ pub(crate) fn spawn_log_reader(
     track_stderr: bool,
     dsh_file: Option<PathBuf>,
     fetch_counter: Option<std::sync::Arc<AtomicUsize>>,
+    // 可选的「输出尾部」收集器：更新失败时要从中认出错误码（见 npm_failure_hint）。
+    // 只有「更新 DSH」那条路传 Some，其余调用点一律 None —— 不传就没有额外内存与锁开销。
+    output_tail: Option<std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>>,
 ) {
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
@@ -603,6 +626,21 @@ pub(crate) fn spawn_log_reader(
             if let Some(c) = fetch_counter.as_ref() {
                 if l.contains("http fetch") {
                     c.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+
+            // 「更新 DSH」失败后要能说出原因：只保留**最后 N 行**（错误码总在结尾），
+            // 而不是把整场 8 分钟的几千行都攒在内存里。
+            // 用 `shown`（已脱敏）而不是 `l`：这段文本会回到界面上。
+            if let Some(tail) = output_tail.as_ref() {
+                if let Ok(mut g) = tail.lock() {
+                    // ⚠ 必须 `(*g)` 解引用：`MutexGuard` 本身没有 `push`，
+                    // 方法解析不会自动穿过 Deref 去找 `VecDeque::push`。
+                    (*g).push_back(shown.clone());
+                    // 超出上限就从头丢：VecDeque 的 pop_front 是 O(1)
+                    while g.len() > LOG_TAIL_LINES {
+                        g.pop_front();
+                    }
                 }
             }
 
@@ -1608,10 +1646,10 @@ pub(crate) fn start_internal(app: &AppHandle) -> Result<(), String> {
     // DSH 输出同时镜像写入 <DSH 家目录>\logs\dsh.log（要求四.2）
     let dsh_log_file = logger::dsh_log_path(&home_dir);
     if let Some(so) = child.stdout.take() {
-        spawn_log_reader(app.clone(), so, "stdout", "dsh-log", false, Some(dsh_log_file.clone()), None);
+        spawn_log_reader(app.clone(), so, "stdout", "dsh-log", false, Some(dsh_log_file.clone()), None, None);
     }
     if let Some(se) = child.stderr.take() {
-        spawn_log_reader(app.clone(), se, "stderr", "dsh-log", true, Some(dsh_log_file), None);
+        spawn_log_reader(app.clone(), se, "stderr", "dsh-log", true, Some(dsh_log_file), None, None);
     }
 
     // Job Object 兜底：即使本程序异常退出，Windows 内核也会结束 DSH 进程树
@@ -2724,7 +2762,14 @@ pub async fn detect_npm_package(app: AppHandle) -> Result<String, String> {
 /// 就等于把「选频道」变成「注入任意参数」的入口。
 /// 两个方向都允许（升级或退回稳定版），因此不做任何版本高低判断。
 #[tauri::command]
-pub async fn update_dsh(app: AppHandle, tag: String) -> Result<(), String> {
+pub async fn update_dsh(
+    app: AppHandle,
+    tag: String,
+    // 用户点「换源重试」时填的 npm 源；`None`/空 = 用 `.npmrc` 里那个（默认路径）。
+    // 只影响**这一次**安装，绝不写进任何配置文件（理由见 dsh_install_args 的注释）。
+    // 参数名刻意用单词 `registry`：多词名会被 Tauri 的 camelCase/snake_case 转换绕晕。
+    registry: Option<String>,
+) -> Result<(), String> {
     // 更新流程内部会走「停止日常实例 → npm → 重启日常」的完整状态机；
     // 安全模式期间状态机归安全实例所有，必须先退出安全模式再更新
     if crate::safe::is_active(&app) {
@@ -2734,6 +2779,16 @@ pub async fn update_dsh(app: AppHandle, tag: String) -> Result<(), String> {
     if tag != "latest" && tag != "next" {
         return Err(i18n::t("err_update_bad_tag").to_string());
     }
+
+    // 用户填的源**在使用点再校验一次**（与其它路径字段同一条原则）：
+    // 它会被拼进 npm 命令行，非法值不能进。空串 = 没填 = 不传 --registry。
+    let registry_arg: Option<String> = match registry.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(v) => match config::validate_registry_url(v) {
+            Ok(ok) => Some(ok),
+            Err(e) => return Err(e),
+        },
+    };
 
     let state = app.state::<AppState>();
     if state.updating.swap(true, Ordering::SeqCst) {
@@ -2820,13 +2875,23 @@ pub async fn update_dsh(app: AppHandle, tag: String) -> Result<(), String> {
         &format!("{}@{}", cfg.package_name, tag),
         update_prefix.as_deref(),
         update_cache.as_deref(),
+        registry_arg.as_deref(),
     );
     let args_display = args.join(" ");
+    // 记下「这次实际用的源」：失败时回给前端预填输入框。
+    // 用户填了就是那个值；没填就现读一次生效值（读不到就空串，前端会显示占位符）。
+    let registry_used: String = match registry_arg.as_deref() {
+        Some(r) => r.to_string(),
+        None => detect::npm_effective_registry(&cwd).unwrap_or_default(),
+    };
 
     let app2 = app.clone();
     std::thread::spawn(move || {
         // 下载进度：计数 npm 的 http fetch 日志行，每秒向页面进度区回报一次
         let fetch_counter = Arc::new(AtomicUsize::new(0));
+        // 失败时要从中认出错误码的输出尾部（只留最后 LOG_TAIL_LINES 行）
+        let output_tail: Arc<std::sync::Mutex<std::collections::VecDeque<String>>> =
+            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let npm_done = Arc::new(AtomicBool::new(false));
         {
             let app_tick = app2.clone();
@@ -2897,6 +2962,7 @@ pub async fn update_dsh(app: AppHandle, tag: String) -> Result<(), String> {
                     false,
                     None,
                     Some(fetch_counter.clone()),
+                    Some(output_tail.clone()),
                 );
             }
             if let Some(se) = child.stderr.take() {
@@ -2908,6 +2974,7 @@ pub async fn update_dsh(app: AppHandle, tag: String) -> Result<(), String> {
                     false,
                     None,
                     Some(fetch_counter.clone()),
+                    Some(output_tail.clone()),
                 );
             }
 
@@ -2932,7 +2999,12 @@ pub async fn update_dsh(app: AppHandle, tag: String) -> Result<(), String> {
                 state.updating.store(false, Ordering::SeqCst);
                 let _ = app2.emit(
                     "update-finished",
-                    UpdateFinished { success: true, message: i18n::t("msg_update_success").to_string() },
+                    UpdateFinished {
+                        success: true,
+                        message: i18n::t("msg_update_success").to_string(),
+                        error_hint: String::new(),
+                        registry_used: String::new(),
+                    },
                 );
             }
             Ok(code) => {
@@ -2941,11 +3013,24 @@ pub async fn update_dsh(app: AppHandle, tag: String) -> Result<(), String> {
                     "update",
                     i18n::fmt("log_update_fail_code", &[&code]),
                 );
+                // 把尾部拼起来交给翻译函数：npm 的真实原因（EIDLETIMEOUT 等）
+                // 只出现在这里，界面上光有退出码等于什么都没说。
+                let tail_text = output_tail
+                    .lock()
+                    .map(|g| g.iter().cloned().collect::<Vec<_>>().join("\n"))
+                    .unwrap_or_default();
+                let hint = npm_failure_hint(&tail_text);
+                // 认出了原因就把原因写进日志（一句人话），方便事后复盘
+                if !hint.is_empty() {
+                    emit_log(&app2, "update", hint.clone());
+                }
                 let _ = app2.emit(
                     "update-finished",
                     UpdateFinished {
                         success: false,
                         message: i18n::fmt("msg_update_fail_code", &[&code]),
+                        error_hint: hint,
+                        registry_used: registry_used.clone(),
                     },
                 );
                 set_status(&app2, "idle", None);
@@ -2954,7 +3039,12 @@ pub async fn update_dsh(app: AppHandle, tag: String) -> Result<(), String> {
                 emit_log(&app2, "update", format!("[update] {}", e));
                 let _ = app2.emit(
                     "update-finished",
-                    UpdateFinished { success: false, message: e },
+                    UpdateFinished {
+                        success: false,
+                        message: e,
+                        error_hint: String::new(),
+                        registry_used: registry_used.clone(),
+                    },
                 );
                 set_status(&app2, "idle", None);
             }
@@ -5349,15 +5439,26 @@ fn try_download_powershell(url: &str, dest: &Path, page: &str) -> Result<(), Str
     }
 }
 
-/// 拼 `npm install -g [--prefix <目录>] [--cache <目录>] <包名>` 的参数表（纯函数，便于单测）。
+/// 拼 `npm install -g [--prefix <目录>] [--cache <目录>] [--registry <源>] <包名>` 的参数表
+/// （纯函数，便于单测）。
 ///
 /// 选项固定排在 `-g` 之后、包名之前：npm 允许选项出现在任意位置，固定位置只是为了让
 /// **日志里那行命令**与用户从界面上复制的命令逐字一致（排查时少一层翻译）。
 ///
 /// `None` 就是「不加这个选项」，而不是「加一个空值」：
 ///   - `prefix = None` → 不传 `--prefix`，npm 按自己的配置解析全局目录（默认行为）；
-///   - `cache = None`  → 不传 `--cache`，npm 用自己的缓存配置（本程序没设置时就是它）。
-fn dsh_install_args(pkg: &str, prefix: Option<&str>, cache: Option<&str>) -> Vec<String> {
+///   - `cache = None`  → 不传 `--cache`，npm 用自己的缓存配置（本程序没设置时就是它）；
+///   - `registry = None` → 不传 `--registry`，npm 用 `.npmrc` 里那个源（**默认就是这条路**）。
+///
+/// ⚠ `registry` 只用于**用户点「换源重试」那一次**，绝不写进任何配置文件：
+/// 源是供应链敏感配置，首选项里已有专门的「包源 registry」块管持久化，
+/// 这里再写一份就会出现两个入口管同一件事，且用户会分不清哪个在生效。
+fn dsh_install_args(
+    pkg: &str,
+    prefix: Option<&str>,
+    cache: Option<&str>,
+    registry: Option<&str>,
+) -> Vec<String> {
     let mut args: Vec<String> = vec!["install".to_string(), "-g".to_string()];
     if let Some(d) = prefix {
         args.push("--prefix".to_string());
@@ -5367,8 +5468,52 @@ fn dsh_install_args(pkg: &str, prefix: Option<&str>, cache: Option<&str>) -> Vec
         args.push("--cache".to_string());
         args.push(c.to_string());
     }
+    if let Some(r) = registry {
+        args.push("--registry".to_string());
+        args.push(r.to_string());
+    }
     args.push(pkg.to_string());
     args
+}
+
+/// 把 npm 的失败输出翻成**用户能照着做**的一句建议（纯函数，便于单测）。
+///
+/// 输入是本次 npm 运行的输出尾部（几十行就够），返回已本地化的建议；
+/// 认不出来时返回空串 —— 调用方据此退回原来那句「详见日志」，不编造原因。
+///
+/// 匹配的都是 npm 真实会打出来的错误码（`error code XXXX` / `verbose stack Error: …`）。
+/// 顺序有讲究：`EIDLETIMEOUT` 必须排在 `ETIMEDOUT` 之前判断（前者更具体），
+/// 否则会把「空闲超时」误报成「连接超时」。
+fn npm_failure_hint(output_tail: &str) -> String {
+    let s = output_tail.to_ascii_uppercase();
+    let has = |needle: &str| s.contains(needle);
+
+    // 空闲超时：下载过程中某个连接长时间没有数据流动。真机实测（2026-10-22）
+    // 表现为「所有 tarball 都返回 200，但每个要 150+ 秒」，最后整次安装失败。
+    if has("EIDLETIMEOUT") || has("IDLE TIMEOUT REACHED") {
+        return i18n::t("upd_err_idle_timeout").to_string();
+    }
+    // 连接/响应超时（与上面不同：这是压根没连上或服务端不响应）
+    if has("ETIMEDOUT") || has("ETIMEOUT") {
+        return i18n::t("upd_err_timeout").to_string();
+    }
+    // 磁盘满
+    if has("ENOSPC") {
+        return i18n::t("upd_err_nospace").to_string();
+    }
+    // 文件被占用 / 删不掉：真机上常见于「DSH 没完全退出」或杀软扫描
+    if has("EPERM") || has("EBUSY") {
+        return i18n::t("upd_err_busy").to_string();
+    }
+    // 权限不足
+    if has("EACCES") {
+        return i18n::t("upd_err_denied").to_string();
+    }
+    // 网络类：DNS / 连不上 / 证书
+    if has("ENOTFOUND") || has("ECONNREFUSED") || has("ECONNRESET") || has("CERT_") {
+        return i18n::t("upd_err_network").to_string();
+    }
+    String::new()
 }
 
 /// 取「本机配置里可用的 npm 缓存目录」，供**所有由本程序派生的 npm** 使用。
@@ -5544,7 +5689,8 @@ pub async fn setup_install_dsh(app: AppHandle, dir: Option<String>) -> Result<()
     // 缓存位置：设置页里填了就显式带上 `--cache`（与写进 `~/.npmrc` 的那个值一致，
 // 所以日志里的命令复制出来行为相同）
     let cache = npm_cache_for_use(&cfg);
-    let args = dsh_install_args(&pkg, prefix.as_deref(), cache.as_deref());
+    // 引导安装不传 --registry：这条路没有「换源重试」入口，用 .npmrc 里那个源即可
+    let args = dsh_install_args(&pkg, prefix.as_deref(), cache.as_deref(), None);
     // 命令行回显用**真正的参数表**拼，而不是手写模板：加一个选项（--prefix / --cache）
     // 时日志自动跟着变，也就不会出现「日志说一套、实际执行另一套」。
     let args_display = args.join(" ");
@@ -5623,6 +5769,7 @@ pub async fn setup_install_dsh(app: AppHandle, dir: Option<String>) -> Result<()
                     false,
                     None,
                     Some(fetch_counter.clone()),
+                    None,
                 );
             }
             if let Some(se) = child.stderr.take() {
@@ -5634,6 +5781,7 @@ pub async fn setup_install_dsh(app: AppHandle, dir: Option<String>) -> Result<()
                     false,
                     None,
                     Some(fetch_counter.clone()),
+                    None,
                 );
             }
 
@@ -7679,14 +7827,15 @@ mod tests {
     #[test]
     fn dsh_install_args_put_options_between_g_and_package() {
         assert_eq!(
-            dsh_install_args("@deepseek-ai/dsh", None, None),
+            dsh_install_args("@deepseek-ai/dsh", None, None, None),
             vec!["install", "-g", "@deepseek-ai/dsh"]
         );
         assert_eq!(
             dsh_install_args(
                 "@deepseek-ai/dsh@next",
                 Some(r"D:\dsh-global"),
-                Some(r"D:\npm-cache")
+                Some(r"D:\npm-cache"),
+                None
             ),
             vec![
                 "install",
@@ -7700,9 +7849,112 @@ mod tests {
         );
         // 只设置了缓存位置时，参数表里不能冒出 --prefix
         assert_eq!(
-            dsh_install_args("@deepseek-ai/dsh", None, Some(r"D:\npm-cache")),
+            dsh_install_args("@deepseek-ai/dsh", None, Some(r"D:\npm-cache"), None),
             vec!["install", "-g", "--cache", r"D:\npm-cache", "@deepseek-ai/dsh"]
         );
+    }
+
+    /// 「换源重试」：`--registry` 只出现在**用户确实填了源**的时候。
+    ///
+    /// 守两件事：
+    ///   ① `registry = None` 时参数表里**一个字都不多** —— 那就是「用 `.npmrc` 里那个源」，
+    ///      与加这个功能之前完全一致（默认路径不能因为新功能发生变化）。
+    ///   ② 传了源就必须带 `--registry`，且包名仍在最后（与卸载对称）。
+    #[test]
+    fn dsh_install_args_only_pass_registry_when_given() {
+        // ① 没填源：与旧行为逐字相同
+        assert_eq!(
+            dsh_install_args("@deepseek-ai/dsh@latest", None, None, None),
+            vec!["install", "-g", "@deepseek-ai/dsh@latest"]
+        );
+        // ② 填了源：选项在包名之前，包名压轴
+        assert_eq!(
+            dsh_install_args(
+                "@deepseek-ai/dsh@latest",
+                None,
+                Some(r"D:\npm-cache"),
+                Some("https://registry.npmmirror.com/")
+            ),
+            vec![
+                "install",
+                "-g",
+                "--cache",
+                r"D:\npm-cache",
+                "--registry",
+                "https://registry.npmmirror.com/",
+                "@deepseek-ai/dsh@latest"
+            ]
+        );
+        // ③ 三个选项齐全时顺序固定：prefix → cache → registry → 包名
+        let all = dsh_install_args(
+            "@deepseek-ai/dsh@next",
+            Some(r"D:\dsh-global"),
+            Some(r"D:\npm-cache"),
+            Some("https://a.example/"),
+        );
+        assert_eq!(
+            all,
+            vec![
+                "install",
+                "-g",
+                "--prefix",
+                r"D:\dsh-global",
+                "--cache",
+                r"D:\npm-cache",
+                "--registry",
+                "https://a.example/",
+                "@deepseek-ai/dsh@next"
+            ]
+        );
+        assert_eq!(all.last().map(String::as_str), Some("@deepseek-ai/dsh@next"));
+    }
+
+    /// npm 错误码 → 人话：认得出来的要给建议，认不出来的**必须返回空串**。
+    ///
+    /// 「认不出来就编一个原因」比不提示更糟：用户会照着一条错误的建议去修。
+    /// 所以这条测试既钉正向匹配，也钉「未知错误返回空」。
+    #[test]
+    fn npm_failure_hint_matches_real_error_codes() {
+        // 真机原文（2026-10-22 测试机，8 分钟更新失败的结尾）
+        let real = "npm http fetch GET 200 https://registry.npmjs.org/openai/-/openai-7.19.0.tgz 166069ms (cache miss)\n\
+                    npm error code EIDLETIMEOUT\n\
+                    npm error Idle timeout reached for host `registry.npmjs.org:443`\n\
+                    npm verbose exit 1";
+        let h = npm_failure_hint(real);
+        assert!(!h.is_empty(), "真机这条 EIDLETIMEOUT 必须能被认出来");
+        // 空闲超时不能退化成通用的「连接超时」文案（两者给的建议不同）
+        assert_ne!(h, i18n::t("upd_err_timeout").to_string(), "EIDLETIMEOUT 应命中更具体的那条");
+
+        // 顺序陷阱：EIDLETIMEOUT 里含有 "TIMEOUT"，但必须先匹配空闲超时
+        assert_eq!(
+            npm_failure_hint("npm error code EIDLETIMEOUT"),
+            i18n::t("upd_err_idle_timeout").to_string()
+        );
+        assert_eq!(
+            npm_failure_hint("npm error code ETIMEDOUT"),
+            i18n::t("upd_err_timeout").to_string()
+        );
+        assert_eq!(
+            npm_failure_hint("npm error code ENOSPC"),
+            i18n::t("upd_err_nospace").to_string()
+        );
+        assert_eq!(
+            npm_failure_hint("npm error code EPERM"),
+            i18n::t("upd_err_busy").to_string()
+        );
+        assert_eq!(
+            npm_failure_hint("npm error code EACCES"),
+            i18n::t("upd_err_denied").to_string()
+        );
+        assert_eq!(
+            npm_failure_hint("npm error code ENOTFOUND"),
+            i18n::t("upd_err_network").to_string()
+        );
+
+        // 认不出来 → 空串（调用方据此退回「详见日志」，不编原因）
+        assert_eq!(npm_failure_hint(""), "");
+        assert_eq!(npm_failure_hint("npm error code EWHATEVER"), "");
+        assert_eq!(npm_failure_hint("npm warn cleanup Failed to remove some directories"), "");
     }
 
     /// 装了要卸得掉：`npm uninstall -g <包名>` 找的是**同一个包名**，所以安装参数表里
@@ -7722,7 +7974,7 @@ mod tests {
             (None, Some(r"D:\npm-cache")),
             (Some(r"D:\dsh-global"), Some(r"D:\npm-cache")),
         ] {
-            let args = dsh_install_args(pkg, prefix, cache);
+            let args = dsh_install_args(pkg, prefix, cache, None);
             assert_eq!(
                 args.last().map(String::as_str),
                 Some(pkg),

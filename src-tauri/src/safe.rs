@@ -630,10 +630,10 @@ fn enter_safe_blocking(app: &AppHandle) -> Result<SafeReport, String> {
     // dsh_file 传 None：不在 .dsh-safe 里写任何文件，保持「除凭据外全空」的原厂基线；
     // 完整输出仍全部落 desktop.log。
     if let Some(so) = child.stdout.take() {
-        spawn_log_reader(app.clone(), so, "stdout", "dsh-log", false, None, None);
+        spawn_log_reader(app.clone(), so, "stdout", "dsh-log", false, None, None, None);
     }
     if let Some(se) = child.stderr.take() {
-        spawn_log_reader(app.clone(), se, "stderr", "dsh-log", true, None, None);
+        spawn_log_reader(app.clone(), se, "stderr", "dsh-log", true, None, None, None);
     }
 
     // Job Object 兜底：即使本程序被强杀，Windows 内核也会结束安全模式进程树

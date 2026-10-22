@@ -157,6 +157,40 @@ pub fn t(key: &str) -> &'static str {
         // 更新进行中的实时进度（页面进度区每秒刷新一次）
         "update_npm_progress" => if en { "Downloading and installing the new DSH via npm… {0} package file(s) fetched ({1} s elapsed)" } else { "正在通过 npm 下载并安装新版 DSH… 已获取 {0} 个包文件（用时 {1} 秒）" },
 
+        // ---------- 更新失败：把 npm 错误码翻成人话 ----------
+        // 这些文案由 process::npm_failure_hint 在**失败那一刻**按 npm 输出尾部匹配后取用。
+        // 每一条都要回答「用户现在该做什么」，而不只是复述错误。
+        "upd_err_idle_timeout" => if en {
+            "The download stalled: some packages took over 2 minutes each and npm gave up waiting for the connection to go idle. This is usually a slow or unstable network, not a broken install. Try a faster npm registry below, or retry later."
+        } else {
+            "下载卡住了：部分包单个就花了两分多钟，npm 判定连接长时间没有数据而放弃。通常是网络慢或不稳定，而不是安装本身坏了。可以在下面换一个更快的 npm 源，或稍后重试。"
+        },
+        "upd_err_timeout" => if en {
+            "Timed out talking to the npm registry. Check your network / proxy, then retry."
+        } else {
+            "连接 npm 源超时。请检查网络或代理设置后重试。"
+        },
+        "upd_err_nospace" => if en {
+            "Not enough disk space (ENOSPC). Free some space on the drive holding the npm cache, then retry."
+        } else {
+            "磁盘空间不足（ENOSPC）。请清理 npm 缓存所在磁盘的空间后重试。"
+        },
+        "upd_err_busy" => if en {
+            "Some files were in use (EPERM / EBUSY) — usually DSH or an antivirus still holding them. Fully quit DSH (and pause the antivirus scan if needed), then retry."
+        } else {
+            "有文件被占用（EPERM / EBUSY），通常是 DSH 没完全退出，或杀毒软件正在扫描。请完全退出 DSH（必要时暂停杀毒扫描）后重试。"
+        },
+        "upd_err_denied" => if en {
+            "Permission denied (EACCES). The npm global directory needs write access — try running as administrator."
+        } else {
+            "权限不足（EACCES）。npm 全局目录需要写权限 —— 可尝试以管理员身份运行。"
+        },
+        "upd_err_network" => if en {
+            "Could not reach the npm registry (DNS / connection / certificate error). Check your network and proxy settings, then retry."
+        } else {
+            "连不上 npm 源（DNS / 连接 / 证书错误）。请检查网络与代理设置后重试。"
+        },
+
         // ---------- 开机自启 ----------
         "log_autostart_on" => if en { "[launcher] Start-with-Windows enabled." } else { "[launcher] 已开启开机自动启动。" },
         "log_autostart_off" => if en { "[launcher] Start-with-Windows disabled." } else { "[launcher] 已关闭开机自动启动。" },

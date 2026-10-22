@@ -1,5 +1,9 @@
 node_modules/
 src-tauri/target/
+# 本机 cargo 配置（把 target-dir 指向 D:\DSH\Workspace\cargo-target）。
+# **必须忽略**：里面的绝对路径只对这台机器成立，提交上去会让 CI 找不到目录。
+# 它也不该进仓库 —— 编译产物放哪儿是每台机器自己的事。
+src-tauri/.cargo/
 src-tauri/gen/schemas/
 *.log
 *.tgz

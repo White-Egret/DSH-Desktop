@@ -419,6 +419,24 @@
           <code id="upd-backup-dir"></code>
           <div class="upd-backup-note" data-i18n="upd_backup_note">无论升级还是退回旧版本都建议备份：配置、密钥与会话数据都在这里，另一个版本可能改写其格式。</div>
         </div>
+        <!-- 更新失败后的诊断与「换源重试」区（默认隐藏）。
+             为什么要有它：npm 失败只给一个退出码，真正原因（EIDLETIMEOUT / EPERM…）
+             埋在几千行 http fetch 日志里。真机实测（2026-10-22）一次 8 分钟的更新
+             以「空闲超时」失败，而界面上只有「请查看日志」，用户完全不知道该做什么。
+             源输入框**只用于这一次**：不写进任何配置文件（源是供应链敏感配置，
+             首选项里已有专门的「包源 registry」块管持久化）。 -->
+        <div id="upd-fail-box" class="upd-fail hidden">
+          <div id="upd-fail-hint" class="upd-fail-hint"></div>
+          <label class="field upd-fail-registry">
+            <span data-i18n="upd_retry_registry_label">换一个 npm 源重试（只用于这一次，不会保存）</span>
+            <input id="upd-retry-registry" type="text" spellcheck="false"
+                   placeholder="https://registry.npmmirror.com/" />
+          </label>
+          <div class="row gap">
+            <button id="btn-upd-retry" class="btn primary" data-i18n="upd_retry_btn">用这个源重试</button>
+            <button id="btn-upd-copy-cmd" class="btn small" data-i18n="upd_copy_cmd_btn">复制命令</button>
+          </div>
+        </div>
       </div>
       <div class="modal-actions">
         <button id="btn-cancel-update" class="btn" data-i18n="btn_cancel">取消</button>

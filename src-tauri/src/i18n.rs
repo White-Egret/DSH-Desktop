@@ -171,6 +171,10 @@ pub fn t(key: &str) -> &'static str {
         "tray_show" => if en { "Show Main Window" } else { "显示主窗口" },
         "tray_autostart" => if en { "Start with Windows" } else { "开机自动启动" },
         "tray_quit" => if en { "Exit" } else { "退出" },
+        // 「启动 / 停止 DSH」从工具栏搬到托盘（用户要求 2026-10-21）：
+        // 日常用不到（程序启动时自动拉起），但卡在 error 状态时「停止」是逃生口。
+        "tray_start_dsh" => if en { "Start DSH" } else { "启动 DSH" },
+        "tray_stop_dsh" => if en { "Stop DSH" } else { "停止 DSH" },
 
         // ---------- 首次运行引导：Node.js ----------
         "err_setup_busy" => if en { "A guided setup task is already running" } else { "已有引导安装任务正在进行" },

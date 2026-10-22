@@ -8,10 +8,15 @@
 (function () {
   const zh = {
     // 工具栏
-    btn_start: '▶ 启动', btn_stop: '■ 停止', btn_restart: '⟳ 重启',
+    // 「▶ 启动」「■ 停止」已移除（2026-10-21）：程序启动时自动拉起 DSH，日常用不到；
+    // 卡在 error 状态时需要的「停止」逃生口改到托盘菜单。别把这两条加回来。
+    btn_restart: '⟳ 重启',
     // 注：原来这里有 btn_refresh（「↻ 刷新页面」），按钮已按用户要求移除 ——
     //      DSH 页面内右键自带「重新加载」，工具栏不必再占一个位置。
     btn_update: '⤓ 更新 DSH',
+    // 装 / 卸 Python 环境与卸载 DSH 的入口（原来是首选项里的两块）。
+    // 中文版用「安装/卸载」；英文版才是 "(Un)install"（见下方 en 词典）。
+    btn_manage: '安装/卸载',
     btn_log: '日志', btn_settings: '⚙ 首选项',
     lbl_port: '端口', lbl_version: '版本', status_init: '初始化…',
     // 状态
@@ -250,6 +255,9 @@
     // ---------- 卸载 DSH（首选项最底部入口 + 追问 pnpm + 最终结果页） ----------
     // 结果列表按「后端返回的结构化条目」渲染：kind 决定label与是否显示路径，status 决定后缀。
     lbl_uninstall_dsh: '维护',
+    // 「安装/卸载」弹窗（工具栏同名按钮打开）
+    manage_title: '安装/卸载',
+    note_manage_moved: 'Python 环境与「卸载 DSH」已移到工具栏的「安装/卸载」里。',
     uninstall_hint: '从 npm 全局目录里卸载 DSH。卸载只会删除那个全局包：DSH 家目录（会话与配置）、本程序自身、以及 DSH 的插件都不会被删除。',
     btn_uninstall_dsh: '卸载 DSH…',
     uninstall_title: '卸载 DSH',
@@ -441,10 +449,16 @@
   };
 
   const en = {
-    btn_start: '▶ Start', btn_stop: '■ Stop', btn_restart: '⟳ Restart',
+    // btn_start / btn_stop removed (2026-10-21): DSH is auto-started with the app,
+    // so they were dead weight; the "Stop" escape hatch for a stuck error state
+    // now lives in the tray menu. Do not add them back.
+    btn_restart: '⟳ Restart',
     // No btn_refresh: the toolbar button was removed by request (right-click inside
     // the DSH page reloads it, and F5 / Ctrl+R still work).
     btn_update: '⤓ Update DSH',
+    // "(Un)install": entry for the Python environment + uninstall-DSH blocks
+    // that used to live in Preferences.
+    btn_manage: '(Un)install',
     btn_log: 'Log', btn_settings: '⚙ Preferences',
     lbl_port: 'Port', lbl_version: 'Version', status_init: 'Initializing…',
     st_idle: 'Idle', st_starting: 'Starting', st_running: 'Running',
@@ -675,6 +689,9 @@
     toast_pkg_fail: 'Detection failed: {0}',
     // ---------- Uninstall DSH (Preferences, at the bottom) ----------
     lbl_uninstall_dsh: 'Maintenance',
+    // "(Un)install" modal (opened from the toolbar button)
+    manage_title: 'Install / Uninstall',
+    note_manage_moved: 'The Python environment and "Uninstall DSH" moved to "(Un)install" on the toolbar.',
     uninstall_hint: "Removes DSH from npm's global directory. Only that global package goes away: your DSH home dir (sessions and settings), this app itself and your DSH plugins are left alone.",
     btn_uninstall_dsh: 'Uninstall DSH…',
     uninstall_title: 'Uninstall DSH',

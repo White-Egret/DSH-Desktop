@@ -176,8 +176,22 @@ pub fn run(launched_by_autostart: bool) {
             let quit_item = MenuItemBuilder::new(i18n::t("tray_quit"))
                 .id("quit_app")
                 .build(app)?;
+            // 「启动 / 停止 DSH」从工具栏搬到托盘（用户要求 2026-10-21）：
+            // 程序启动时会自动拉起 DSH，日常根本用不到这两项；但**卡在 error 状态时
+            // 必须有「停止」这个逃生口** —— 那时状态机拒绝重复启动，而前端只剩
+            // 「退出整个程序」一条路。放进托盘正好：平时看不见，需要时右键就有。
+            let start_item = MenuItemBuilder::new(i18n::t("tray_start_dsh"))
+                .id("start_dsh")
+                .build(app)?;
+            let stop_item = MenuItemBuilder::new(i18n::t("tray_stop_dsh"))
+                .id("stop_dsh")
+                .build(app)?;
             let tray_menu = MenuBuilder::new(app)
                 .item(&show_item)
+                .separator()
+                .item(&start_item)
+                .item(&stop_item)
+                .separator()
                 .item(&autostart_item)
                 .separator()
                 .item(&quit_item)
@@ -188,6 +202,8 @@ pub fn run(launched_by_autostart: bool) {
                 show_item: show_item.clone(),
                 autostart_item: autostart_item.clone(),
                 quit_item: quit_item.clone(),
+                start_item: start_item.clone(),
+                stop_item: stop_item.clone(),
             });
 
             // ---- 3. 创建托盘图标（使用打包进二进制的默认窗口图标，已是替换后的鲸鱼图标） ----
@@ -244,6 +260,24 @@ pub fn run(launched_by_autostart: bool) {
                         }
                         "quit_app" => {
                             app_handle.exit(0);
+                        }
+                        // 「启动 / 停止 DSH」：与工具栏原来的按钮同一套后端命令。
+                        // 失败只记日志 + 提示，不 panic —— 托盘菜单点错了不该让程序出事。
+                        "start_dsh" => {
+                            let a = app_handle.clone();
+                            tauri::async_runtime::spawn(async move {
+                                if let Err(e) = process::start_dsh(a.clone()).await {
+                                    process::log_launcher(&a, &format!("[tray] 启动 DSH 失败：{e}"));
+                                }
+                            });
+                        }
+                        "stop_dsh" => {
+                            let a = app_handle.clone();
+                            tauri::async_runtime::spawn(async move {
+                                if let Err(e) = process::stop_dsh(a.clone()).await {
+                                    process::log_launcher(&a, &format!("[tray] 停止 DSH 失败：{e}"));
+                                }
+                            });
                         }
                         _ => {}
                     }
@@ -345,6 +379,10 @@ struct TrayMenuItems {
     show_item: MenuItem<tauri::Wry>,
     autostart_item: CheckMenuItem<tauri::Wry>,
     quit_item: MenuItem<tauri::Wry>,
+    /// 「启动 DSH」/「停止 DSH」：从工具栏搬过来的两项（2026-10-21）。
+    /// 保留在 state 里是为了语言切换后能刷新文案。
+    start_item: MenuItem<tauri::Wry>,
+    stop_item: MenuItem<tauri::Wry>,
 }
 
 /// 语言变更后刷新托盘菜单文字（save_config 时调用；菜单操作需主线程执行）
@@ -355,6 +393,8 @@ pub fn refresh_tray_texts(app: &tauri::AppHandle) {
             let _ = items.show_item.set_text(i18n::t("tray_show"));
             let _ = items.autostart_item.set_text(i18n::t("tray_autostart"));
             let _ = items.quit_item.set_text(i18n::t("tray_quit"));
+            let _ = items.start_item.set_text(i18n::t("tray_start_dsh"));
+            let _ = items.stop_item.set_text(i18n::t("tray_stop_dsh"));
         }
     });
 }

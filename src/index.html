@@ -26,13 +26,19 @@
        自带「重新加载」，且 F5 / Ctrl+R 快捷键仍然可用（见 main.js::refreshPage）。 -->
   <header id="toolbar">
     <div class="tb-left">
-      <button id="btn-start" class="btn primary" data-i18n="btn_start">▶ 启动</button>
-      <button id="btn-stop" class="btn danger" data-i18n="btn_stop">■ 停止</button>
+      <!-- 「▶ 启动」与「■ 停止」已移除（用户要求 2026-10-21）：程序启动时本来就会
+           自动拉起 DSH，日常根本用不到它们；而卡在 error 状态时需要的「停止」逃生口
+           改到了**托盘菜单**（见 lib.rs 的 start_dsh / stop_dsh 菜单项）。
+           别把这两颗加回来 —— 工具栏要留给真正高频的入口。 -->
       <button id="btn-restart" class="btn" data-i18n="btn_restart">⟳ 重启</button>
       <button id="btn-update" class="btn" data-i18n="btn_update">⤓ 更新 DSH</button>
       <!-- 安全模式：进入（停日常→归档→借凭据→起 3081）/ 退出（kill 安全实例→重启日常）。
            文案由 main.js renderSafeButton() 动态切换，故不挂 data-i18n -->
       <button id="btn-safe" class="btn safe">🛡 安全模式</button>
+      <!-- 安装/卸载：把「Python 环境」与「维护（卸载 DSH）」从首选项搬到这里。
+           这两块都是**低频且破坏性/重量级**的操作，混在设置表单里既挤又容易被误点。
+           文案由 i18n 给：中文「安装/卸载」，英文 "(Un)install"。 -->
+      <button id="btn-manage" class="btn" data-i18n="btn_manage">安装/卸载</button>
       <button id="btn-log" class="btn" data-i18n="btn_log">日志</button>
       <button id="btn-settings" class="btn" data-i18n="btn_settings">⚙ 首选项</button>
     </div>
@@ -259,52 +265,11 @@
           <div class="hint" id="registry-line"></div>
         </div>
         <div class="hint" data-i18n="note_registry_align">点按钮才改，且只改 pnpm 自己那份配置；npm 那侧由项目 .npmrc 与用户 ~/.npmrc 决定，本程序不动它。改的是「今后安装记进锁文件的源」—— 已生成的 package-lock.json / pnpm-lock.yaml 不会被改写（要换源需重新生成）；各源的包都过 integrity 哈希校验，不会装到不一样的包，差别只是下载速度与镜像同步延迟。改完可以用「恢复」退回原值。</div>
-        <!-- Python 建议安装块（位于「npm 缓存 / 包源」两块下方）：先报本机是否装了 Python、装的什么版本，
-             再给两个安装入口 ——「基本安装」= 官方最新稳定版本体（已装则跳过）+ 办公文档读写包；
-             「数据分析扩展包」= numpy / pandas 等，供有分析需求的人在基本安装之后再点。
-             进度与结果由 setup-status / setup-result(target="python") / python-log 驱动，
-             渲染状态在 main.js 的 pythonTask 里（与首装向导各用各的进度区，互不抢）。 -->
-        <div class="field python-block">
-          <span class="py-head" data-i18n="lbl_python_env">Python 环境（办公文档读写 / 数据分析）</span>
-          <div id="python-status" class="py-status" data-i18n="py_checking">正在检测本机 Python…</div>
-          <!-- 安装位置：只在**还没装 Python 本体**时露出（装好之后这一格没有意义）。
-               留空 = 用 Python 官方默认目录；要放 D 盘就在这里填或「浏览」，
-               后端会先做与 Node 安装目录同规格的校验，再交给官方安装程序。 -->
-          <div id="python-dir-row" class="py-dir hidden">
-            <span data-i18n="lbl_python_dir">安装位置（留空 = Python 官方默认；可改到 D 盘等目录）</span>
-            <div class="row">
-              <input id="set-python-dir" type="text" spellcheck="false"
-                     placeholder="留空 = Python 官方默认安装位置" data-i18n-placeholder="ph_python_dir" />
-              <button class="btn small" data-pick="folder" data-kind="python" data-target="set-python-dir" data-i18n="btn_browse">浏览</button>
-            </div>
-          </div>
-          <div class="row gap">
-            <!-- 这两颗按钮是**动态文案**（装好了会变成「卸载…」），刻意不挂 data-i18n ——
-                 挂上的话 applyDom 会用词典把动态文案覆盖掉。文字与样式由
-                 renderPythonButtons 按探测结果写，见 main.js。 -->
-            <button id="btn-python-basic" class="btn primary">基本安装（Python 本体 + 办公文档读写包）</button>
-            <button id="btn-python-extra" class="btn">数据分析扩展包</button>
-          </div>
-          <div class="hint" data-i18n-html="py_packages_html">基本安装：先安装最新稳定版 Python（系统已装则跳过本体），再安装 python-docx / python-pptx / openpyxl / XlsxWriter / lxml / Pillow / et_xmlfile / typing_extensions；需要数据分析的，可在基本安装完成后再点「数据分析扩展包」安装 numpy / pandas / python-dateutil / tzdata / six。</div>
-          <!-- 能力桥接：装好的库本身 AI 调不到，要靠它挂成 DSH 的工具。
-               这里**只有状态、没有按钮**：释放 + 注册全部由「进入 DSH 时自动激活」承担
-               （DSH 没在跑时安装末尾就地注册，在跑则挂 pending 等下次进入）。
-               曾经有过一颗「部署 / 重新部署」按钮，但它做的事与自动激活完全重叠 ——
-               留着只会让人以为「装完还得再点一下」，而状态行一旦说谎（那正是它藏过的
-               故障）就更没人会怀疑了。状态由 bridge_status 后端命令给，
-               文案也由后端按当前语言生成，这里只放兜底文本。 -->
-          <div class="py-bridge-row">
-            <span class="py-bridge-label" data-i18n="py_bridge_label">AI 调用能力（Python 能力桥接）：</span>
-            <div id="py-bridge-status" class="py-status" data-i18n="py_bridge_checking">正在检测能力桥接状态…</div>
-          </div>
-          <div id="python-progress" class="py-progress hidden">
-            <div class="py-progress-head">
-              <div class="spinner small"></div>
-              <div id="python-progress-text" class="py-progress-text"></div>
-            </div>
-            <pre id="python-log" class="update-progress-log hidden"></pre>
-          </div>
-        </div>
+        <!-- Python 环境块已搬到工具栏的「安装/卸载」弹窗（用户要求 2026-10-21）：
+             它和「维护」块都是低频、重量级、部分带破坏性的操作，混在设置表单里
+             既挤占版面又容易被误点。首选项只管**程序自身的配置**。
+             这里只留一句指引，免得老用户以为功能被删了。 -->
+        <div class="hint" data-i18n="note_manage_moved">Python 环境与「卸载 DSH」已移到工具栏的「安装/卸载」里。</div>
                 <label class="field field-switch">
           <span data-i18n="lbl_safe_reset">进入安全模式时重置基线（旧 .dsh-safe 归档为 .dsh-safe-archive-时间戳，绝不删除；重建后只写入从日常模式借用的 .credentials.yaml，保证每次进入都是原厂纯净环境）</span>
           <input type="checkbox" id="set-safe-reset" />
@@ -328,11 +293,58 @@
         <div class="row gap">
           <button id="btn-detect-package" class="btn small" data-i18n="btn_detect_pkg">检测全局包名（npm list -g）</button>
         </div>
-        <!-- 维护（面板最底部）：卸载全局 DSH 包。
-             为什么这个入口必须存在：npm 只能删掉包本身与启动脚本，**不会**回收变空的
-             @deepseek-ai scope 目录，也不知道 ~/.npmrc 里那行 prefix= 是本程序写的。
-             这两件收尾只有本程序能做。
-             刻意做成低饱和的次要按钮 + 二次确认：这是破坏性动作，不该在视觉上抢焦点。 -->
+      </div>
+      <div class="modal-actions">
+        <button id="btn-cancel-settings" class="btn" data-i18n="btn_cancel">取消</button>
+        <button id="btn-save-settings" class="btn primary" data-i18n="btn_save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 安装/卸载弹窗（工具栏「安装/卸载」/「(Un)install」打开）。
+       为什么单独开一个弹窗而不是留在首选项里（用户要求 2026-10-21）：
+       这两块（Python 环境、维护/卸载 DSH）都是低频 + 重量级 + 部分带破坏性
+       的操作，混在设置表单里既挤占版面，又和「程序自身配置」那种轻量项混在一起，
+       容易误点。首选项只管配置，这里只管装/卸。
+
+       结构纪律：id 必须与原来完全一致（python-status / btn-python-basic /
+       python-progress / python-log / set-python-dir / btn-uninstall-dsh ...），
+       因为 main.js 里所有 Python 与卸载逻辑都是按 id 找元素的，搬位置不该改动它们。
+       本弹窗没有保存/取消：里面的按钮都是即时生效的动作，不是表单字段。 -->
+  <div id="manage-modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-title-row">
+        <div class="modal-title" data-i18n="manage_title">安装/卸载</div>
+        <button id="btn-close-manage" class="btn small" data-i18n="btn_close_log">关闭</button>
+      </div>
+      <div class="form">
+        <div class="field python-block">
+          <span class="py-head" data-i18n="lbl_python_env">Python 环境（办公文档读写 / 数据分析）</span>
+          <div id="python-status" class="py-status" data-i18n="py_checking">正在检测本机 Python…</div>
+          <div id="python-dir-row" class="py-dir hidden">
+            <span data-i18n="lbl_python_dir">安装位置（留空 = Python 官方默认；可改到 D 盘等目录）</span>
+            <div class="row">
+              <input id="set-python-dir" type="text" spellcheck="false" placeholder="留空 = Python 官方默认安装位置" data-i18n-placeholder="ph_python_dir" />
+              <button class="btn small" data-pick="folder" data-kind="python" data-target="set-python-dir" data-i18n="btn_browse">浏览</button>
+            </div>
+          </div>
+          <div class="row gap">
+            <button id="btn-python-basic" class="btn primary">基本安装（Python 本体 + 办公文档读写包）</button>
+            <button id="btn-python-extra" class="btn">数据分析扩展包</button>
+          </div>
+          <div class="hint" data-i18n-html="py_packages_html">基本安装：先安装最新稳定版 Python（系统已装则跳过本体），再安装 python-docx / python-pptx / openpyxl / XlsxWriter / lxml / Pillow / et_xmlfile / typing_extensions；需要数据分析的，可在基本安装完成后再点「数据分析扩展包」安装 numpy / pandas / python-dateutil / tzdata / six。</div>
+          <div class="py-bridge-row">
+            <span class="py-bridge-label" data-i18n="py_bridge_label">AI 调用能力（Python 能力桥接）：</span>
+            <div id="py-bridge-status" class="py-status" data-i18n="py_bridge_checking">正在检测能力桥接状态…</div>
+          </div>
+          <div id="python-progress" class="py-progress hidden">
+            <div class="py-progress-head">
+              <div class="spinner small"></div>
+              <div id="python-progress-text" class="py-progress-text"></div>
+            </div>
+            <pre id="python-log" class="update-progress-log hidden"></pre>
+          </div>
+        </div>
         <div class="field uninstall-block">
           <span data-i18n="lbl_uninstall_dsh">维护</span>
           <div class="hint" data-i18n="uninstall_hint">
@@ -342,10 +354,6 @@
             <button id="btn-uninstall-dsh" class="btn small subtle" type="button" data-i18n="btn_uninstall_dsh">卸载 DSH…</button>
           </div>
         </div>
-      </div>
-      <div class="modal-actions">
-        <button id="btn-cancel-settings" class="btn" data-i18n="btn_cancel">取消</button>
-        <button id="btn-save-settings" class="btn primary" data-i18n="btn_save">保存</button>
       </div>
     </div>
   </div>

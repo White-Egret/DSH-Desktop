@@ -174,7 +174,7 @@ window.addEventListener('keydown', (e) => {
 
 // ---------- 模态框（打开时隐藏内嵌 DSH webview，避免其盖住弹窗） ----------
 
-const MODALS = ['settings-modal', 'log-modal', 'update-modal', 'safe-modal', 'safe-verify-modal', 'uninstall-modal', 'uninstall-pnpm-modal'];
+const MODALS = ['settings-modal', 'manage-modal', 'log-modal', 'update-modal', 'safe-modal', 'safe-verify-modal', 'uninstall-modal', 'uninstall-pnpm-modal'];
 
 function anyModalOpen() {
   return MODALS.some((m) => !$(m).classList.contains('hidden'));
@@ -903,12 +903,12 @@ function onStatus(p) {
     // 还在，非得整个退出 Desktop 再打开才消失 —— 因为那两块是**前端 DOM 状态**，
     // 而「重启」只换 DSH 服务、不重建前端。
     resetPythonProgress();
-    // 设置页开着时（例如从托盘/快捷键触发重启）顺手把状态行重问一次：
+    // 「安装 / 卸载」弹窗开着时（例如从托盘/快捷键触发重启）顺手把状态行重问一次：
     // 桥接的 `activate_pending` 就挂在后端 `set_status("running")` 上，此刻
     // 可能刚把插件注册进 profile，状态行不重查会停在「待激活」。
-    // 只在面板**可见**时才问 —— 关着的时候 openSettings() 本来就会拉一次，
+    // 只在弹窗**可见**时才问 —— 关着的时候 openManage() 本来就会拉一次，
     // 没必要为每次启动多起一个 Python 探测进程。
-    if (!$('settings-modal').classList.contains('hidden')) refreshPythonStatus();
+    if (!$('manage-modal').classList.contains('hidden')) refreshPythonStatus();
   }
 
   // 工具栏显示模式重新结算：它依赖「DSH 页面是否已就绪」（见 syncToolbarForStatus）
@@ -923,8 +923,6 @@ function refreshButtons() {
   // （Rust 侧同样有门禁，这里只是让按钮如实反映）；保留「退出安全模式」、
   // 日志与首选项。
   if (safeMode || safeBusy) {
-    $('btn-start').disabled = true;
-    $('btn-stop').disabled = true;
     $('btn-restart').disabled = true;
     $('btn-update').disabled = true;
     $('btn-connect').disabled = true;
@@ -935,8 +933,6 @@ function refreshButtons() {
     if (unSafe) unSafe.disabled = true;
     return;
   }
-  $('btn-start').disabled = busy || ['running', 'running-external'].includes(status);
-  $('btn-stop').disabled = updating || ['idle', 'error', 'port-busy', 'stopping'].includes(status);
   $('btn-restart').disabled = busy || !['running', 'running-external'].includes(status);
   $('btn-update').disabled = busy || !config || !config.npm_exists;
   $('btn-safe').disabled = busy;
@@ -1417,8 +1413,10 @@ function applyLanguage(lang) {
   // （凭据借用说明是进入时由 Rust 生成的，语言切换后要到下次进入才更新）
   renderSafeButton();
   if (safeMode && !$('safe-modal').classList.contains('hidden')) fillSafeModal(safeReport);
-  // 首选项里的 Python 状态行是动态文案（版本号 + 路径 + 包状态），切语言后按新词典重绘
-  if (!$('settings-modal').classList.contains('hidden')) refreshPythonStatus();
+  // 「安装 / 卸载」弹窗里的 Python 状态行是动态文案（版本号 + 路径 + 包状态），
+  // 切语言后按新词典重绘。注意：那两颗按钮的文案**无论如何**都要重绘（见下），
+  // 因为它们不挂 data-i18n，applyDom 管不到。
+  if (!$('manage-modal').classList.contains('hidden')) refreshPythonStatus();
   // 两颗 Python 按钮的文案也是动态的（「安装…」/「卸载…」随探测结果变），
   // 不挂 data-i18n —— applyDom 管不到它们，得在这里手动重绘
   renderPythonButtons();
@@ -1467,11 +1465,25 @@ function openSettings() {
   refreshNpmPathInfo();
   // 包源 registry 那行状态（+ 两个按钮的可见性）：读是零风险的，每次打开都重问一次
   refreshRegistryInfo();
-  // Python 块：每次打开都重新问一次后端（安装在后台跑，界面上的状态不能是旧的）
-  refreshPythonStatus();
-  // 维护块：确认框里那条命令要跟着当前 DSH 实际所在目录走
-  refreshUninstallCmd();
+  // Python 环境与「维护（卸载 DSH）」已搬到「安装/卸载」弹窗（openManage），
+  // 不在这里刷新 —— 那两块已经不在这个面板上了。
   showModal('settings-modal');
+}
+
+/// 打开「安装/卸载」弹窗（工具栏「安装/卸载」按钮，英文版显示 "(Un)install"）。
+///
+/// 内容 = 原来首选项里的「Python 环境」块 + 「维护（卸载 DSH）」块。
+/// 搬出来是因为它们都是低频、重量级、部分带破坏性的操作，混在设置表单里
+/// 既挤占版面又容易误点；而首选项该只管**程序自身的配置**。
+///
+/// 每次打开都重问一次后端：安装在后台线程里跑，用户完全可能关掉弹窗再打开，
+/// 界面上的状态不能是旧的。
+function openManage() {
+  // Python 状态（版本 / 路径 / 包是否装齐）—— 顺带会刷新桥接状态行
+  refreshPythonStatus();
+  // 卸载确认框里那条命令要跟着当前 DSH 实际所在目录走
+  refreshUninstallCmd();
+  showModal('manage-modal');
 }
 
 /// 首选项里「npm 缓存位置」那行小字：同时显示「npm 配置里的值」与「实际生效的值」。
@@ -2377,7 +2389,8 @@ function openUninstallConfirm() {
   // 诊断留痕：这条路径上「点了没反应」最难查（界面无变化、Rust 侧也没收到命令），
   // 日志里有这一行就能立刻分清是「弹窗没开」还是「开了但被内嵌页盖住」。
   appendLog('launcher', '[uninstall] 打开卸载确认框（目标目录：' + (dshInstallDir() || 'npm 默认目录') + '）');
-  // 从首选项进入：先关掉首选项，视觉上「一件事一个弹窗」
+  // 从「安装/卸载」弹窗进入：先关掉它，视觉上「一件事一个弹窗」
+  hideModal('manage-modal');
   hideModal('settings-modal');
   hideModal('uninstall-pnpm-modal');
   $('uninstall-cmd').textContent = uninstallCommand();
@@ -3049,9 +3062,10 @@ function wizFinish() {
 // ---------- 绑定 ----------
 
 function bindUI() {
-  $('btn-start').onclick = () => invoke('start_dsh').catch((e) => toast(String(e), true));
-  $('btn-stop').onclick = () => invoke('stop_dsh').catch((e) => toast(String(e), true));
   $('btn-restart').onclick = () => invoke('restart_dsh').catch((e) => toast(String(e), true));
+  // 「▶ 启动」「■ 停止」已从工具栏移除（2026-10-21）：程序启动时自动拉起 DSH，
+  // 日常用不到；卡在 error 状态时需要的「停止」逃生口改到托盘菜单（lib.rs）。
+  $('btn-manage').onclick = openManage;
   $('btn-update').onclick = confirmUpdate;
   // 安全模式：未进入 = 进入（后端会先完整停掉日常实例）；已进入 = 退出并重启日常
   $('btn-safe').onclick = () => { if (safeMode) exitSafeMode(); else enterSafeMode(); };
@@ -3067,6 +3081,8 @@ function bindUI() {
   // 修复验证失败 →「返回安全模式」：重新走完整进入流程（再次归档、重新借凭据）
   $('btn-safe-verify-back').onclick = () => { hideModal('safe-verify-modal'); enterSafeMode(); };
   $('btn-log').onclick = () => showModal('log-modal');
+  $('btn-manage').onclick = openManage;
+  $('btn-close-manage').onclick = () => hideModal('manage-modal');
   $('btn-settings').onclick = openSettings;
   $('btn-cancel-settings').onclick = () => hideModal('settings-modal');
   $('btn-save-settings').onclick = saveSettings;

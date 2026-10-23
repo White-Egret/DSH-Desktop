@@ -260,7 +260,25 @@
     toast_pkg_fail: '检测失败: {0}',
     // ---------- 卸载 DSH（首选项最底部入口 + 追问 pnpm + 最终结果页） ----------
     // 结果列表按「后端返回的结构化条目」渲染：kind 决定label与是否显示路径，status 决定后缀。
-    lbl_uninstall_dsh: '维护',
+    // 「Node.js，pnpm与DSH」块（安装/卸载弹窗）：块名 + 版本状态行 + 一键安装按钮。
+    // 版本行与安装按钮只是**展示/入口**：pnpm / DSH 缺失、版本号读不出都不拦任何
+    // 操作（拦人的下限检查在首装向导里，那边另有完整文案），缺了就照实说「未检测到」。
+    lbl_node_pnpm_dsh: 'Node.js，pnpm与DSH',
+    ver_line_node_ok: 'Node.js：{0}',
+    ver_line_node_missing: 'Node.js：未检测到',
+    ver_line_node_unknown: 'Node.js：已安装（版本号读不出）',
+    ver_line_pnpm_ok: 'pnpm：{0}',
+    ver_line_pnpm_missing: 'pnpm：未检测到',
+    ver_line_pnpm_unknown: 'pnpm：已安装（版本号读不出）',
+    ver_line_dsh_ok: 'DSH：{0}',
+    ver_line_dsh_missing: 'DSH：未检测到',
+    ver_line_dsh_error: 'DSH：已安装（版本号查询失败）',
+    ver_line_checking: '正在读取版本号…',
+    ver_line_fail: '版本检测失败: {0}',
+    // —— 一键安装按钮：只对「没装」的组件显示（与首装向导同一套后端任务） ——
+    btn_manage_node: '安装 Node.js…',
+    btn_manage_pnpm: '安装 pnpm…',
+    btn_manage_dsh: '安装 DSH…',
     // 「安装/卸载」弹窗（工具栏同名按钮打开）
     manage_title: '安装/卸载',
     note_manage_moved: 'Python 环境与「卸载 DSH」已移到工具栏的「安装/卸载」里。',
@@ -700,7 +718,27 @@
     toast_pkg_done: 'Result written to the Log',
     toast_pkg_fail: 'Detection failed: {0}',
     // ---------- Uninstall DSH (Preferences, at the bottom) ----------
-    lbl_uninstall_dsh: 'Maintenance',
+    // "Node.js, pnpm & DSH" block (in the "(Un)install" modal): block title + the
+    // four entries of the version status line. The line is **display only**: a
+    // missing pnpm / DSH or an unreadable version string blocks nothing — the
+    // minimum-version checks live in the first-run wizard and keep their own copy.
+    lbl_node_pnpm_dsh: 'Node.js, pnpm & DSH',
+    ver_line_node_ok: 'Node.js: {0}',
+    ver_line_node_missing: 'Node.js: not detected',
+    ver_line_node_unknown: 'Node.js: installed (version unreadable)',
+    ver_line_pnpm_ok: 'pnpm: {0}',
+    ver_line_pnpm_missing: 'pnpm: not detected',
+    ver_line_pnpm_unknown: 'pnpm: installed (version unreadable)',
+    ver_line_dsh_ok: 'DSH: {0}',
+    ver_line_dsh_missing: 'DSH: not detected',
+    ver_line_dsh_error: 'DSH: installed (version query failed)',
+    ver_line_checking: 'Reading version numbers…',
+    ver_line_fail: 'Failed to read the versions: {0}',
+    // —— One-click install buttons: shown only for the missing components
+    //    (same backend tasks as the first-run wizard) ——
+    btn_manage_node: 'Install Node.js…',
+    btn_manage_pnpm: 'Install pnpm…',
+    btn_manage_dsh: 'Install DSH…',
     // "(Un)install" modal (opened from the toolbar button)
     manage_title: 'Install / Uninstall',
     note_manage_moved: 'The Python environment and "Uninstall DSH" moved to "(Un)install" on the toolbar.',

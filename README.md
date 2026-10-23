@@ -563,7 +563,7 @@ Click **⤓ 更新 DSH (Update)** → the dialog lists **both channels with thei
 
 ## Uninstalling DSH
 
-**Easiest: Preferences → the "Maintenance" block at the very bottom → "Uninstall DSH…".** The confirmation dialog spells out what will be removed and what will be kept, and the finished run lists the outcome item by item. It does the two things plain npm cannot: it reclaims the **emptied** `@deepseek-ai` scope folder (npm removes the package but leaves that folder behind) and it **puts back** the `prefix=` line this app wrote into `~/.npmrc` (deleting it if there was none before, restoring your original value if there was one). Afterwards it asks whether to also uninstall the pnpm used for DSH plugins; if you keep pnpm, the final page shows the command to remove it later.
+**Easiest: the toolbar's "(Un)install" dialog → the "Node.js, pnpm & DSH" block → "Uninstall DSH…".** The confirmation dialog spells out what will be removed and what will be kept, and the finished run lists the outcome item by item. It does the two things plain npm cannot: it reclaims the **emptied** `@deepseek-ai` scope folder (npm removes the package but leaves that folder behind) and it **puts back** the `prefix=` line this app wrote into `~/.npmrc` (deleting it if there was none before, restoring your original value if there was one). Afterwards it asks whether to also uninstall the pnpm used for DSH plugins; if you keep pnpm, the final page shows the command to remove it later.
 
 You can also just use plain npm, no extra flags — including when you installed DSH into a folder of your own choosing during the wizard:
 

@@ -21,6 +21,10 @@ let lastErrorText = '';          // 最近一次错误文本（「复制错误�
 // 最近一次环境检测结果（detect_environment 的返回）：向导、首选项的 Node 版本行共用。
 // 与 wiz.detection 的区别：这个在向导关闭后仍保留，首选项里打开设置时不需要重新检测。
 let lastEnvDetection = null;
+// 「安装/卸载」弹窗的一键安装任务（node / pnpm / dsh）：与向导、Python 安装共用
+// 后端的 setup_busy / updating 标志，同一时刻全程序只有一个安装任务在跑。
+// message 是最后一条进度/结果文案 —— 弹窗被关掉再打开时，进度区按它恢复。
+const manageInstall = { active: false, target: null, message: '' };
 // ---------- 安全模式状态（编排在 Rust 侧 safe.rs，前端只消费事件） ----------
 let safeMode = false;       // 安全实例是否激活（safe-mode-change 事件 / get_safe_status 驱动）
 let safeReport = null;      // 最近一次进入的 SafeReport（路径与凭据借用状态；绝不含凭据内容）
@@ -75,6 +79,16 @@ function appendLog(stream, line) {
       }
       updLog.scrollTop = updLog.scrollHeight;
     }
+  }
+  // 「安装/卸载」弹窗的一键安装输出区：安装进行中可见，镜像机制与向导的 wiz-log
+  // 相同（安装的原始输出经 dsh-log 事件到这里，与「日志」面板同源）
+  const mLog = $('manage-install-log');
+  if (mLog && !mLog.classList.contains('hidden')) {
+    mLog.textContent += line + '\n';
+    while (mLog.textContent.split('\n').length > 300) {
+      mLog.textContent = mLog.textContent.slice(mLog.textContent.indexOf('\n') + 1);
+    }
+    mLog.scrollTop = mLog.scrollHeight;
   }
 }
 
@@ -1417,6 +1431,13 @@ function applyLanguage(lang) {
   // 切语言后按新词典重绘。注意：那两颗按钮的文案**无论如何**都要重绘（见下），
   // 因为它们不挂 data-i18n，applyDom 管不到。
   if (!$('manage-modal').classList.contains('hidden')) refreshPythonStatus();
+  // 「Node.js，pnpm与DSH」块的版本行与安装/卸载切换同理：整行由动态文案拼成、
+  // 按钮显隐由检测结果决定，都不挂 data-i18n —— 切语言后按缓存重绘；
+  // 连检测缓存都没有时版本行退回「正在读取」占位（新语言）
+  if (!$('manage-modal').classList.contains('hidden')) {
+    renderToolchainVersions(lastEnvDetection);
+    renderManageInstallRow(lastEnvDetection);
+  }
   // 两颗 Python 按钮的文案也是动态的（「安装…」/「卸载…」随探测结果变），
   // 不挂 data-i18n —— applyDom 管不到它们，得在这里手动重绘
   renderPythonButtons();
@@ -1465,14 +1486,14 @@ function openSettings() {
   refreshNpmPathInfo();
   // 包源 registry 那行状态（+ 两个按钮的可见性）：读是零风险的，每次打开都重问一次
   refreshRegistryInfo();
-  // Python 环境与「维护（卸载 DSH）」已搬到「安装/卸载」弹窗（openManage），
+  // Python 环境与「Node.js，pnpm与DSH（卸载 DSH）」已搬到「安装/卸载」弹窗（openManage），
   // 不在这里刷新 —— 那两块已经不在这个面板上了。
   showModal('settings-modal');
 }
 
 /// 打开「安装/卸载」弹窗（工具栏「安装/卸载」按钮，英文版显示 "(Un)install"）。
 ///
-/// 内容 = 原来首选项里的「Python 环境」块 + 「维护（卸载 DSH）」块。
+/// 内容 = 原来首选项里的「Python 环境」块 + 「Node.js，pnpm与DSH（卸载 DSH）」块。
 /// 搬出来是因为它们都是低频、重量级、部分带破坏性的操作，混在设置表单里
 /// 既挤占版面又容易误点；而首选项该只管**程序自身的配置**。
 ///
@@ -1481,9 +1502,236 @@ function openSettings() {
 function openManage() {
   // Python 状态（版本 / 路径 / 包是否装齐）—— 顺带会刷新桥接状态行
   refreshPythonStatus();
+  // 一键安装还在后台跑（弹窗曾被关掉）：先把进度区按最后的消息摆回来
+  if (manageInstall.active) {
+    setManageInstallProgress(true, manageInstall.message || t('ver_line_checking'));
+    setManageInstallSpinner(true);
+  }
+  // 「Node.js，pnpm与DSH」块：版本行 + 按安装状态切换的安装/卸载 UI
+  refreshToolchainBlock();
   // 卸载确认框里那条命令要跟着当前 DSH 实际所在目录走
   refreshUninstallCmd();
   showModal('manage-modal');
+}
+
+/// 「安装/卸载」弹窗里「Node.js，pnpm与DSH」块的版本行：三个程序的已装版本
+/// 各占一段（只给版本号 —— 路径在向导与卸载确认框里都有，这里不重复）。
+///
+/// Node / pnpm 的版本号来自 detect_environment（`--version` 各问一次，每次打开
+/// 弹窗现查现答）；DSH 的版本号复用 check_versions 缓存下来的本地版本 —— 它专门
+/// 为「右上角 DSH 版本」而查（每次启动/服务就绪后自动跑，更新后也会立刻重跑），
+/// 这里再 spawn 一遍同样的子进程没有意义。三项各自独立兜底：缺了 / 读不出就照实说，
+/// 这一行只是展示，不拦任何操作。
+function toolchainVersionParts(det) {
+  return [
+    det.node_found
+      ? (det.node_version ? t('ver_line_node_ok', String(det.node_version)) : t('ver_line_node_unknown'))
+      : t('ver_line_node_missing'),
+    det.pnpm_found
+      ? (det.pnpm_version ? t('ver_line_pnpm_ok', String(det.pnpm_version)) : t('ver_line_pnpm_unknown'))
+      : t('ver_line_pnpm_missing'),
+    (config && config.dsh_exists)
+      ? (lastVersionInfo && lastVersionInfo.local
+        ? t('ver_line_dsh_ok', String(lastVersionInfo.local))
+        : t('ver_line_dsh_error'))
+      : t('ver_line_dsh_missing'),
+  ];
+}
+
+/// 按一次检测结果画版本行；没有结果（ds = null）时退回「正在读取」占位 ——
+/// 语言切换后连占位文案也得跟着换，不能残留旧语言的那句。
+function renderToolchainVersions(ds) {
+  const el = $('toolchain-versions');
+  if (!el) return;
+  el.textContent = ds
+    ? toolchainVersionParts(ds).join(' · ')
+    : t('ver_line_checking');
+}
+
+/// 按「一次检测结果」切换块内两套 UI：
+///   DSH 已装 → 卸载那半边（提示 + 按钮）；缺什么 → 对应的一键安装按钮。
+///
+/// 显示规则与向导的步骤顺序一致：pnpm / DSH 的安装都借道 npm（`npm install -g …`），
+/// npm 不在时点了也必然失败，所以那两颗先不显示 —— 装好 Node 重检后自然出现。
+/// 「该做的那一步」按向导顺序高亮成 primary（与 Python 块同一套语言）。
+/// det 为空（还没有任何检测结果）时不动当前状态 —— 语言切换的重绘不该把按钮藏掉。
+function renderManageInstallRow(det) {
+  if (!det) return;
+  const row = $('manage-install-row');
+  const btnNode = $('btn-manage-node');
+  const btnPnpm = $('btn-manage-pnpm');
+  const btnDsh = $('btn-manage-dsh');
+  if (!row || !btnNode || !btnPnpm || !btnDsh) return;
+  const npmOk = !!det.npm_found;
+  const showNode = !det.node_found;
+  const showPnpm = !det.pnpm_found && npmOk;
+  const showDsh = !det.dsh_found && npmOk;
+  btnNode.classList.toggle('hidden', !showNode);
+  btnPnpm.classList.toggle('hidden', !showPnpm);
+  btnDsh.classList.toggle('hidden', !showDsh);
+  row.classList.toggle('hidden', !(showNode || showPnpm || showDsh));
+  // 「安装位置」两行跟着各自的按钮走：按钮在，位置就可选（与向导同一语义）
+  const nodeDirRow = $('manage-node-dir-row');
+  const nodeDirNote = $('manage-node-dir-note');
+  const dshDirRow = $('manage-dsh-dir-row');
+  const dshDirNote = $('manage-dsh-dir-note');
+  if (nodeDirRow) nodeDirRow.classList.toggle('hidden', !showNode);
+  if (nodeDirNote) nodeDirNote.classList.toggle('hidden', !showNode);
+  if (dshDirRow) dshDirRow.classList.toggle('hidden', !showDsh);
+  if (dshDirNote) dshDirNote.classList.toggle('hidden', !showDsh);
+  // 任务进行中三颗都灰着（防重复起任务；后端另有 setup_busy / updating 双保险）
+  const primary = showNode ? btnNode : (showPnpm ? btnPnpm : (showDsh ? btnDsh : null));
+  for (const b of [btnNode, btnPnpm, btnDsh]) {
+    b.classList.toggle('primary', b === primary);
+    b.disabled = manageInstall.active;
+  }
+  // 卸载那半边只在 DSH 真的装着时露面 —— 没装时整个换成上面的「安装 DSH…」
+  const hint = $('manage-uninstall-hint');
+  const uRow = $('manage-uninstall-row');
+  if (hint) hint.classList.toggle('hidden', !det.dsh_found);
+  if (uRow) uRow.classList.toggle('hidden', !det.dsh_found);
+}
+
+// 「安装位置」预填：与向导 prefillNodeDir / prefillDshDir 同一条规则 ——
+// 预填而不是留空（绝大多数用户要的就是默认值），但**用户一旦动过就再也不覆盖**
+// （改成 D:\nodejs 之后再点一次检测，输入框不能被默认值悄悄改回去）。
+// 默认值来自后端：node_default_dir 按本机 %ProgramFiles% 算，npm_default_prefix
+// 问 `npm config get prefix`；前端不写死路径，HTML 里的静态 value 只是检测回来前的兜底。
+let manageNodeDirTouched = false;
+let manageDshDirTouched = false;
+
+function prefillManageDirs(det) {
+  if (!det) return;
+  const nodeEl = $('manage-node-dir');
+  if (nodeEl && !manageNodeDirTouched) {
+    const want = (det.node_default_dir || '').trim();
+    if (want) nodeEl.value = want;
+  }
+  const dshEl = $('manage-dsh-dir');
+  if (dshEl && !manageDshDirTouched) {
+    const want = (det.npm_default_prefix || '').trim();
+    if (want) dshEl.value = want;
+  }
+}
+
+/// 读「安装位置」输入框：清空 = 传 null = 用默认目录（与向导完全同一语义）。
+/// 键名必须保持单词 `dir` —— 见 Rust 侧 setup_install_node 的注释：多词名会踩
+/// Tauri 的 camelCase/snake_case 风格转换，对不上时 Option<String> 静默变 None。
+function manageDirValue(id) {
+  const el = $(id);
+  const v = el && el.value ? el.value.trim() : '';
+  return v || null;
+}
+
+/// 拉取并刷新「Node.js，pnpm与DSH」块：版本行 + 按安装状态切换的安装/卸载 UI。
+/// 检测是重活（几组子进程），而弹窗主要在**打开**时露面，每次打开问一次就够了；
+/// 运转中使用它的机会少，不值得常驻刷新。
+async function refreshToolchainBlock() {
+  const el = $('toolchain-versions');
+  if (!el) return;
+  el.textContent = t('ver_line_checking');
+  try {
+    const det = await invoke('detect_environment');
+    // 回写共享缓存：语言切换重绘（applyLanguage）与向导「将执行命令」的兜底都读它
+    lastEnvDetection = det;
+    prefillManageDirs(det);
+    renderToolchainVersions(det);
+    renderManageInstallRow(det);
+  } catch (e) {
+    // 检测失败：有缓存就用缓存重绘（多半只差 node/pnpm 的最新读数），否则明说失败，
+    // 不把「正在读取」挂着装作还在转
+    if (lastEnvDetection) {
+      prefillManageDirs(lastEnvDetection);
+      renderToolchainVersions(lastEnvDetection);
+      renderManageInstallRow(lastEnvDetection);
+    } else {
+      el.textContent = t('ver_line_fail', e);
+    }
+  }
+}
+
+// ---------- 「Node.js，pnpm与DSH」块的一键安装（与首装向导同一套后端任务） ----------
+//
+// 三颗按钮分别调 setup_install_node / setup_install_pnpm / setup_install_dsh，
+// 进度与结果走同一组 setup-status / setup-result 事件，由 onSetupStatus /
+// onSetupResult 按 manageInstall.active 分流到这里 —— 向导与 Python 安装各管各的。
+// Node 装好后后端会**自动补装 pnpm**（结果消息里带说明），所以装完 Node 一次
+// 重检可能同时让两颗按钮消失。
+
+// 起任务时的首条进度文案：直接复用向导那三条（文案本就不含向导字样）
+const MANAGE_INSTALL_PROGRESS = {
+  node: 'wiz_download_node',
+  pnpm: 'wiz_install_pnpm_progress',
+  dsh: 'wiz_install_dsh_progress',
+};
+
+function setManageInstallProgress(show, text) {
+  const el = $('manage-install-progress');
+  if (!el) return;
+  el.classList.toggle('hidden', !show);
+  if (text) {
+    $('manage-install-progress-text').textContent = text;
+    manageInstall.message = text; // 关掉弹窗再打开时按它恢复
+  }
+}
+
+/// 进度圈只在任务真正跑着的时候转：结果落地后消息要留着读，圈得收起来
+/// （与 Python 那套同一处理，见 setPythonSpinner 的说明）。
+function setManageInstallSpinner(show) {
+  const sp = document.querySelector('#manage-install-progress .spinner');
+  if (sp) sp.classList.toggle('hidden', !show);
+}
+
+/// 三颗一键安装按钮共用的入口：登记任务 → 进度区接手 → 调向导同款的后端命令。
+/// 安装位置取弹窗里的输入框（预填默认值，可改、可清空），语义与向导完全一致；
+/// pnpm 没有「安装位置」—— 它必须装进 npm 自己的全局目录（与向导一致）。
+async function runManageInstall(target) {
+  if (manageInstall.active) return;
+  manageInstall.active = true;
+  manageInstall.target = target;
+  manageInstall.message = '';
+  const log = $('manage-install-log');
+  if (log) {
+    log.textContent = '';
+    log.classList.remove('hidden'); // 输出镜像只在可见时追加，先摆出来
+  }
+  setManageInstallProgress(true, t(MANAGE_INSTALL_PROGRESS[target] || 'ver_line_checking'));
+  setManageInstallSpinner(true);
+  renderManageInstallRow(lastEnvDetection); // 三颗按钮统一灰掉
+  try {
+    if (target === 'node') await invoke('setup_install_node', { dir: manageDirValue('manage-node-dir') });
+    else if (target === 'pnpm') await invoke('setup_install_pnpm');
+    else await invoke('setup_install_dsh', { dir: manageDirValue('manage-dsh-dir') });
+    // 之后由 setup-status / setup-result 事件接手（onManageInstallResult 收尾）
+  } catch (e) {
+    // 起不动（后端安装任务被占用、npm 缺失等）：当场复位，错误留在进度区里读
+    manageInstall.active = false;
+    manageInstall.target = null;
+    setManageInstallProgress(true, String(e));
+    setManageInstallSpinner(false);
+    renderManageInstallRow(lastEnvDetection);
+    toast(String(e), true);
+  }
+}
+
+/// 一键安装的结果收尾（setup-result，target = node / pnpm / dsh）。
+function onManageInstallResult(p) {
+  manageInstall.active = false;
+  manageInstall.target = null;
+  // 结果消息留在进度区里读，圈停掉；成败都同步弹一条 toast（与向导一致）
+  const fallback = t(p.success ? 'wiz_installed' : 'wiz_node_start_fail');
+  setManageInstallProgress(true, p.message || fallback);
+  setManageInstallSpinner(false);
+  toast(p.message || fallback, !p.success);
+  // DSH 装好了先刷新 config：dsh_exists 翻面，卸载那半边与按钮状态随之恢复
+  if (p.success && p.target === 'dsh') {
+    refreshConfig()
+      .then(() => refreshUninstallCmd())
+      .catch(() => { /* 刷新失败时版本行会如实说，下次打开弹窗再试 */ });
+  }
+  // 成败都重问一次环境：成功 → 装过的按钮消失；失败（如 pnpm 装上了但版本读不出）
+  // → 界面事实也要跟上，不能停在安装前的快照
+  refreshToolchainBlock();
 }
 
 /// 首选项里「npm 缓存位置」那行小字：同时显示「npm 配置里的值」与「实际生效的值」。
@@ -2736,6 +2984,8 @@ function markDirTouched(input) {
   if (!input) return;
   if (input.id === 'wiz-node-dir') nodeDirTouched = true;
   if (input.id === 'wiz-dsh-dir') dshDirTouched = true;
+  if (input.id === 'manage-node-dir') manageNodeDirTouched = true;
+  if (input.id === 'manage-dsh-dir') manageDshDirTouched = true;
 }
 
 /// 向导里展示（并可复制）的那条安装命令 —— 必须与 Rust 端真正执行的命令**逐字一致**：
@@ -3013,6 +3263,13 @@ function onSetupStatus(p) {
     }
     return;
   }
+  // 「安装/卸载」里发起的一键安装：进度归弹窗里的进度区（不碰向导状态）
+  if (manageInstall.active) {
+    if (p.phase === 'download' || p.phase === 'install' || p.phase === 'verify') {
+      setManageInstallProgress(true, p.message); // 文案由 Rust 端按当前语言生成
+    }
+    return;
+  }
   if (!wiz.active) return;
   if (p.phase === 'download' || p.phase === 'install' || p.phase === 'verify') {
     setWizProgress(true, p.message); // 文案由 Rust 端按当前语言生成
@@ -3027,8 +3284,15 @@ function onSetupResult(p) {
     onPythonResult(p);
     return;
   }
-  // 引导安装的入口只剩首次运行向导的「Node 版本过低」告警面板（首选项里的那处已移除），
-  // 所以这里必然处于向导里；仍然不 return，避免事件早到时留下转不完的「处理中…」面板。
+  // 「安装/卸载」里发起的一键安装：结果归弹窗进度区（不碰 wiz.busy，也不触发
+  // 向导的重新检测 —— 那套只属于向导自己发起的安装）
+  if (manageInstall.active) {
+    onManageInstallResult(p);
+    return;
+  }
+  // 引导安装的入口有两处：首次运行向导（这里）与「安装/卸载」弹窗的一键按钮
+  // （上面那条分流）。走到这里说明是向导发起的；仍然不 return，避免事件早到时
+  // 留下转不完的「处理中…」面板。
   wiz.busy = false;
   renderWiz();
   if (p.success) {
@@ -3297,7 +3561,13 @@ function bindUI() {
   };
 
 
-  // ---- 首选项最底部「维护」：卸载全局 DSH 包（确认 → 执行 → 追问 pnpm → 结果页）----
+  // ---- 「Node.js，pnpm与DSH」块：一键安装（向导同款任务，进度区在弹窗里）----
+  // 与 Python 那两颗按钮同一分工：装没装由探测结果决定，点按钮才动手。
+  $('btn-manage-node').onclick = () => runManageInstall('node');
+  $('btn-manage-pnpm').onclick = () => runManageInstall('pnpm');
+  $('btn-manage-dsh').onclick = () => runManageInstall('dsh');
+
+  // ---- 同块底部「卸载 DSH」：卸载全局 DSH 包（确认 → 执行 → 追问 pnpm → 结果页）----
   $('btn-uninstall-dsh').onclick = () => openUninstallConfirm();
   $('btn-uninstall-cancel').onclick = () => {
     if (uninstalling) return; // 正在删：取消按钮也禁用，避免半途关掉看不见结果
@@ -3391,6 +3661,11 @@ function bindUI() {
       refreshDshCmd();
     });
   }
+  // 「安装/卸载」弹窗的两个「安装位置」：同一套「动过就不再覆盖」的规则
+  const mNodeDirEl = $('manage-node-dir');
+  if (mNodeDirEl) mNodeDirEl.addEventListener('input', () => markDirTouched(mNodeDirEl));
+  const mDshDirEl = $('manage-dsh-dir');
+  if (mDshDirEl) mDshDirEl.addEventListener('input', () => markDirTouched(mDshDirEl));
 
   // ---- 首次运行引导向导按钮 ----
   // 第一步语言选择：固定双语按钮（不挂 data-i18n，永不被词典改写）

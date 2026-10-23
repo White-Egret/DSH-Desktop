@@ -1089,13 +1089,22 @@ body.tb-auto .refresh-overlay { top: 0; }
   font-variant-numeric: tabular-nums;  /* 拖动时数字宽度不变，不会左右抖 */
 }
 
-/* 首选项最底部的「维护」块：卸载是破坏性动作，用一条分隔线把它和上面的
-   普通设置隔开，视觉上明确「下面是另一类操作」。 */
+/* 「安装/卸载」弹窗的「Node.js，pnpm与DSH」块：卸载是破坏性动作，用一条分隔线
+   把它和上面的 Python 环境块隔开，视觉上明确「下面是另一类操作」。 */
 .uninstall-block {
   margin-top: 6px;
   padding-top: 12px;
   border-top: 1px solid var(--border);
 }
+/* 版本行（Node.js / pnpm / DSH 三段连成一行）：小字、弱色，与 .py-status 同一档 ——
+   它是状态展示，不是又一格要用户填写的设置。 */
+.toolchain-versions {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  word-break: break-word;
+}
+
 /* 卸载结果清单（卸载 DSH 确认框里，执行完逐条列出删了什么、留了什么） */
 .uninstall-list {
   margin: 10px 0 0;

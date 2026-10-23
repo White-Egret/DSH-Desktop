@@ -303,9 +303,9 @@
 
   <!-- 安装/卸载弹窗（工具栏「安装/卸载」/「(Un)install」打开）。
        为什么单独开一个弹窗而不是留在首选项里（用户要求 2026-10-21）：
-       这两块（Python 环境、维护/卸载 DSH）都是低频 + 重量级 + 部分带破坏性
-       的操作，混在设置表单里既挤占版面，又和「程序自身配置」那种轻量项混在一起，
-       容易误点。首选项只管配置，这里只管装/卸。
+       这两块（Python 环境、Node.js/pnpm/DSH 版本与卸载 DSH）都是低频 + 重量级
+       + 部分带破坏性的操作，混在设置表单里既挤占版面，又和「程序自身配置」那种
+       轻量项混在一起，容易误点。首选项只管配置，这里只管装/卸。
 
        结构纪律：id 必须与原来完全一致（python-status / btn-python-basic /
        python-progress / python-log / set-python-dir / btn-uninstall-dsh ...），
@@ -346,11 +346,57 @@
           </div>
         </div>
         <div class="field uninstall-block">
-          <span data-i18n="lbl_uninstall_dsh">维护</span>
-          <div class="hint" data-i18n="uninstall_hint">
+          <span data-i18n="lbl_node_pnpm_dsh">Node.js，pnpm与DSH</span>
+          <div id="toolchain-versions" class="toolchain-versions">正在读取版本号…</div>
+          <!-- 一键安装行：只显示「没装」的那几个（与首装向导同一套后端任务，见
+               main.js 的 runManageInstall）。pnpm / DSH 的安装都借道 npm，npm 不在时
+               点了也必然失败，所以那两颗先不显示 —— 装好 Node 重检后自然出现。
+               pnpm 刻意没有「安装位置」：它必须装进 npm 自己的全局目录（与向导一致）。 -->
+          <div id="manage-install-row" class="row gap hidden">
+            <button id="btn-manage-node" class="btn small" type="button" data-i18n="btn_manage_node">安装 Node.js…</button>
+            <button id="btn-manage-pnpm" class="btn small" type="button" data-i18n="btn_manage_pnpm">安装 pnpm…</button>
+            <button id="btn-manage-dsh" class="btn small" type="button" data-i18n="btn_manage_dsh">安装 DSH…</button>
+          </div>
+          <!-- 安装位置（Node.js）：只在「Node.js 没装」时露出，与首装向导同一条规则 ——
+               预填后端按本机 %ProgramFiles% 算出的默认目录（value 只是检测回来前的静态
+               兜底，见 main.js prefillManageDirs），用户改过就不再覆盖；清空 = 官方默认。
+               data-kind 与向导那颗不同：path-picked 按 kind 路由回输入框，querySelector
+               只认第一个匹配，撞名会把路径填进向导的输入框。 -->
+          <label class="field hidden" id="manage-node-dir-row">
+            <span data-i18n="wiz_node_dir_label">安装位置（已填官方默认路径，可修改）</span>
+            <div class="row">
+              <input id="manage-node-dir" type="text" spellcheck="false" autocomplete="off"
+                     value="C:\Program Files\nodejs"
+                     placeholder="C:\Program Files\nodejs" data-i18n-placeholder="wiz_node_dir_ph" />
+              <button class="btn small" data-pick="folder" data-kind="node-install-manage" data-target="manage-node-dir" data-i18n="btn_browse">浏览</button>
+            </div>
+          </label>
+          <div class="hint hidden" id="manage-node-dir-note" data-i18n="wiz_node_dir_note">已预填官方默认路径；改成 D:\nodejs 之类即可装到别的盘（清空则用官方默认目录）。这是整机安装，仍需在 UAC 提示里同意。</div>
+          <!-- 安装位置（DSH）：只在「DSH 没装」时露出，预填 npm 默认全局目录；
+               装到自定义目录后后端会把该目录写进用户 PATH（终端里也能直接用 dsh）。 -->
+          <label class="field hidden" id="manage-dsh-dir-row">
+            <span data-i18n="wiz_dsh_dir_label">安装位置（已填 npm 默认全局目录，可修改）</span>
+            <div class="row">
+              <input id="manage-dsh-dir" type="text" spellcheck="false" autocomplete="off"
+                     value="C:\Users\<用户名>\AppData\Roaming\npm"
+                     placeholder="C:\Users\<用户名>\AppData\Roaming\npm" data-i18n-placeholder="wiz_dsh_dir_ph" />
+              <button class="btn small" data-pick="folder" data-kind="dsh-install-manage" data-target="manage-dsh-dir" data-i18n="btn_browse">浏览</button>
+            </div>
+          </label>
+          <div class="hint hidden" id="manage-dsh-dir-note" data-i18n="wiz_dsh_dir_note">这是 npm 的全局目录：改成 D:\dsh 之类即可装到别的盘（清空则用 npm 默认目录）。装到自定义目录后会自动把该目录加入你的用户 PATH（终端里也能直接用 dsh，不改系统 PATH）。</div>
+          <!-- 安装进度区：样式复用 Python 块的那套 —— 同一弹窗里同一种「按需安装器」 -->
+          <div id="manage-install-progress" class="py-progress hidden">
+            <div class="py-progress-head">
+              <div class="spinner small"></div>
+              <div id="manage-install-progress-text" class="py-progress-text"></div>
+            </div>
+            <pre id="manage-install-log" class="update-progress-log hidden"></pre>
+          </div>
+          <!-- 卸载那半边只在 DSH 真的装着时露面；没装时上面的「安装 DSH…」顶上 -->
+          <div class="hint" id="manage-uninstall-hint" data-i18n="uninstall_hint">
             从 npm 全局目录里卸载 DSH。卸载只会删除那个全局包：DSH 家目录（会话与配置）、本程序自身、以及 DSH 的插件都不会被删除。
           </div>
-          <div class="row gap">
+          <div class="row gap" id="manage-uninstall-row">
             <button id="btn-uninstall-dsh" class="btn small subtle" type="button" data-i18n="btn_uninstall_dsh">卸载 DSH…</button>
           </div>
         </div>

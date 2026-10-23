@@ -1104,6 +1104,14 @@ body.tb-auto .refresh-overlay { top: 0; }
   line-height: 1.6;
   word-break: break-word;
 }
+/* 「安装/卸载」弹窗的「包源 registry」块：与 Python 环境块同款虚线分隔 ——
+   它同样是「低频 + 只读状态 + 点按钮才写」的操作，与上面两块同类同级。 */
+.registry-block {
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--toolbar-border);
+  gap: 8px;
+}
 
 /* 卸载结果清单（卸载 DSH 确认框里，执行完逐条列出删了什么、留了什么） */
 .uninstall-list {

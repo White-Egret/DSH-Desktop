@@ -1447,7 +1447,7 @@ function applyLanguage(lang) {
   // 切语言后仍要重判一次：此刻 config 已是新语言的值，未改过的一格不该被误判成改过
   if (!$('settings-modal').classList.contains('hidden')) refreshHomeMoveWarn();
   // 包源 registry 那行由后端按语言拼好，切语言后同样要重绘
-  if (!$('settings-modal').classList.contains('hidden')) refreshRegistryInfo();
+  if (!$('manage-modal').classList.contains('hidden')) refreshRegistryInfo();
 }
 
 // ---------- 设置 ----------
@@ -1484,16 +1484,15 @@ function openSettings() {
   refreshNpmCacheInfo();
   // npm 全局目录 / 用户 PATH：每次打开重问一次（用户可能刚在外部改了 .npmrc 的 prefix）
   refreshNpmPathInfo();
-  // 包源 registry 那行状态（+ 两个按钮的可见性）：读是零风险的，每次打开都重问一次
-  refreshRegistryInfo();
-  // Python 环境与「Node.js，pnpm与DSH（卸载 DSH）」已搬到「安装/卸载」弹窗（openManage），
-  // 不在这里刷新 —— 那两块已经不在这个面板上了。
+  // 包源 registry 与「Node.js，pnpm与DSH（卸载 DSH）」两块已搬到「安装/卸载」弹窗
+  // （openManage），不在这里刷新 —— 它们已经不在这个面板上了。
   showModal('settings-modal');
 }
 
 /// 打开「安装/卸载」弹窗（工具栏「安装/卸载」按钮，英文版显示 "(Un)install"）。
 ///
-/// 内容 = 原来首选项里的「Python 环境」块 + 「Node.js，pnpm与DSH（卸载 DSH）」块。
+/// 内容 = 原来首选项里的「Python 环境」块 + 「Node.js，pnpm与DSH（卸载 DSH）」块
+/// + 「包源 registry」块（装到哪、源指哪，都属「本机环境」一类操作）。
 /// 搬出来是因为它们都是低频、重量级、部分带破坏性的操作，混在设置表单里
 /// 既挤占版面又容易误点；而首选项该只管**程序自身的配置**。
 ///
@@ -1511,6 +1510,9 @@ function openManage() {
   refreshToolchainBlock();
   // 卸载确认框里那条命令要跟着当前 DSH 实际所在目录走
   refreshUninstallCmd();
+  // 包源 registry 那行状态（+ 两个按钮的可见性）：读是零风险的，每次打开都重问一次
+  //（npm / pnpm 的源可能刚在外部被改过 —— 与 npm-path 行同一套「打开即读」的分工）
+  refreshRegistryInfo();
   showModal('manage-modal');
 }
 
@@ -1834,9 +1836,9 @@ async function refreshHomeEnvInfo() {
   }
 }
 
-/// 首选项里「包源 registry」那行状态：npm 与 pnpm 在 **DSH 工作目录**下各自生效的源。
-/// 整行文案由后端按当前语言拼好（同一句话不在两处各维护一份），这里只负责渲染，
-/// 外加两个按钮 —— 按钮文案要带目标 URL / 原值，所以用返回的字段自己拼。
+/// 「安装/卸载」弹窗里「包源 registry」那行状态：npm 与 pnpm 在 **DSH 工作目录**下
+/// 各自生效的源。整行文案由后端按当前语言拼好（同一句话不在两处各维护一份），
+/// 这里只负责渲染，外加两个按钮 —— 按钮文案要带目标 URL / 原值，所以用返回的字段自己拼。
 ///
 /// 为什么是按钮而不是开关：改 registry = 改**今后所有安装流量**的去向，属于供应链敏感
 /// 操作，而且不是需要持续维护的状态（每次保存都重写会跟用户手动改的值打架）。
@@ -1858,7 +1860,7 @@ async function refreshRegistryInfo() {
     restoreBtn.classList.toggle('hidden', !prev);
     if (prev) restoreBtn.textContent = t('btn_restore_registry', prev);
   } catch (e) {
-    // 问不到（npm / pnpm 缺失等）就整块收起：它是提示，不该挡住设置页
+    // 问不到（npm / pnpm 缺失等）就整块收起：它是提示，不该挡住弹窗
     line.textContent = '';
     alignBtn.classList.add('hidden');
     restoreBtn.classList.add('hidden');
@@ -3587,7 +3589,7 @@ function bindUI() {
   };
   $('btn-uninstall-final-close').onclick = () => hideModal('uninstall-pnpm-modal');
 
-  // ---- 首选项：包源 registry 对齐（读自动刷、写要点按钮）----
+  // ---- 「安装/卸载」弹窗：包源 registry 对齐（读自动刷、写要点按钮）----
   // 与 npm 缓存 / DSH_HOME 同款分工：后端返回一句已生成好的消息，成功进日志并弹 toast，
   // 失败单独报；两种结局都重问一次状态行 —— 按钮要不要还在，以刚发生的事实为准。
   $('btn-registry-align').onclick = async () => {

@@ -248,28 +248,10 @@
           </div>
           <div class="hint" id="npm-path-line"></div>
         </div>
-        <!-- 包源 registry（npm / pnpm）：**只读状态行 + 点按钮才写**。
-             为什么不做成开关：registry 决定今后所有安装流量去哪（供应链敏感），而且不是
-             需要持续维护的状态 —— 每次保存都重写一遍，反而会跟用户手动 `pnpm config set`
-             改的值打架。读由 openSettings 自动刷，写只在点击时发生。
-             范围（用户拍板）：**只动 pnpm**；npm 那侧由项目 .npmrc / 用户 ~/.npmrc 决定，
-             本程序一个字节都不碰。 -->
-        <!-- 这里用 <div class="field"> 而不是 <label>：label 会把「点它的文字」转发给
-             里面第一个可点元素（正是「对齐」按钮），点个标题就改了源 —— 不可接受。 -->
-        <div class="field">
-          <span><span data-i18n="lbl_registry">包源 registry（npm / pnpm）</span></span>
-          <div class="row gap">
-            <button id="btn-registry-align" class="btn small hidden" type="button"></button>
-            <button id="btn-registry-restore" class="btn small hidden" type="button"></button>
-          </div>
-          <div class="hint" id="registry-line"></div>
-        </div>
-        <div class="hint" data-i18n="note_registry_align">点按钮才改，且只改 pnpm 自己那份配置；npm 那侧由项目 .npmrc 与用户 ~/.npmrc 决定，本程序不动它。改的是「今后安装记进锁文件的源」—— 已生成的 package-lock.json / pnpm-lock.yaml 不会被改写（要换源需重新生成）；各源的包都过 integrity 哈希校验，不会装到不一样的包，差别只是下载速度与镜像同步延迟。改完可以用「恢复」退回原值。</div>
-        <!-- Python 环境块已搬到工具栏的「安装/卸载」弹窗（用户要求 2026-10-21）：
-             它和「维护」块都是低频、重量级、部分带破坏性的操作，混在设置表单里
-             既挤占版面又容易被误点。首选项只管**程序自身的配置**。
+        <!-- 包源 registry 块已搬到「安装/卸载」弹窗（用户要求：与「Node.js，pnpm与DSH」
+             同处一栏 —— 装到哪、源指哪，都属「本机环境」一类操作，首选项只管程序自身配置）。
              这里只留一句指引，免得老用户以为功能被删了。 -->
-        <div class="hint" data-i18n="note_manage_moved">Python 环境与「卸载 DSH」已移到工具栏的「安装/卸载」里。</div>
+        <div class="hint" data-i18n="note_manage_moved">Python 环境、「Node.js，pnpm与DSH」与「包源 registry」已移到工具栏的「安装/卸载」里。</div>
                 <label class="field field-switch">
           <span data-i18n="lbl_safe_reset">进入安全模式时重置基线（旧 .dsh-safe 归档为 .dsh-safe-archive-时间戳，绝不删除；重建后只写入从日常模式借用的 .credentials.yaml，保证每次进入都是原厂纯净环境）</span>
           <input type="checkbox" id="set-safe-reset" />
@@ -400,6 +382,24 @@
             <button id="btn-uninstall-dsh" class="btn small subtle" type="button" data-i18n="btn_uninstall_dsh">卸载 DSH…</button>
           </div>
         </div>
+        <!-- 包源 registry（npm / pnpm）：**只读状态行 + 点按钮才写**（随「Node.js，pnpm与DSH」
+             块从首选项搬到这里 —— 装到哪、源指哪，都属「本机环境」一类操作）。
+             为什么不做成开关：registry 决定今后所有安装流量去哪（供应链敏感），而且不是
+             需要持续维护的状态 —— 每次保存都重写一遍，反而会跟用户手动 `pnpm config set`
+             改的值打架。读由 openManage 自动刷，写只在点击时发生。
+             范围（用户拍板）：**只动 pnpm**；npm 那侧由项目 .npmrc / 用户 ~/.npmrc 决定，
+             本程序一个字节都不碰。 -->
+        <!-- 这里用 <div class="field"> 而不是 <label>：label 会把「点它的文字」转发给
+             里面第一个可点元素（正是「对齐」按钮），点个标题就改了源 —— 不可接受。 -->
+        <div class="field registry-block">
+          <span><span data-i18n="lbl_registry">包源 registry（npm / pnpm）</span></span>
+          <div class="row gap">
+            <button id="btn-registry-align" class="btn small hidden" type="button"></button>
+            <button id="btn-registry-restore" class="btn small hidden" type="button"></button>
+          </div>
+          <div class="hint" id="registry-line"></div>
+        </div>
+        <div class="hint" data-i18n="note_registry_align">点按钮才改，且只改 pnpm 自己那份配置；npm 那侧由项目 .npmrc 与用户 ~/.npmrc 决定，本程序不动它。改的是「今后安装记进锁文件的源」—— 已生成的 package-lock.json / pnpm-lock.yaml 不会被改写（要换源需重新生成）；各源的包都过 integrity 哈希校验，不会装到不一样的包，差别只是下载速度与镜像同步延迟。改完可以用「恢复」退回原值。</div>
       </div>
     </div>
   </div>

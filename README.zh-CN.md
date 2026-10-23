@@ -237,7 +237,7 @@ pnpm 安装命令示例:     npm install -g pnpm
 | 外观 | `system`（跟随系统） | `light` / `dark` / `system` 可选；见下方「外观」；老配置首次加载时自动继承 DSH 现有主题 |
 | 启动音乐 | 开，音量 60，用内置曲 | 开关 / 音量 / 自选音乐文件三项一组；见下方「启动等待页的背景音乐」 |
 
-> 「更新参数」这一配置项已取消：更新命令固定为 `npm install -g <包名>@<频道>`（若 DSH 装在自定义目录，会按 `dsh.cmd` 实际所在目录补一个 `--prefix`，见「引导安装 DSH 的安装位置」），频道（`latest` / `next`）在点「⤓ 更新 DSH」时当场选择，见「更新 DSH」一节。需要定制 registry / 代理等 npm 行为，写在**用户级** `~/.npmrc`（`C:\Users\<用户>\.npmrc`）即可 —— 全局生效、且不会在 DSH 目录树里添文件（本机即如此配置）；写在 DSH 家目录**上一级**的 `.npmrc` 也行（npm 的工作目录就是那里），但那会让该目录多出一个文件。注意 **pnpm 不读 `~/.npmrc`**：它自己的全局源在 `pnpm config set registry` 写出的 `auth.ini` 里 —— 首选项「包源 registry」那颗按钮处理的正是它。
+> 「更新参数」这一配置项已取消：更新命令固定为 `npm install -g <包名>@<频道>`（若 DSH 装在自定义目录，会按 `dsh.cmd` 实际所在目录补一个 `--prefix`，见「引导安装 DSH 的安装位置」），频道（`latest` / `next`）在点「⤓ 更新 DSH」时当场选择，见「更新 DSH」一节。需要定制 registry / 代理等 npm 行为，写在**用户级** `~/.npmrc`（`C:\Users\<用户>\.npmrc`）即可 —— 全局生效、且不会在 DSH 目录树里添文件（本机即如此配置）；写在 DSH 家目录**上一级**的 `.npmrc` 也行（npm 的工作目录就是那里），但那会让该目录多出一个文件。注意 **pnpm 不读 `~/.npmrc`**：它自己的全局源在 `pnpm config set registry` 写出的 `auth.ini` 里 —— 「安装/卸载」弹窗「包源 registry」那颗按钮处理的正是它。
 
 ### 搬家：改家目录前必读（profiles\node_modules 不能拷）
 
@@ -253,7 +253,7 @@ pnpm 安装命令示例:     npm install -g pnpm
 
 ### Python 环境
 
-生成 Office 文档（`.docx` / `.pptx` / `.xlsx`）与做数据分析都要用到 Python，所以首选项在「npm 缓存位置 / 包源 registry」两块下方给了一个 **Python 环境**块：
+生成 Office 文档（`.docx` / `.pptx` / `.xlsx`）与做数据分析都要用到 Python，所以「安装/卸载」弹窗里给了一个 **Python 环境**块：
 
 - **状态行** —— 本机有没有可用的 Python（≥ 3.10）、版本与路径，以及两组推荐包装没装。判断用 `importlib.util.find_spec` 真去 import 而不是看 `pip list`：装了但用不了的算没装；Python 2 与 Microsoft Store 那个「点了去应用商店」的 `python.exe` 执行别名都算没有。
 - **基本安装** —— 本机已有可用解释器就**跳过本体**；否则从 python.org 下载最新稳定版 CPython（版本解析自下载页，失败时回落到内置的固定版本），**先从该版本的官方发布页取 SHA-256 校验通过才执行**（拿不到哈希就不装，与 Node.js 那条路同一条纪律），然后用 `/passive InstallAllUsers=0 PrependPath=1 Include_test=0` 跑官方安装程序 —— 装给当前用户、不弹 UAC、自写 PATH、自带进度窗口，最后执行 `pip install markitdown pdfminer-six pdfplumber mammoth olefile python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile dsh-python-bridge`。
@@ -356,7 +356,7 @@ Windows 上 npm 默认把缓存放在 **`%LOCALAPPDATA%\npm-cache`**（`C:\Users
 
 ### 包源 registry 对齐（程序只提示，点按钮才改）
 
-**为什么是按钮而不是开关**：`registry` 决定**今后所有安装流量去哪**，属于供应链敏感设置（改错 = 把安装引到别人的源）；它也不是需要持续维护的状态 —— 做成开关后每次保存都会重写一遍，反而会跟你手动 `pnpm config set` 改的值打架。所以读（零风险）由首选项自动刷新，**写必须点一次**。
+**为什么是按钮而不是开关**：`registry` 决定**今后所有安装流量去哪**，属于供应链敏感设置（改错 = 把安装引到别人的源）；它也不是需要持续维护的状态 —— 做成开关后每次保存都会重写一遍，反而会跟你手动 `pnpm config set` 改的值打架。所以读（零风险）由「安装/卸载」弹窗自动刷新，**写必须点一次**。
 
 - **比什么**：在**同一个目录**下分别问 npm 与 pnpm「你实际会用哪个源」，不同才亮按钮。这个目录是 DSH 工作目录（= 家目录上一级，也正是 npm 读 `./.npmrc` 的地方），状态行会把它写出来 —— registry 的答案随目录变，不写清楚在哪儿比较，就没法判断该不该动。
 - **范围**：**只动 pnpm**，走 `pnpm config set registry <url>`。真机实测它**无条件**写 pnpm 自己的 `%LOCALAPPDATA%\pnpm\config\auth.ini`（在带 `package.json` 的项目目录里跑也一样，不会在项目里生成 `.npmrc`）；npm 那侧由项目 `.npmrc` / 用户 `~/.npmrc` 决定，本程序**一个字节都不碰**。

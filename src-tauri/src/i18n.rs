@@ -346,11 +346,11 @@ pub fn t(key: &str) -> &'static str {
         // ---------- 首选项：包源（registry）对齐 —— 程序只提示，点按钮才改 ----------
         // 状态行必须带上**比较用的目录**：registry 的答案随 cwd 变（项目级 .npmrc），
         // 不写清楚"在哪儿不一致"，用户没法判断该不该动。
-        "reg_line_ok" => if en { "Package sources match (checked in {1}): npm and pnpm both use {0}." } else { "包源一致（在 {1} 比对）：npm 与 pnpm 都是 {0}。" },
-        "reg_line_diff" => if en { "Package sources differ (checked in {2}): npm uses {0}, pnpm uses {1}." } else { "包源不一致（在 {2} 比对）：npm 用 {0}，pnpm 用 {1}。" },
+        "reg_line_ok" => if en { "Package sources match: npm and pnpm both use {0}. Compared in {1} — the DSH working directory, whose source is what DSH uses when installing plugins." } else { "包源一致：npm 与 pnpm 都是 {0}。比对在 {1} 进行 —— 那是 DSH 的工作目录，DSH 装插件时用的源以它为准。" },
+        "reg_line_diff" => if en { "Package sources differ: npm uses {0}, pnpm uses {1}. Compared in {2} — the DSH working directory, whose source is what DSH uses when installing plugins." } else { "包源不一致：npm 用 {0}，pnpm 用 {1}。比对在 {2} 进行 —— 那是 DSH 的工作目录，DSH 装插件时用的源以它为准。" },
         "reg_line_pnpm_unknown" => if en { "npm uses {0} (checked in {1}), but pnpm's source could not be read." } else { "npm 在 {1} 用 {0}，但读不到 pnpm 的源。" },
         "reg_line_npm_unknown" => if en { "npm's source could not be read in {0}, so there is nothing to align pnpm to." } else { "读不到 {0} 下 npm 的源，没有可对齐的目标。" },
-        "reg_line_pnpm_missing" => if en { "pnpm not found — install it (first-run wizard) before aligning sources; DSH installs plugins through it." } else { "未找到 pnpm —— DSH 装插件要用它，先在首装向导里装上，才能对齐源。" },
+        "reg_line_pnpm_missing" => if en { "pnpm not found — DSH installs plugins through it; align the sources after installing it (use the \"Install pnpm…\" button above)." } else { "未找到 pnpm —— DSH 装插件要用它；装好后再来对齐源（可用上方「安装 pnpm…」一键安装）。" },
         "reg_aligned" => if en { "Set pnpm's source to {1} (was {0}). Future installs record {1} as the source in lock files; already-generated lock files are NOT rewritten." } else { "已把 pnpm 的源从 {0} 改为 {1}。今后安装会在锁文件里记录 {1}；已生成的 package-lock.json / pnpm-lock.yaml 不会被改写（要换源需重新生成）。" },
         "reg_restored" => if en { "Restored pnpm's source to {0}." } else { "已把 pnpm 的源恢复为 {0}。" },
         "reg_unchanged" => if en { "pnpm already uses {0}; nothing was changed." } else { "pnpm 已经在用 {0}，未做改动。" },

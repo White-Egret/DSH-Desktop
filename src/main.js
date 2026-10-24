@@ -1734,6 +1734,11 @@ function onManageInstallResult(p) {
   // 成败都重问一次环境：成功 → 装过的按钮消失；失败（如 pnpm 装上了但版本读不出）
   // → 界面事实也要跟上，不能停在安装前的快照
   refreshToolchainBlock();
+  // registry 那行同理要跟着刷：pnpm 的存在性可能刚被这次安装改变（装 Node 会自动
+  // 补装 pnpm、pnpm 按钮本身装 pnpm），而它只在打开弹窗时渲染过 —— 不刷的话会一直
+  // 停在安装前的快照（真机现场：版本行已显示 pnpm 12.15.0，registry 行却还写着
+  // 「未找到 pnpm」，直到重启才恢复）。DSH 的安装不动 npm/pnpm，多刷一次只是重读。
+  refreshRegistryInfo();
 }
 
 /// 首选项里「npm 缓存位置」那行小字：同时显示「npm 配置里的值」与「实际生效的值」。

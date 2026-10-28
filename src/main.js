@@ -333,13 +333,14 @@ function stopPoem(graceful = false) {
 // **只播一遍，从不循环**：startPoem 起播；曲子先于 DSH 就绪播完，剩余等待就是
 // 静音；DSH 先就绪，曲子继续播完这一遍再停 —— 余下 30 秒还是 4 分钟都由曲目决定，
 // 启动 10 秒还是 100 秒都不影响这条规则（见 beginMusicFinish）。
-// 自选曲的"一遍" = 整个文件；内置曲的"一遍" = 一个乐句（16 拍 ≈ 7.4 秒）。
+// 自选曲的"一遍" = 整个文件；内置曲的"一遍" = 全曲（约 50 秒，见下）。
 // 两条路径都有淡入；收尾靠音符/曲目自己的自然结束，不额外叠加淡出 ——
 // 淡出会把最后一个音的尾巴削掉，那就不是"播完"了。
 //
 // 两种音源，同一音量旋钮：
-//   ① 内置曲（未选文件）：Web Audio 现场合成的一段五声音阶琶音。不带任何资源文件、
-//      不联网、不依赖解码器 —— 换句话说「装了就有声音」不需要用户先去找一个 mp3。
+//   ① 内置曲（未选文件）：改编自肖邦《前奏曲》Op. 28 No. 7（A 大调，公有领域）的
+//      旋律与低音，由 Web Audio 现场合成。不带任何资源文件、不联网、不依赖解码器 ——
+//      换句话说「装了就有声音」不需要用户先去找一个 mp3。
 //   ② 自选曲（首选项里选过文件）：后端把那**一个**文件读成 base64 回传，
 //      前端转成 blob: URL 交给 <audio> 播一遍。为什么绕这一圈而不直接让前端播
 //      本地路径，见 process.rs::read_startup_music 的注释（assetProtocol 是刻意关着的）。
@@ -352,12 +353,12 @@ const music = {
   ctx: null,           // AudioContext（首次真正要出声时才创建）
   master: null,        // 总音量节点（淡入淡出作用在它上面）
   timer: null,         // 预排程定时器
-  nextTime: 0,         // 下一个音符的起始时间（AudioContext 时间轴）
-  step: 0,             // 步进计数，用来按固定节奏选音
+  eventIdx: 0,         // 下一个待排程音符在 MUSIC_NOTES 里的下标
+  origin: 0,           // 一遍的时间原点（第 0 拍的 AudioContext 时刻；时钟跳变时整体顺延）
   playing: false,
   // ---- 一遍制（"播完即止"）状态：musicBuiltinStart 定下 pass 边界，到点自然收尾 ----
   finishing: false,    // DSH 就绪触发过 beginMusicFinish（仅用于幂等与收尾日志，不再改排程）
-  finishAt: 0,         // 这一遍的边界时刻（AudioContext 时间轴）：内置曲 = 起播 + 16 拍
+  finishAt: 0,         // 这一遍的边界时刻（AudioContext 时间轴）：最后一个音的结束时刻
   finishTimer: null,   // 边界后等尾音落定的定时器（硬停必须清掉，否则会杀死新一轮音乐）
   // ---- 自选曲状态 ----
   audio: $('startup-music-audio'), // <audio> 在页面里静止不动，取一次就够
@@ -380,86 +381,222 @@ window.addEventListener('pagehide', () => {
 // 还是 DSH 就绪之后（曲子长、启动快：继续播完再清场），处理完全相同。
 if (music.audio) music.audio.addEventListener('ended', onMusicTrackEnded);
 
-// 内置曲的音符表：C 大调五声音阶（宫商角徵羽），两个八度。
-// 选它是因为**任何两个相邻的音都不会显得刺耳** —— 琶音落在这套音上，怎么走都不难听，
-// 而不需要调音的曲子最容易在合成时失手。
-const MUSIC_SCALE = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 587.33, 659.25];
-// 每一拍的走音顺序：固定的一段旋律，有起伏又不单调（一遍制下整段只奏一次）。
-const MUSIC_PATTERN = [0, 2, 4, 3, 5, 4, 2, 1, 3, 5, 6, 4, 2, 0, 1, 2];
+// 内置曲：肖邦《前奏曲》Op. 28 No. 7（A 大调，公有领域）的旋律与低音，
+// 音符取自工作区的转写 plugins/web-audio-musicxml/transcribed/Chop-28-7.musicxml，
+// 按乐谱速度 Andantino（♩=57）现场合成，8 个乐句的收尾三连音做了弹性渐慢
+// （速度表见 MUSIC_TEMPO）—— 一遍约 52 秒，只播一遍。
+// 事件编码：[起拍, MIDI, 时值, 层]，前三个单位是 division（MUSIC_DIV 个 = 一个四分音符）；
+// 层 1 = 旋律（右手最高音，延音线已合并），层 0 = 低音（左手最低音）。
+const MUSIC_DIV = 384;
+const MUSIC_BEAT = 60 / 57;      // 秒 / 四分音符（乐谱速度）
+const MUSIC_NOTES = [
+  [0, 64, 384, 1],
+  [384, 73, 288, 1],
+  [384, 40, 384, 0],
+  [672, 74, 96, 1],
+  [768, 71, 384, 1],
+  [768, 52, 384, 0],
+  [1152, 71, 384, 1],
+  [1152, 52, 384, 0],
+  [1536, 71, 768, 1],
+  [1536, 52, 768, 0],
+  [2304, 78, 384, 1],
+  [2688, 75, 288, 1],
+  [2688, 45, 384, 0],
+  [2976, 76, 96, 1],
+  [3072, 81, 384, 1],
+  [3072, 57, 384, 0],
+  [3456, 81, 384, 1],
+  [3456, 57, 384, 0],
+  [3840, 81, 768, 1],
+  [3840, 57, 768, 0],
+  [4608, 73, 384, 1],
+  [4992, 70, 288, 1],
+  [4992, 40, 384, 0],
+  [5280, 71, 96, 1],
+  [5376, 74, 384, 1],
+  [5376, 52, 384, 0],
+  [5760, 74, 384, 1],
+  [5760, 52, 384, 0],
+  [6144, 74, 768, 1],
+  [6144, 52, 768, 0],
+  [6912, 68, 384, 1],
+  [7296, 68, 288, 1],
+  [7296, 33, 384, 0],
+  [7584, 69, 96, 1],
+  [7680, 73, 384, 1],
+  [7680, 52, 384, 0],
+  [8064, 73, 384, 1],
+  [8064, 52, 384, 0],
+  [8448, 73, 768, 1],
+  [8448, 52, 768, 0],
+  [9216, 64, 384, 1],
+  [9600, 73, 288, 1],
+  [9600, 40, 384, 0],
+  [9888, 74, 96, 1],
+  [9984, 71, 384, 1],
+  [9984, 52, 384, 0],
+  [10368, 71, 384, 1],
+  [10368, 52, 384, 0],
+  [10752, 71, 768, 1],
+  [10752, 52, 768, 0],
+  [11520, 78, 384, 1],
+  [11904, 75, 288, 1],
+  [11904, 45, 384, 0],
+  [12192, 76, 864, 1],
+  [12288, 85, 384, 1],
+  [12288, 57, 384, 0],
+  [12672, 85, 384, 1],
+  [12672, 57, 384, 0],
+  [13056, 85, 768, 1],
+  [13056, 54, 768, 0],
+  [13824, 73, 384, 1],
+  [14208, 73, 288, 1],
+  [14208, 35, 384, 0],
+  [14496, 74, 96, 1],
+  [14592, 78, 384, 1],
+  [14592, 54, 384, 0],
+  [14976, 78, 384, 1],
+  [14976, 54, 384, 0],
+  [15360, 78, 768, 1],
+  [15360, 52, 768, 0],
+  [16128, 68, 384, 1],
+  [16512, 71, 288, 1],
+  [16512, 33, 384, 0],
+  [16800, 69, 864, 1],
+  [16896, 81, 384, 1],
+  [16896, 52, 384, 0],
+  [17280, 81, 384, 1],
+  [17280, 57, 384, 0],
+  [17664, 81, 768, 1],
+  [17664, 57, 768, 0],
+];
+// 全曲跨度（division → 拍）—— **含末音余振**：弹拨音色下每个音比谱面时值多响
+// 约 35%，最后一个音的余振若不算进边界，就会被收尾淡出拦腰削掉。
+// 注意单位是**乐谱拍**：换算成秒要过 beatToSec（弹性速度表），不能直接乘 MUSIC_BEAT。
+const MUSIC_TAIL_BEATS = Math.max(...MUSIC_NOTES.map((e) => {
+  const d = e[2] / MUSIC_DIV;
+  return e[0] / MUSIC_DIV + d + Math.max(0.1 / MUSIC_BEAT, d * 0.35);
+}));
+// 弹性速度：8 个乐句的收尾三连音做了渐慢。段落 [起始拍, BPM]，从该拍到下一段。
+//   第 6 句三连音（拍 32-36）♩=52；第 7 句回原速；
+//   第 8 句三连音前的两个音（拍 43-44）♩=52；第 8 句三连音（拍 44-48）♩=47。
+const MUSIC_TEMPO = [[0, 57], [32, 52], [36, 57], [43, 52], [44, 47]];
+// 分段换算表：每段记「起始拍 / 每四分音符秒数 / 该拍的时间原点（秒）」
+const MUSIC_BEATSEC = (() => {
+  const seg = [];
+  let t = 0;
+  for (let i = 0; i < MUSIC_TEMPO.length; i++) {
+    const [b, bpm] = MUSIC_TEMPO[i];
+    seg.push({ b, spq: 60 / bpm, t0: t });
+    if (i + 1 < MUSIC_TEMPO.length) t += (MUSIC_TEMPO[i + 1][0] - b) * (60 / bpm);
+  }
+  return seg;
+})();
+/// 乐谱拍 → 秒（按弹性速度表；b 落在哪段就用哪段的速度，跨段由调用方分段相减）
+function beatToSec(b) {
+  for (let i = MUSIC_BEATSEC.length - 1; i >= 0; i--) {
+    if (b >= MUSIC_BEATSEC[i].b) {
+      const s = MUSIC_BEATSEC[i];
+      return s.t0 + (b - s.b) * s.spq;
+    }
+  }
+  return b * (60 / 57);
+}
+// 每个事件的 [起音秒, 时值秒] —— 时值跨速度段时按两段各自积分（如第 8 句那个
+// 2.25 拍的 A4：起音在 ♩=52 段、延到 ♩=47 段，时值 = 两段各算各的）
+const MUSIC_EVENT_SEC = MUSIC_NOTES.map((e) => {
+  const t0 = beatToSec(e[0] / MUSIC_DIV);
+  return [t0, beatToSec(e[0] / MUSIC_DIV + e[2] / MUSIC_DIV) - t0];
+});
+// 一遍的总秒数：最后一个音的结束 + 余振（余振秒数按该音自己的时值算，同 playNote）
+const MUSIC_TAIL_SEC = Math.max(...MUSIC_NOTES.map((e, i) => {
+  const durS = MUSIC_EVENT_SEC[i][1];
+  return MUSIC_EVENT_SEC[i][0] + durS + Math.max(0.1, durS * 0.35);
+}));
+const MUSIC_MELODY_GAIN = 0.31;  // 旋律层峰值增益。离线渲染实测：默认音量 60 下全曲峰值 ≈ -12 dBFS
+const MUSIC_BASS_GAIN = 0.115;   // 低音层：比旋律轻一档，只当衬底
+const MUSIC_LOOKAHEAD = 0.8;
 
-/// 播放某个音符：三角波过一层低通（滤掉刺耳的高次谐波，听起来更接近钢琴/竖琴），
-/// 外加一个略低八度的正弦做低频垫。音量包络是「快起慢落」，音色干净。
+function midiToFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+
+/// 播放某个音符 —— 弹拨音色。
+/// 三层振荡器（双三角波微失谐 = 复弦乐器的"绒感"，一层锯齿波 = 拨弦的亮头）
+/// 共用一条低通，低通频率从亮到暗扫频（拨弦音色变化的关键特征：起音最亮、随即变暗）；
+/// 包络是「毫秒级快起音 → 0.28s 拨弦衰减 → 余振」，余振比谱面时值长约 35%（用户定标）——
+/// 弦音不会在记谱时值结束的瞬间戛然而止，但也不会拖泥带水。
 function playNote(ctx, dest, freq, startAt, dur, gain) {
-  const osc = ctx.createOscillator();
+  const ring = dur + Math.max(0.1, dur * 0.35);    // 余振：至少多 0.1s，长音按 35% 延长
   const lp = ctx.createBiquadFilter();
-  const env = ctx.createGain();
-  osc.type = 'triangle';
-  osc.frequency.value = freq;
   lp.type = 'lowpass';
-  lp.frequency.value = Math.min(freq * 5, 8000);
+  lp.Q.value = 0.7;
+  lp.frequency.setValueAtTime(Math.min(freq * 9, 9000), startAt);
+  lp.frequency.exponentialRampToValueAtTime(Math.min(freq * 2.5, 3500),
+                                            startAt + Math.min(0.45, ring * 0.5));
+  const env = ctx.createGain();
   env.gain.setValueAtTime(0, startAt);
-  env.gain.linearRampToValueAtTime(gain, startAt + 0.05);       // 软起音，避免"啪"
-  env.gain.exponentialRampToValueAtTime(gain * 0.28, startAt + 0.25);
-  env.gain.exponentialRampToValueAtTime(0.0001, startAt + dur);
-  osc.connect(lp).connect(env).connect(dest);
-  osc.start(startAt);
-  osc.stop(startAt + dur + 0.05);
+  env.gain.linearRampToValueAtTime(gain, startAt + 0.006);              // 拨弦起音 ~6ms
+  env.gain.exponentialRampToValueAtTime(gain * 0.14, startAt + 0.28);   // 0.28s 拨弦衰减
+  env.gain.exponentialRampToValueAtTime(0.0001, startAt + ring);        // 长余振
+  lp.connect(env).connect(dest);
+  const layers = [
+    { type: 'triangle', detune: -2.5, g: 0.5 },   // 左弦
+    { type: 'triangle', detune: 2.5, g: 0.5 },    // 右弦（±2.5 音分失谐 → 缓慢的"绒"拍频）
+    { type: 'sawtooth', detune: 0, g: 0.22 },     // 亮头：拨弦触弦瞬间的亮度
+  ];
+  for (const l of layers) {
+    const osc = ctx.createOscillator();
+    osc.type = l.type;
+    osc.frequency.value = freq;
+    osc.detune.value = l.detune;
+    const og = ctx.createGain();
+    og.gain.value = l.g;
+    osc.connect(og).connect(lp);
+    osc.start(startAt);
+    osc.stop(startAt + ring + 0.05);
+  }
 }
 
 /// 内置曲的排程器：每 200ms 往前排 0.8 秒的音符。
 /// 「提前排程」而不是「到点再发」是 Web Audio 的标准做法 —— setInterval 在后台标签页
 /// 会被节流到 1 秒甚至更久，而 AudioContext 的时间轴不会被节流：提前排好的音符
 /// 自己会按点响掉。
-const MUSIC_BEAT = 0.46;   // 每拍秒数（≈ 65 BPM，比心跳慢一档，适合长时间垫底）
-const MUSIC_LOOKAHEAD = 0.8;
-// 单个音符的峰值增益。这个数不是随手填的：音表 / 节奏 / 包络固定之后，把整段
-// 离线渲染出来**实测峰值**，再反推该定多少（下面是实测值，不是估算）：
-//   音符增益 0.09 时，音量 40 下峰值 -39.8 dBFS —— 实测听不见；
-//   提到 0.28 后，音量 40 → 峰值 -15.6 dBFS，60（现行默认）→ -12.1 dBFS，
-//   拉满（100）→ -7.7 dBFS。
-// 对一首稀疏的琶音来说默认档 -12 dBFS 是"明确可闻的垫底"，拉满也不吵、
-// 离 0 dBFS 还差得远，削不了波。
-const MUSIC_NOTE_GAIN = 0.28;
-const MUSIC_BASS_GAIN = 0.22;   // 低八度长音：比主音再轻一档，只当"垫底"而不是抢戏
 
 function musicTick() {
   const m = music;
   if (!m.playing || !m.ctx) return;
   const now = m.ctx.currentTime;
-  // 排程被拖到很后面（机器卡了一秒、系统休眠唤醒）时重新对齐，
-  // 否则接下来一串音符会挤在一起齐奏。顺延量同步加到一遍边界上：
-  // 休眠/卡顿多久，"这一遍的剩余拍数"就保留多久，而不是被时钟跳变截断。
-  if (m.nextTime < now) {
-    const jump = now + 0.05 - m.nextTime;
-    m.nextTime = now + 0.05;
-    m.finishAt += jump;
+  // 排程落后（卡顿/休眠跳变）时整条时间轴顺延：剩余音符的相对间距原样保留，
+  // 谁也不会被挤成一团或直接跳过；一遍的总时长相应顺延（finishAt 同步加同一个量）。
+  if (m.eventIdx < MUSIC_EVENT_SEC.length) {
+    const due = m.origin + MUSIC_EVENT_SEC[m.eventIdx][0];
+    if (due < now - 0.05) {
+      const shift = now - due + 0.05;
+      m.origin += shift;
+      m.finishAt += shift;
+    }
   }
-  // 一遍制：排程推进到这一遍的边界（起播 + 16 拍）就停手。边界之前的音符照常排
-  // （它们属于"正在播完的这一遍"），边界之后一个都不排 —— 已排的音符按自己的
-  // 衰减包络自然落定，不做额外淡出（fade 会把最后一个音的尾巴削掉，那就不是"播完"了）。
-  if (m.nextTime >= m.finishAt) {
+  while (m.eventIdx < MUSIC_EVENT_SEC.length) {
+    const [t0, durS] = MUSIC_EVENT_SEC[m.eventIdx];
+    const at = m.origin + t0;
+    if (at >= now + MUSIC_LOOKAHEAD) break;
+    // 起音时刻被排程滞后蹭过一点点时，就地立即起音（比静音跳过好听）
+    playNote(m.ctx, m.master, midiToFreq(MUSIC_NOTES[m.eventIdx][1]),
+             Math.max(at, now + 0.02), durS,
+             MUSIC_NOTES[m.eventIdx][3] === 1 ? MUSIC_MELODY_GAIN : MUSIC_BASS_GAIN);
+    m.eventIdx += 1;
+  }
+  // 一遍的全部音符都已排上 → 停排程，等最后一个音自然衰减后收尾。
+  // 尾巴多长按最后一个音的实际结束时刻算（乐句尾部有长音 + 余振），不再固定 2.2 秒。
+  // finishTimer 只挂一次：stopPoem(true) 可能被 stopping → idle 连续触发。
+  if (m.eventIdx >= MUSIC_EVENT_SEC.length) {
     if (m.timer) { clearInterval(m.timer); m.timer = null; }
-    // 最后一个音的衰减尾约 2 秒（音符包络最长 BEAT*4 ≈ 1.9s）；落定后关上下文。
-    // finishTimer 只挂一次：stopPoem(true) 可能被 stopping → idle 连续触发。
     if (!m.finishTimer) {
-      m.finishTimer = setTimeout(() => { m.finishTimer = null; musicBuiltinStop(); }, 2200);
+      const lastEnd = m.origin + MUSIC_TAIL_SEC;
+      m.finishTimer = setTimeout(() => { m.finishTimer = null; musicBuiltinStop(); },
+                                 Math.max(400, Math.round((lastEnd - now) * 1000) + 400));
     }
     return;
-  }
-  while (m.nextTime < now + MUSIC_LOOKAHEAD) {
-    // 循环体内**必须**再查一次边界：预检查只拦"nextTime 已到边界"的情况，
-    // 而一次 tick 的排程窗口有 0.8 秒 —— 边界落在窗口内时，不查就会把
-    // finishAt 之后的音符（下一乐句的开头）也排进去，最多多漏约 2 拍。
-    if (m.nextTime >= m.finishAt) break;
-    const idx = MUSIC_PATTERN[m.step % MUSIC_PATTERN.length];
-    const freq = MUSIC_SCALE[idx];
-    // 每 8 拍叠一个低八度的长音，给段落一个落点（像是"换气"）
-    playNote(m.ctx, m.master, freq, m.nextTime, MUSIC_BEAT * 2.2, MUSIC_NOTE_GAIN);
-    if (m.step % 8 === 0) {
-      playNote(m.ctx, m.master, freq / 2, m.nextTime, MUSIC_BEAT * 4, MUSIC_BASS_GAIN);
-    }
-    m.nextTime += MUSIC_BEAT;
-    m.step += 1;
   }
 }
 
@@ -491,11 +628,12 @@ function musicBuiltinStart() {
     }
   };
   ensureRunning();
-  music.step = 0;
-  music.nextTime = music.ctx.currentTime + 0.05;
-  // 一遍制的边界：起播 + 16 拍 = 一个完整乐句。musicTick 推进到这里就停排、
-  // 等尾音落定后自行收尾 —— 无论 DSH 是否已就绪，这一遍都不会再来第二遍。
-  music.finishAt = music.nextTime + MUSIC_PATTERN.length * MUSIC_BEAT;
+  music.eventIdx = 0;
+  music.origin = music.ctx.currentTime + 0.05;
+  // 一遍制的边界：全曲最后一个音的结束 + 余振（按弹性速度表换算成秒）。
+  // musicTick 排完全部音符后停排程、等尾音落定后自行收尾 ——
+  // 无论 DSH 是否已就绪，这一遍都不会再来第二遍。
+  music.finishAt = music.origin + MUSIC_TAIL_SEC;
   music.playing = true;
   musicTick();
   music.timer = setInterval(musicTick, 200);

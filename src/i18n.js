@@ -458,7 +458,7 @@
     lbl_music_file: '自选音乐文件（留空 = 内置曲）',
     ph_music_path: '留空 = 使用内置曲目',
     btn_music_builtin: '恢复内置',
-    note_music: '内置曲是程序用 Web Audio 现场合成的五声音阶琶音（不联网、不读任何文件），一段约 7 秒的乐句；自选曲整首播放。两者都只播一遍、不循环：曲子先于 DSH 就绪播完，剩余等待就是静音；DSH 先就绪，曲子继续播完这一遍再停。支持 mp3 / wav / m4a / ogg / flac（WebView2 能解码的格式），单个文件不超过 32 MB。文件不在了或读不出来时会自动回落到内置曲，并在日志里说明原因。',
+    note_music: '内置曲改编自肖邦《前奏曲》Op. 28 No. 7（A 大调，公有领域），由程序用 Web Audio 现场合成，一遍约 52 秒（不联网、不读任何文件），8 个乐句的收尾三连音稍作渐慢；自选曲整首播放。两者都只播一遍、不循环：曲子先于 DSH 就绪播完，剩余等待就是静音；DSH 先就绪，曲子继续播完这一遍再停。支持 mp3 / wav / m4a / ogg / flac（WebView2 能解码的格式），单个文件不超过 32 MB。文件不在了或读不出来时会自动回落到内置曲，并在日志里说明原因。',
     // 状态行右侧的小标志：告诉用户此刻到底是哪一段在（可能）播
     music_flag_off: '已关闭',
     music_flag_builtin: '内置曲',
@@ -912,7 +912,7 @@
     lbl_music_file: 'Custom music file (empty = built-in tune)',
     ph_music_path: 'Empty = use the built-in tune',
     btn_music_builtin: 'Use built-in',
-    note_music: 'The built-in tune is synthesized on the fly with Web Audio (no network, no file to ship) — a single ~7 s phrase; a custom file plays in full. Both play exactly once and never loop: if the track ends before DSH is ready, the rest of the wait is silent; if DSH is ready first, the track finishes this one pass before stopping. Supported: mp3 / wav / m4a / ogg / flac (whatever WebView2 can decode), up to 32 MB per file. If the file is missing or unreadable it falls back to the built-in tune and says so in the log.',
+    note_music: 'The built-in tune is an arrangement of Chopin\'s Prelude Op. 28 No. 7 (A major, public domain), synthesized on the fly with Web Audio — about 52 s per pass (no network, no file to ship), with a slight ritardando at the end of each of the 8 phrases; a custom file plays in full. Both play exactly once and never loop: if the track ends before DSH is ready, the rest of the wait is silent; if DSH is ready first, the track finishes this one pass before stopping. Supported: mp3 / wav / m4a / ogg / flac (whatever WebView2 can decode), up to 32 MB per file. If the file is missing or unreadable it falls back to the built-in tune and says so in the log.',
     // Small status flag: tells the user which track is (or would be) playing
     music_flag_off: 'Off',
     music_flag_builtin: 'Built-in',

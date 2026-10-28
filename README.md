@@ -468,11 +468,11 @@ The waiting page that shows poem lines while DSH starts stays up for tens of sec
 
 | | Built-in tune (default) | Custom file |
 |---|---|---|
-| Source | A **C-major pentatonic arpeggio synthesized on the fly with Web Audio** | A local file you choose |
+| Source | An arrangement of Chopin's Prelude Op. 28 No. 7 (public domain), **synthesized on the fly with Web Audio** | A local file you choose |
 | Needs | Nothing — no audio asset is shipped, no network, no system codecs | One of the five containers WebView2 can decode |
 | Stops working | Never | File deleted/moved, over 32 MB, unreadable disk |
 
-Music **plays exactly once and never loops**: it fades in on the waiting page. If the track ends before DSH is ready, the rest of the wait is silent; if DSH becomes ready first (or the page goes away on errors / port conflicts), the track finishes this one pass before stopping — the remainder may be 30 seconds or 4 minutes, whatever the track has left, and the built-in tune is a single ~7 s phrase. To silence immediately, drag the volume to 0 in Preferences (takes effect live), or click Start again — a new startup hard-stops the previous round first.
+Music **plays exactly once and never loops**: it fades in on the waiting page. If the track ends before DSH is ready, the rest of the wait is silent; if DSH becomes ready first (or the page goes away on errors / port conflicts), the track finishes this one pass before stopping — the remainder may be 30 seconds or 4 minutes, whatever the track has left, and the built-in tune runs about 52 s per pass with a slight ritardando at the end of each of the 8 phrases (phrase 6 ♩=52, phrase 8 ♩=47, the two notes before it ♩=52). To silence immediately, drag the volume to 0 in Preferences (takes effect live), or click Start again — a new startup hard-stops the previous round first.
 
 **Nothing fails silently**: an unreadable custom file falls back to the built-in tune and says why in the log; if the system's autoplay policy blocks it (the autostart path has no user gesture at all) the app tells you and starts on your next click.
 

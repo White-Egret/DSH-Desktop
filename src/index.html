@@ -599,6 +599,25 @@
     </div>
   </div>
 
+  <!-- 退出确认弹窗：有壳内长任务（更新 DSH / 引导安装）在跑时，点 X 或托盘「退出」
+       不再直接退出，而是先列出这些任务让用户选。结构照抄 safe-verify-modal。
+       必须同时加进 main.js 的 MODALS 数组 —— 否则它会被内嵌的原生 DSH 子 webview 盖住
+       （与安全模式灰暗那次是同一类死法）。
+       任务行由 main.js 用 textContent 拼（title 来自 DSH/配置，属不可信数据）。 -->
+  <div id="exit-confirm-modal" class="modal hidden">
+    <div class="modal-box narrow">
+      <div class="modal-title" data-i18n="exit_modal_title">有任务正在运行</div>
+      <div class="safe-fact" data-i18n="exit_modal_desc">
+        现在退出会中断以下任务；也可以先把窗口藏到托盘，让任务继续。
+      </div>
+      <div id="exit-task-list" class="exit-task-list"></div>
+      <div class="modal-actions">
+        <button id="btn-exit-keep" class="btn" data-i18n="exit_btn_keep">继续后台运行</button>
+        <button id="btn-exit-force" class="btn primary" data-i18n="exit_btn_force">强制退出</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 安全模式引导横幅（进入成功后弹出；点击工具栏徽标可重新打开）。
        明确告知三件事：① 当前处于安全模式 ② 日常家目录路径 ③ 凭据借用结果。
        路径与凭据说明由 main.js 用 Rust 端 SafeReport 填充（凭据内容绝不经过 IPC）。 -->

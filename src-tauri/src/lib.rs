@@ -1,12 +1,14 @@
 mod config;
 mod detect;
 mod elevate;
+mod exit_guard;
 mod i18n;
 mod logger;
 mod process;
 mod py_bridge;
 mod safe;
 mod secret;
+mod tasks;
 mod window_state;
 
 use std::time::Duration;
@@ -51,6 +53,9 @@ pub fn run(launched_by_autostart: bool) {
         // 安全模式状态（Child 句柄 / 激活标志 / 进入报告）：应用退出与窗口销毁时
         // 由 process::cleanup_sync → safe::cleanup_safe_sync 兜底清理，防孤儿进程占用 3081
         .manage(safe::SafeState::new())
+        // 退出闸：活跃任务注册表（壳内长任务，对账式同步）+ 交互握手的应答通道
+        .manage(tasks::TaskRegistry::new())
+        .manage(exit_guard::ExitGuardState::new())
         .invoke_handler(tauri::generate_handler![
             process::get_config,
             process::save_config,
@@ -130,6 +135,10 @@ pub fn run(launched_by_autostart: bool) {
             safe::enter_safe_mode,
             safe::exit_safe_mode,
             safe::get_safe_status,
+            // 退出闸：弹窗拉取任务列表、按钮回传选择、启动时读上次的事故记录
+            exit_guard::get_active_tasks,
+            exit_guard::exit_decision,
+            exit_guard::get_last_session_killed,
         ])
         .setup(move |app| {
             // ---- 0. 按用户配置初始化界面语言与外观（后续所有 launcher 日志/托盘菜单文案跟随语言） ----
@@ -259,7 +268,9 @@ pub fn run(launched_by_autostart: bool) {
                             }
                         }
                         "quit_app" => {
-                            app_handle.exit(0);
+                            // 托盘退出同样过退出闸：有长任务在跑时先问人（交互线程会把
+                            // 隐藏的主窗口唤回来再弹窗），无任务时行为与旧版一致。
+                            exit_guard::request_exit(app_handle, exit_guard::ExitSource::Tray);
                         }
                         // 「启动 / 停止 DSH」：与工具栏原来的按钮同一套后端命令。
                         // 失败只记日志 + 提示，不 panic —— 托盘菜单点错了不该让程序出事。
@@ -310,8 +321,12 @@ pub fn run(launched_by_autostart: bool) {
                     config::load(app).close_action.trim().eq_ignore_ascii_case("quit")
                 };
                 if quit_on_close {
-                    // 退出程序：结束本次启动的 DSH 进程树（RunEvent::Exit 兜底 cleanup 会执行）
-                    window.app_handle().exit(0);
+                    // 先拦下再走退出闸：无任务时 perform_exit 里的 app.exit(0) 会销毁窗口，
+                    // 与旧行为等价；有任务时窗口必须活着渲染弹窗。
+                    // 这个回调在主线程上，所以这里只做 prevent_close + CAS + spawn，
+                    // 任何等待都发生在 exit_guard 的 helper 线程里。
+                    api.prevent_close();
+                    exit_guard::request_exit(window.app_handle(), exit_guard::ExitSource::Close);
                 } else {
                     api.prevent_close();
                     // 直接用事件中的窗口句柄隐藏，避免窗口查找失败导致点 X 无反应
@@ -367,6 +382,11 @@ pub fn run(launched_by_autostart: bool) {
                 }
                 // 退出兜底清理：无论正常退出还是异常退出路径，都尝试结束 DSH 进程树
                 RunEvent::Exit => {
+                    // 系统关机 / 未经 perform_exit 的退出路径（tao 收 WM_ENDSESSION → 同步
+                    // 派发 LoopDestroyed → 这里）：文件不存在才补写一条 system 记录。
+                    // perform_exit 已经写过（正常退出也写空列表）时是 no-op。
+                    // 必须排在 cleanup_sync 之前：那一步之后进程随时可能没了。
+                    exit_guard::persist_exit_state_fallback(app);
                     process::cleanup_sync(app);
                 }
                 _ => {}
@@ -425,7 +445,8 @@ pub fn apply_window_theme(app: &tauri::AppHandle, appearance: &str) {
     });
 }
 
-fn show_main_window(app: &tauri::AppHandle) {
+/// pub(crate)：退出闸的托盘路径需要先把隐藏的主窗口唤回来，否则弹窗开在一个看不见的窗口里
+pub(crate) fn show_main_window(app: &tauri::AppHandle) {
     // 关键：托盘菜单/图标事件回调运行在后台线程，必须切回主线程才能操作窗口，
     // 否则 show()/set_focus() 会静默失败，表现为“点了托盘无法打开窗口”。
     let app = app.clone();

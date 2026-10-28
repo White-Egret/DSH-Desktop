@@ -50,6 +50,28 @@ pub fn t(key: &str) -> &'static str {
         "wait_suffix_timeout" => if en { ", timeout {0} s" } else { "，超时 {0} 秒" },
         "wait_suffix_infinite" => if en { ", no timeout (waits while the DSH process is alive)" } else { "，无超时限制（DSH 进程存活期间持续等待）" },
         "log_detected_url" => if en { "[launcher] Detected DSH's actual listen address: {0} (the page will be loaded from it)" } else { "[launcher] 检测到 DSH 实际监听地址: {0}（将以该地址为准加载页面）" },
+        // ---------- S0 端点闸（DshEndpoint / parse_listening_line） ----------
+        // 这几条日志的存在意义：端点拿不到时优雅关闭会静默退化成强杀，如果不留痕，
+        // 「功能没生效」和「功能报错了没人看见」在用户机器上完全无法区分。
+        "log_endpoint_latched" => if en { "[launcher] DSH endpoint latched: {0} (pid {1}); graceful shutdown will use it" } else { "[launcher] 已闩锁 DSH 端点: {0}（pid {1}），优雅关闭将使用它" },
+        "log_endpoint_reject" => if en { "[launcher] Ignored a DSH address line: {0}" } else { "[launcher] 忽略一条 DSH 地址行：{0}" },
+        "log_endpoint_port_mismatch" => if en { "[launcher] Ignored DSH address line: port {0} does not match configured port {1}" } else { "[launcher] 忽略 DSH 地址行：端口 {0} 与配置端口 {1} 不一致" },
+        "log_endpoint_ignored_late" => if en { "[launcher] Ignored a later DSH address line (port {0}); the endpoint latched for this process is port {1} — the first one wins" } else { "[launcher] 忽略后到的 DSH 地址行（端口 {0}）：本代次已闩锁端口 {1}，先到者胜" },
+        // ---------- 退出闸（exit_guard.rs） ----------
+        // 弹窗标题/说明/按钮只在前端用；Rust 侧用到的是「原生降级框」那三条 + 任务类别。
+        "exit_task_kind_update" => if en { "Updating DSH" } else { "更新 DSH" },
+        "exit_task_kind_install" => if en { "Setup install" } else { "引导安装" },
+        "exit_btn_keep" => if en { "Keep running in background" } else { "继续后台运行" },
+        "exit_btn_force" => if en { "Force quit" } else { "强制退出" },
+        "exit_fallback_title" => if en { "Quit DSH Desktop?" } else { "确认退出 DSH Desktop" },
+        "exit_fallback_body" => if en { "These tasks are still running and will be interrupted:" } else { "以下任务仍在运行，强制退出会中断它们：" },
+        "exit_fallback_none" => if en { "The UI is unresponsive, so the task list cannot be shown. Force quit anyway?" } else { "界面无响应，无法显示任务列表。仍要强制退出吗？" },
+        "log_exit_kind" => if en { "[launcher] Exit flow started (kind: {0})" } else { "[launcher] 退出流程开始（类型 {0}）" },
+        // 案发记录写不进去只记日志、不阻断退出：退出流程优先于报告
+        "log_exit_state_fail" => if en { "[launcher] Failed to write the exit record (exit-state.json): {0}. The exit itself continues." } else { "[launcher] 写入退出记录（exit-state.json）失败：{0}。退出流程照常继续。" },
+        // ---------- S3 优雅关闭 ----------
+        "log_graceful_skip" => if en { "[launcher] Graceful shutdown skipped: {0}" } else { "[launcher] 跳过优雅关闭：{0}" },
+        "log_graceful_failed" => if en { "[launcher] Graceful shutdown ineffective (HTTP {0}); terminating the process tree" } else { "[launcher] 优雅关闭未生效（HTTP {0}），改为结束进程树" },
         "log_exit_before_ready" => if en { "[launcher] The DSH process exited before the service was ready (exit code {0}) — start failed! Open the log to see DSH's raw output." } else { "[launcher] DSH 进程在服务就绪前已退出（退出码 {0}），启动失败！请打开日志查看 DSH 的原始输出。" },
         "err_exit_before_ready" => if en { "DSH failed to start: the process exited before the port was ready (exit code {0})" } else { "DSH 启动失败：进程在端口就绪前退出（退出码 {0}）" },
         "log_proc_check_fail" => if en { "[launcher] Failed to check the DSH process state: {0}" } else { "[launcher] 检查 DSH 进程状态失败: {0}" },

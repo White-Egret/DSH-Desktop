@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
@@ -32,7 +32,7 @@ pub(crate) mod win {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::Threading::{
@@ -80,6 +80,12 @@ pub(crate) mod win {
         unsafe { CloseHandle(h.0) };
     }
 
+    /// 显式强杀整棵 Job：比依赖「关句柄 → KILL_ON_JOB_CLOSE」更明确，也能拿到 BOOL 结果。
+    /// 关句柄那条路仍然保留（`close_jobs`），两者互为保险。
+    pub fn terminate_job(h: &JobHandle) -> bool {
+        unsafe { TerminateJobObject(h.0, 0) != 0 }
+    }
+
     /// 环境变量（这里是用户 PATH）改完之后广播 WM_SETTINGCHANGE。
     ///
     /// 为什么需要它：注册表里的用户 PATH 是所有新进程的**来源**，但 Explorer 自己也
@@ -120,6 +126,13 @@ pub struct AppState {
     last_stderr: Mutex<Option<String>>,
     /// 从 DSH 输出中解析出的实际监听地址 (url, port)；就绪后优先按它加载页面
     pub detected_url: Mutex<Option<(String, u16)>>,
+    /// 端点闩锁：(DSH pid, 端点)。只由 `latch_endpoint`（`parse_listening_line` 成功后）写入；
+    /// `current_endpoint` 读出时**校验 pid 仍等于当前 pid**，否则视为无端点。
+    /// 为什么按 pid 而不是按端口：launch token 每进程随机，跨代次复用必然 401。
+    endpoint: Mutex<Option<(u32, Arc<DshEndpoint>)>>,
+    /// 本代次「地址行被拒」的日志节流：同一个 DSH pid 只记一条，避免 2 秒一条刷屏。
+    /// 值为已记过日志的 pid（0 = 还没记过）。
+    endpoint_reject_logged: AtomicU32,
     /// 最近一次真正交给内嵌 webview 的地址（可能带 `?token=...`）。
     /// 只在内存里：进程退出即忘，落盘的那份是 DPAPI 密文（config::set_last_url）。
     /// 用途是「同一个地址的日志行反复出现时不要反复重导航」，见 spawn_log_reader。
@@ -185,6 +198,8 @@ impl AppState {
             updating: AtomicBool::new(false),
             last_stderr: Mutex::new(None),
             detected_url: Mutex::new(None),
+            endpoint: Mutex::new(None),
+            endpoint_reject_logged: AtomicU32::new(0),
             last_loaded_url: Mutex::new(String::new()),
             toolbar_hidden: AtomicBool::new(false),
             dsh_webview_visible: AtomicBool::new(true),
@@ -516,6 +531,238 @@ fn extract_local_url(line: &str) -> Option<(String, u16)> {
     None
 }
 
+/// 已校验的 DSH 端点。**只有 `parse_listening_line` 能造出它**。
+///
+/// 为什么值得单独一个类型：`detected_url` 是「拿去做导航」的宽松结果（任何一行带
+/// `http://127.0.0.1:<port>` 的输出都会覆盖它），而端点会被用来**发请求**（签到换 cookie、
+/// 请求优雅关闭）。DSH 的 stdout/stderr 里混着模型回复与工具结果（见 extract_local_url 注释），
+/// 拿一条来路不明的「端口 + 令牌」去发请求，轻则 401 让人误判成「DSH 没做契约」，
+/// 重则把令牌发给别的本机服务。所以这里的每个字段都单独验过，验不过就没有这个值。
+pub(crate) struct DshEndpoint {
+    /// 与 DSH 打印的 authority 一致（`127.0.0.1` 或 `localhost`）：签到与 API 请求的 Host 头都用它
+    pub host: String,
+    pub port: u16,
+    /// 43 字符 base64url
+    pub launch_token: String,
+}
+
+/// 端点行的拒绝原因。`Display` 只放稳定的英文短句（日志模板负责中文/英文外壳），
+/// 这样 `log_endpoint_reject` 的中英文都能复用同一份原因文本，不必为每种语言各写一遍。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EndpointError {
+    NoCandidate,
+    BadPath,
+    BadQuery,
+    BadToken,
+    Ambiguous,
+}
+
+impl std::fmt::Display for EndpointError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::NoCandidate => "no loopback http url in the line",
+            Self::BadPath => "path is neither empty nor \"/\"",
+            Self::BadQuery => "query is not exactly one \"token\" parameter",
+            Self::BadToken => "token is not 43 base64url chars",
+            Self::Ambiguous => "more than one candidate url in the line",
+        };
+        f.write_str(s)
+    }
+}
+
+/// 把 DSH 打印的地址行解析成唯一一个校验过的端点。
+///
+/// 第一步必须是 `extract_local_url`：它已经做过截断（空白 / 引号 / `\` / 反引号 / 尖括号 /
+/// 控制字符，见 HIGH-1）与 loopback 校验，这里**不复制**那套逻辑，只在它的结果上逐字段收紧。
+/// 失败一律返回 Err，绝不回退成「宽松解析的结果」——宁可端点暂时不可得（优雅关闭退化为强杀），
+/// 也不拿一个没验过的端口/令牌去发请求。
+pub(crate) fn parse_listening_line(line: &str) -> Result<DshEndpoint, EndpointError> {
+    // 先把行里所有 loopback http 候选都找出来（截断与 host/端口校验全交给 extract_local_url）。
+    // 反复调用它并把 rest 推进到**已匹配那一段之后**：只按 `http://` 字面前进的话，
+    // 当 extract_local_url 跳过了前面几个非法候选时，会把同一个候选重复数两遍。
+    let mut candidates: Vec<(String, u16)> = Vec::new();
+    let mut rest = line;
+    while let Some(hit) = extract_local_url(rest) {
+        let pos = rest.find(&hit.0).unwrap_or(0);
+        rest = &rest[pos + hit.0.len()..];
+        candidates.push(hit);
+    }
+    if candidates.is_empty() {
+        return Err(EndpointError::NoCandidate);
+    }
+
+    // 逐字段校验每个候选，只统计**通过全部字段检查**的那些：
+    // 一行里出现两个都能兑换令牌的地址 = 歧义，按不可信处理、整行作废；
+    // 而「一条合法地址 + 一条别的本机地址（比如日志里回显的健康检查 URL）」不算歧义。
+    let mut good: Vec<DshEndpoint> = Vec::new();
+    let mut first_err = EndpointError::NoCandidate;
+    for (url, port) in candidates {
+        match check_endpoint_fields(&url, port) {
+            Ok(ep) => good.push(ep),
+            Err(e) => {
+                if first_err == EndpointError::NoCandidate {
+                    first_err = e;
+                }
+            }
+        }
+    }
+    match good.len() {
+        0 => Err(first_err),
+        1 => Ok(good.pop().expect("len == 1")),
+        _ => Err(EndpointError::Ambiguous),
+    }
+}
+
+/// `parse_listening_line` 的逐字段部分（path / query / token）。单独拆出来只为让
+/// 上面那段「多候选」逻辑读起来不绕；没有别的调用点。
+fn check_endpoint_fields(url: &str, port: u16) -> Result<DshEndpoint, EndpointError> {
+    // fragment 对签到没有意义（authorizeIndex 只看 pathname 与 query），但也不该让
+    // `#/chat` 之类把 path/query 的判定搅乱：先切掉再验。
+    let without_fragment = url.split_once('#').map(|(head, _)| head).unwrap_or(url);
+    let after_scheme = without_fragment
+        .strip_prefix("http://")
+        .ok_or(EndpointError::NoCandidate)?;
+    let authority = after_scheme.split('/').next().unwrap_or("");
+    let (host, _port_text) = authority.split_once(':').ok_or(EndpointError::BadPath)?;
+    // extract_local_url 已经只放行这两个 host；这里再取一次是因为 Host 头必须与 DSH
+    // 打印的 authority 逐字一致（cookie 名 = "dsh-auth-" + sha256(authority)）。
+    if !(host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost")) {
+        return Err(EndpointError::NoCandidate);
+    }
+
+    let path_and_query = &after_scheme[authority.len()..];
+    let (path, query) = match path_and_query.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (path_and_query, None),
+    };
+    // DSH 只在 pathname === "/" 时把 launch token 换成 cookie；别处兑换一律 401
+    if !(path.is_empty() || path == "/") {
+        return Err(EndpointError::BadPath);
+    }
+
+    let query = query.ok_or(EndpointError::BadQuery)?;
+    // `tokens.length !== 1` 在 DSH 侧直接 401，所以这里要求恰好一个键：
+    // 多个参数（`&`/`;`）或键名不是 token 都在这一步拦下
+    if query.contains('&') || query.contains(';') {
+        return Err(EndpointError::BadQuery);
+    }
+    let (key, token) = query.split_once('=').ok_or(EndpointError::BadQuery)?;
+    if key != "token" {
+        return Err(EndpointError::BadQuery);
+    }
+
+    // randomBytes(32) 的 base64url 恰好 43 字符，且不含 `%` `+` `=`（未做百分号编码，
+    // 出现它们说明这行不是 DSH 的原样输出，或者被谁改过）
+    let ok_token = token.len() == 43
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if !ok_token {
+        return Err(EndpointError::BadToken);
+    }
+
+    Ok(DshEndpoint {
+        host: host.to_string(),
+        port,
+        launch_token: token.to_string(),
+    })
+}
+
+/// 把解析成功的端点按 DSH 进程代次闩锁。
+///
+/// 三条「不闩」的规矩各有死法：
+/// - `pid` 为 None（安全模式实例、尚未 spawn）：那时的端口属于 3081 或根本不存在，
+///   闩了会让退出流程 POST 到错的进程；
+/// - 端口与配置不符：配置被改过或 DSH 没听配置里的端口，此时这个地址不可能是我们要关的那个；
+/// - 同 pid 已有端点：**保留先到的那个**，否则模型/工具输出里回显的一条地址就能把端点带偏。
+pub(crate) fn latch_endpoint(app: &AppHandle, ep: DshEndpoint) {
+    let state = app.state::<AppState>();
+    let Some(pid) = *state.pid.lock().unwrap() else {
+        return;
+    };
+    let cfg_port = config::load(app).port;
+    if cfg_port != 0 && ep.port != cfg_port {
+        log_launcher(
+            app,
+            &i18n::fmt("log_endpoint_port_mismatch", &[&ep.port, &cfg_port]),
+        );
+        return;
+    }
+    // 先在锁内把「该不该换」判完并把要记的日志准备好，出锁再记 ——
+    // 锁内调用 emit_log 会把日志 IPC 拉进临界区，是不必要的锁持有时间。
+    enum Outcome {
+        Keep,
+        Replace,
+        LateMismatch(u16, u16),
+    }
+    let outcome = {
+        let mut guard = state.endpoint.lock().unwrap();
+        match guard.as_ref() {
+            // 同一代次已经有端点：**保留先到的那个**。只在端口不同时留一条诊断，
+            // 说明有第二条地址行试图抢位（模型/工具输出回显地址时的典型现场）。
+            Some((p, prev)) if *p == pid => {
+                if prev.port == ep.port {
+                    Outcome::Keep
+                } else {
+                    Outcome::LateMismatch(ep.port, prev.port)
+                }
+            }
+            _ => {
+                *guard = Some((pid, Arc::new(ep)));
+                Outcome::Replace
+            }
+        }
+    };
+    match outcome {
+        Outcome::Keep => {}
+        Outcome::LateMismatch(late, kept) => {
+            log_launcher(
+                app,
+                &i18n::fmt("log_endpoint_ignored_late", &[&late, &kept]),
+            );
+        }
+        Outcome::Replace => {
+            if let Some(ep) = current_endpoint(app) {
+                let authority = format!("{}:{}", ep.host, ep.port);
+                log_launcher(
+                    app,
+                    &i18n::fmt("log_endpoint_latched", &[&authority, &pid]),
+                );
+            }
+        }
+    }
+}
+
+/// 当前代次已闩锁的端点；pid 对不上（DSH 重启 / 已停止）就当作没有。
+/// 端点不跨代次复用：launch token 每进程随机，拿上一代的去请求必然 401。
+pub(crate) fn current_endpoint(app: &AppHandle) -> Option<Arc<DshEndpoint>> {
+    let state = app.state::<AppState>();
+    let pid = (*state.pid.lock().unwrap())?;
+    let guard = state.endpoint.lock().unwrap();
+    match guard.as_ref() {
+        Some((p, ep)) if *p == pid => Some(ep.clone()),
+        _ => None,
+    }
+}
+
+/// 从一条 DSH 输出行里尝试闩锁端点。解析失败按「每个 DSH 代次最多一条」节流记日志：
+/// 这条路径跑在日志读取线程上、每行都会走，不节流的话一条异常的启动输出就能刷满日志面板。
+fn latch_endpoint_from_line(app: &AppHandle, line: &str) {
+    let state = app.state::<AppState>();
+    let Some(pid) = *state.pid.lock().unwrap() else {
+        return; // 安全模式实例（3081）不是我们的端点，静默跳过
+    };
+    match parse_listening_line(line) {
+        Ok(ep) => latch_endpoint(app, ep),
+        Err(e) => {
+            // swap 返回旧值：等于本代次 pid 说明已经记过，跳过
+            if state.endpoint_reject_logged.swap(pid, Ordering::SeqCst) != pid {
+                log_launcher(app, &i18n::fmt("log_endpoint_reject", &[&e]));
+            }
+        }
+    }
+}
+
 /// 端口可连接后，再发一个轻量 HTTP GET 确认服务真正能响应（任意响应码都算就绪）。
 fn http_ready(addr: &SocketAddr) -> bool {
     use std::io::Write;
@@ -677,6 +924,10 @@ pub(crate) fn spawn_log_reader(
                         }
                     }
                 }
+                // 端点闸（S0）：与上面的 detected_url **互不影响**。解析失败不导航、
+                // 不清 detected_url、不杀进程 —— 只按代次节流记一条带原因的日志。
+                // 放在 URL 分支之后而不是 else 里：同一条合法 banner 会同时喂给两边。
+                latch_endpoint_from_line(&app, &l);
             }
             // 落盘（失败忽略，不影响主流程）
             if let Some(f) = &dsh_file {
@@ -1597,8 +1848,12 @@ pub(crate) fn start_internal(app: &AppHandle) -> Result<(), String> {
         return Err(msg);
     }
 
-    // 本轮启动前清空上一次解析到的实际地址
+    // 本轮启动前清空上一次解析到的实际地址与端点闩锁。
+    // 端点必须在这里清（而不是 spawn_log_reader 里）：那个读取器被安全模式实例复用，
+    // 在那边清会把日常实例刚闩上的端点一起抹掉。
     *state.detected_url.lock().unwrap() = None;
+    *state.endpoint.lock().unwrap() = None;
+    state.endpoint_reject_logged.store(0, Ordering::SeqCst);
 
     // 启动命令等价于："<dsh_path>" web --port <port> --no-open [extra_args]
     // --no-open：DSH 官方参数，禁止其自动打开默认浏览器（Edge）
@@ -1930,6 +2185,223 @@ pub(crate) fn stop_internal(app: &AppHandle) -> Result<(), String> {
     set_status(app, "idle", None);
     emit_log(app, "launcher", i18n::t("log_stopped").to_string());
     Ok(())
+}
+
+// ---------- 退出路径的进程树清理（S1/S3） ----------
+
+/// 退出路径的完整清理：优雅终止 → 超时强杀整树 → 回收。
+///
+/// 与 `stop_internal`（停止按钮：立刻 taskkill + 销毁内嵌页）不同，这是**退出**专用：
+/// 先给 DSH 一个自己收尾的机会，超时绝不留情。刻意复用它的零件而不改它本身 ——
+/// 停止按钮的语义（立即、可重复点、带 UI 收尾）与退出流程是两件事。
+///
+/// 本函数恒在 helper 线程执行（见 exit_guard::perform_exit 的线程契约），
+/// 所以**不调** `destroy_dsh_webview` / `set_status`：那两个是停止按钮的 UI 收尾，
+/// 需要主线程，而窗口马上随 `app.exit(0)` 消失。
+pub(crate) fn shutdown_dsh_tree(app: &AppHandle, graceful_wait: Duration) {
+    let state = app.state::<AppState>();
+
+    // ---- 1. 优雅终止：只在「这是我们自己启动的 DSH」时发 ----
+    // 注意顺序：**先**取端点再 take pid。`current_endpoint` 的判定是「闩锁里的 pid
+    // 仍等于当前 pid」，而 take 之后当前 pid 就是 None —— 先 take 再取端点，永远
+    // 拿不到端点，优雅关闭就成了死分支（设计文档 §7.1 骨架里的顺序有这个坑）。
+    let pid = *state.pid.lock().unwrap();
+    if pid.is_some() {
+        graceful_signal(app);
+    }
+    let pid = state.pid.lock().unwrap().take();
+    let mut child = state.child.lock().unwrap().take();
+
+    // 回包时机不重要：以**进程真的退出**为准，一直轮询到 deadline。
+    if let Some(c) = child.as_mut() {
+        let deadline = Instant::now() + graceful_wait;
+        while Instant::now() < deadline {
+            match c.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            }
+        }
+    }
+
+    // ---- 2. 超时强杀：绝不只杀父进程 ----
+    let alive = child
+        .as_mut()
+        .map(|c| matches!(c.try_wait(), Ok(None)))
+        .unwrap_or(false);
+    #[cfg(windows)]
+    if alive {
+        if let Some(job) = state.job.lock().unwrap().as_ref() {
+            let _ = win::terminate_job(job);
+        }
+    }
+    // 降级兜底（Job 句柄缺失 / OpenProcess 失败等异常路径）：既有 taskkill /T /F。
+    // 绝不用 /IM —— 那是按映像名杀，会连用户自己开的同名进程一起干掉。
+    let still_alive = child
+        .as_mut()
+        .map(|c| matches!(c.try_wait(), Ok(None)))
+        .unwrap_or(false);
+    if still_alive {
+        if let Some(p) = pid {
+            let _ = run_taskkill(p);
+        }
+    }
+
+    // ---- 3. 回收句柄 + 收尾 ----
+    if let Some(mut c) = child {
+        let _ = c.wait();
+    }
+    state.close_jobs(); // 关 Job 句柄（KILL_ON_JOB_CLOSE 二次保险）
+    crate::safe::cleanup_safe_sync(app); // 安全模式实例同样要清（纯进程操作，线程安全）
+}
+
+/// 优雅终止：Windows 上只有「DSH 自己的 HTTP 关闭端点」这一条可靠路径
+/// （控制台 Ctrl 事件需要 AttachConsole 且只对同控制台进程组生效，见设计文档 §7.3）。
+///
+/// 端点只能来自 `current_endpoint` —— 也就是 S0 校验并**按代次闩锁**的那一个。
+/// 拿不到就什么都不发，直接进强杀：退回 config.port + 空令牌只会换来一个 401
+/// 和一句误导性的错误日志。
+fn graceful_signal(app: &AppHandle) {
+    let Some(ep) = current_endpoint(app) else {
+        log_launcher(
+            app,
+            &i18n::fmt("log_graceful_skip", &[&"no latched DSH endpoint"]),
+        );
+        return;
+    };
+    // 1) token → cookie（GET /?token=… 期望 303 + set-cookie）
+    let sign_in_path = format!("/?token={}", ep.launch_token);
+    let cookie = match http_once(&ep, "GET", &sign_in_path, None, HTTP_TIMEOUT) {
+        Some(reply) => match reply.set_cookie.as_deref().and_then(cookie_pair) {
+            Some(c) => c,
+            None => {
+                log_launcher(
+                    app,
+                    &i18n::fmt("log_graceful_failed", &[&reply.status]),
+                );
+                return;
+            }
+        },
+        None => {
+            log_launcher(app, &i18n::fmt("log_graceful_skip", &[&"sign-in request failed"]));
+            return;
+        }
+    };
+    // 2) POST /api/desktop/shutdown（期望 202）。404 是**今天的预期结果**：
+    //    契约还没落地 → 立刻放弃优雅阶段、进强杀，不重试、不退避。
+    match http_once(&ep, "POST", "/api/desktop/shutdown", Some(&cookie), HTTP_TIMEOUT) {
+        Some(reply) if reply.status == 202 => {}
+        Some(reply) => {
+            log_launcher(app, &i18n::fmt("log_graceful_failed", &[&reply.status]));
+        }
+        None => {
+            log_launcher(app, &i18n::fmt("log_graceful_skip", &[&"shutdown request failed"]));
+        }
+    }
+}
+
+/// 签到与关闭共用的超时：两个请求各自 800 ms，最坏 1.6 s 就放弃优雅阶段。
+const HTTP_TIMEOUT: Duration = Duration::from_millis(800);
+
+/// 一次请求的解析结果。只保留退出流程真正用到的两个字段 —— 这里不是通用 HTTP 客户端，
+/// 不解析 body、不跟重定向、不缓存连接。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HttpReply {
+    status: u16,
+    /// 已剥掉属性（`Path` / `Max-Age` …）与尾部 CRLF 的 `name=value`
+    set_cookie: Option<String>,
+}
+
+/// 手写一次 HTTP/1.1 请求（与 `http_ready` 同款 TcpStream 风格，零新依赖）。
+///
+/// `Host` 头必须与 DSH 打印的 authority 一致：cookie 名是 `dsh-auth-` + sha256(authority)，
+/// 写成 `localhost` 而 DSH 打印的是 `127.0.0.1`（或反过来）会拿到另一个 cookie 名。
+fn http_once(
+    ep: &DshEndpoint,
+    method: &str,
+    path: &str,
+    cookie: Option<&str>,
+    timeout: Duration,
+) -> Option<HttpReply> {
+    let addr: SocketAddr = format!("127.0.0.1:{}", ep.port).parse().ok()?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout).ok()?;
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    let mut req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}:{}\r\nUser-Agent: DSH-Desktop/1.0\r\nAccept: */*\r\nConnection: close\r\n",
+        ep.host, ep.port
+    );
+    if let Some(c) = cookie {
+        req.push_str(&format!("Cookie: {c}\r\n"));
+    }
+    req.push_str("\r\n");
+    use std::io::Write;
+    stream.write_all(req.as_bytes()).ok()?;
+    // 只需要状态行与头部：读到空行就够，body 一概不读（`Connection: close` 保证对端会收尾）
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 512];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                raw.extend_from_slice(&buf[..n]);
+                if raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+                if raw.len() > 16 * 1024 {
+                    break; // 头部异常巨大：当作解析失败，绝不无限读
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    parse_http_reply(&raw)
+}
+
+/// 从原始字节里解析状态码与第一个 `set-cookie`。拆成纯函数是为了能喂字节数组做单测
+/// （真开 socket 的集成测试见文件末尾的 `#[ignore]` 用例）。
+fn parse_http_reply(raw: &[u8]) -> Option<HttpReply> {
+    let text = String::from_utf8_lossy(raw);
+    let mut lines = text.split("\r\n");
+    let status_line = lines.next()?;
+    // "HTTP/1.1 303 See Other"
+    let mut parts = status_line.split_whitespace();
+    let version = parts.next()?;
+    if !version.starts_with("HTTP/") {
+        return None;
+    }
+    let status: u16 = parts.next()?.parse().ok()?;
+    // 状态码必须是三位：读超时留下的半截状态行（`HTTP/1.1 2`）能被 parse 成 2，
+    // 那样「读超时」就会被当成一个真实回包混进后续判断。
+    if !(100..1000).contains(&status) {
+        return None;
+    }
+    let mut set_cookie = None;
+    for line in lines {
+        if line.is_empty() {
+            break; // 头部结束
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("set-cookie") {
+            let pair = cookie_pair(value.trim());
+            if pair.is_some() {
+                set_cookie = pair;
+                break; // 只取第一个（DSH 只会设一个认证 cookie）
+            }
+        }
+    }
+    Some(HttpReply { status, set_cookie })
+}
+
+/// `dsh-auth-xxx=yyyy; Path=/; HttpOnly` → `dsh-auth-xxx=yyyy`
+fn cookie_pair(raw: &str) -> Option<String> {
+    let pair = raw.split(';').next()?.trim();
+    let (name, value) = pair.split_once('=')?;
+    if name.trim().is_empty() || value.trim().is_empty() {
+        return None;
+    }
+    Some(pair.to_string())
 }
 
 // ---------- Tauri Commands ----------
@@ -7348,6 +7820,252 @@ mod tests {
         assert_eq!(extract_local_url("http://127.0.0.1"), None);
         assert_eq!(extract_local_url("http://127.0.0.1:99999"), None);
         assert_eq!(extract_local_url("no url on this line at all"), None);
+    }
+
+    // ---------- S0 端点闸：表驱动 ----------
+    //
+    // 这张表守的是「拿哪一条地址去发请求」这个判断。宽松一分，模型回显的一条地址就能
+    // 把端点带到别的本机服务上去；严格一分，DSH 换一行 banner 就让优雅关闭永远不生效。
+    // 所以通过项与拒绝项必须一一列出来，改动这里的任何一条都要先想清楚它属于哪一种。
+
+    /// 43 字符 base64url（与 DSH 的 randomBytes(32) 同形）
+    const TOK43: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    #[test]
+    fn parses_the_real_banner_shapes() {
+        let ep = parse_listening_line(&format!("dsh web: http://127.0.0.1:3080/?token={TOK43}"))
+            .expect("标准 banner 必须通过");
+        assert_eq!(ep.host, "127.0.0.1");
+        assert_eq!(ep.port, 3080);
+        assert_eq!(ep.launch_token, TOK43);
+
+        let ep = parse_listening_line(&format!("http://localhost:3000/?token={TOK43}"))
+            .expect("localhost 必须通过（现有 extract_local_url 单测也认它）");
+        assert_eq!(ep.host, "localhost");
+        assert_eq!(ep.port, 3000);
+
+        // 没有斜杠的形态（`http://host:port?token=…`）会被 extract_local_url 判成
+        // 「端口不是数字」直接丢弃 —— 这不是本函数的规则，而是复用它的既有行为。
+        // 真 banner 恒带 `/`，所以这里只钉住「不 panic、如实拒绝」。
+        assert_eq!(
+            parse_listening_line(&format!("http://127.0.0.1:3080?token={TOK43}")).err(),
+            Some(EndpointError::NoCandidate)
+        );
+        // fragment 不参与判定
+        assert!(
+            parse_listening_line(&format!("http://127.0.0.1:3080/?token={TOK43}#/chat")).is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_bad_tokens() {
+        let short = &TOK43[..42];
+        let long = format!("{TOK43}A");
+        for (line, why) in [
+            (format!("http://127.0.0.1:3080/?token={short}"), "42 字符"),
+            (format!("http://127.0.0.1:3080/?token={long}"), "44 字符"),
+            (
+                format!("http://127.0.0.1:3080/?token={}", "A".repeat(42) + "%"),
+                "含 %",
+            ),
+            (
+                format!("http://127.0.0.1:3080/?token={}", "A".repeat(42) + "+"),
+                "含 +",
+            ),
+            (
+                format!("http://127.0.0.1:3080/?token={}", "A".repeat(42) + "="),
+                "含 =",
+            ),
+            ("http://127.0.0.1:3080/?token=".to_string(), "空 token"),
+        ] {
+            assert_eq!(
+                parse_listening_line(&line).err(),
+                Some(EndpointError::BadToken),
+                "应拒绝（{why}）：{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_bad_query_and_path() {
+        for (line, want, why) in [
+            (
+                format!("http://127.0.0.1:3080/?token={TOK43}&x=1"),
+                EndpointError::BadQuery,
+                "多一个参数",
+            ),
+            (
+                format!("http://127.0.0.1:3080/?tk={TOK43}"),
+                EndpointError::BadQuery,
+                "键名不是 token",
+            ),
+            (
+                format!("http://127.0.0.1:3080/?token={TOK43};a=1"),
+                EndpointError::BadQuery,
+                "分号分隔的第二段",
+            ),
+            ("http://127.0.0.1:3080".to_string(), EndpointError::BadQuery, "裸地址无 token"),
+            (
+                format!("http://127.0.0.1:3080/api?token={TOK43}"),
+                EndpointError::BadPath,
+                "path 不是 /",
+            ),
+        ] {
+            assert_eq!(parse_listening_line(&line).err(), Some(want), "应拒绝（{why}）：{line}");
+        }
+    }
+
+    #[test]
+    fn rejects_non_loopback_and_https() {
+        // 这些在 extract_local_url 那一步就没有候选了
+        for line in [
+            format!("https://127.0.0.1:3080/?token={TOK43}"),
+            format!("http://192.168.1.5:3080/?token={TOK43}"),
+            "no url on this line at all".to_string(),
+        ] {
+            assert_eq!(
+                parse_listening_line(&line).err(),
+                Some(EndpointError::NoCandidate),
+                "应拒绝：{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_two_valid_candidates_as_ambiguous() {
+        let line = format!(
+            "dsh web: http://127.0.0.1:3080/?token={TOK43} and also http://localhost:3081/?token={TOK43}"
+        );
+        assert_eq!(parse_listening_line(&line).err(), Some(EndpointError::Ambiguous));
+
+        // 一条合法 + 一条不带 token 的：只有前者过得了字段校验，不算歧义。
+        // （日志里回显一个健康检查地址是正常现象，不能因此废掉真 banner。）
+        let mixed = format!("dsh web: http://127.0.0.1:3080/?token={TOK43} probe http://127.0.0.1:3080/health");
+        let ep = parse_listening_line(&mixed).expect("一条合法候选就够");
+        assert_eq!(ep.port, 3080);
+    }
+
+    #[test]
+    fn trailing_backslash_falls_back_to_high1_truncation() {
+        // HIGH-1 的注入样本：`\` 必须在 extract_local_url 那一步截断，
+        // 截断后剩下的 `/?token=<43>` 仍是一个合法端点（这才是「退回截断结果」）。
+        let line = format!(r"dsh web: http://127.0.0.1:3080/?token={TOK43}\);eval(1)//");
+        let ep = parse_listening_line(&line).expect("截断后仍应解析成功");
+        assert_eq!(ep.port, 3080);
+        assert_eq!(ep.launch_token, TOK43);
+        assert!(!ep.launch_token.contains('\\'));
+        assert!(!ep.launch_token.contains(')'));
+
+        // 截断把 token 切残了（这里 `\` 落在 token 中间）→ 如实拒绝，不崩溃
+        let broken = format!(r"http://127.0.0.1:3080/?token={}\{}", &TOK43[..20], &TOK43[20..]);
+        assert_eq!(parse_listening_line(&broken).err(), Some(EndpointError::BadToken));
+    }
+
+    #[test]
+    fn skips_invalid_candidates_before_the_real_one() {
+        // 前面的候选（https、外网地址、无端口）都在 extract_local_url 里被跳过，
+        // 循环推进必须按**已匹配那一段**走，否则同一个候选会被重复计数成「歧义」。
+        let line = format!(
+            "see https://example.com and http://192.168.1.5:9 then http://127.0.0.1:3080/?token={TOK43}"
+        );
+        let ep = parse_listening_line(&line).expect("应跳过噪声找到真候选");
+        assert_eq!(ep.port, 3080);
+    }
+
+    // ---------- S3：HTTP 回包解析（纯函数，喂字节数组，不开 socket） ----------
+
+    #[test]
+    fn parses_303_with_set_cookie() {
+        let raw = b"HTTP/1.1 303 See Other\r\n\
+                    location: /\r\n\
+                    set-cookie: dsh-auth-abc123=XYZ-_9; Path=/; HttpOnly; SameSite=Lax\r\n\
+                    content-length: 0\r\n\r\n";
+        let reply = parse_http_reply(raw).expect("应解析成功");
+        assert_eq!(reply.status, 303);
+        assert_eq!(reply.set_cookie.as_deref(), Some("dsh-auth-abc123=XYZ-_9"));
+    }
+
+    #[test]
+    fn parses_404_without_body() {
+        // 今天的预期结果：/api/desktop/shutdown 还不存在。必须能读出 404 才谈得上
+        // 「立刻放弃优雅阶段」—— 读不出来就会白等到超时。
+        let reply = parse_http_reply(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")
+            .expect("404 也是合法回包");
+        assert_eq!(reply.status, 404);
+        assert_eq!(reply.set_cookie, None);
+    }
+
+    #[test]
+    fn rejects_garbage_and_short_reads() {
+        // 连接被拒 / 读到空字节：没有任何可解析的内容
+        assert_eq!(parse_http_reply(b""), None);
+        assert_eq!(parse_http_reply(b"not http at all\r\n\r\n"), None);
+        // 状态行只写了一半（读超时的典型现场）
+        assert_eq!(parse_http_reply(b"HTTP/1.1 2"), None);
+    }
+
+    #[test]
+    fn tolerates_headers_split_across_reads() {
+        // 分片到达时上层会先拼完再解析；这里证明拼完之后的形态是可解析的
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"HTTP/1.1 202 Accepted\r\nset-cookie: dsh-auth-z=1; Path=/");
+        raw.extend_from_slice(b"\r\n\r\n");
+        let reply = parse_http_reply(&raw).expect("应解析成功");
+        assert_eq!(reply.status, 202);
+        assert_eq!(reply.set_cookie.as_deref(), Some("dsh-auth-z=1"));
+    }
+
+    #[test]
+    fn cookie_pair_strips_attributes() {
+        assert_eq!(
+            cookie_pair("dsh-auth-x=abc; Path=/; Max-Age=2592000").as_deref(),
+            Some("dsh-auth-x=abc")
+        );
+        assert_eq!(cookie_pair("dsh-auth-x=abc").as_deref(), Some("dsh-auth-x=abc"));
+        assert_eq!(cookie_pair("novalue"), None);
+        assert_eq!(cookie_pair("=onlyvalue"), None);
+        assert_eq!(cookie_pair("name="), None);
+    }
+
+    /// 真开 socket 的集成测试：**本地手动跑**（`cargo test -- --ignored`）。
+    ///
+    /// 默认忽略的原因：它要绑一个本机端口并在测试线程里扮演 HTTP 服务端，
+    /// 在 CI / 沙箱里既可能被防火墙拦，也可能与同机其他进程抢端口 ——
+    /// 而上面那几个纯函数用例已经覆盖了「字节数组 → 状态码 + cookie」的全部逻辑。
+    #[test]
+    #[ignore = "本地手动跑：需要绑本机端口"]
+    fn http_once_reads_a_real_reply() {
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑本机端口");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let _ = sock.write_all(
+                    b"HTTP/1.1 303 See Other\r\nset-cookie: dsh-auth-t=tok; Path=/\r\n\r\n",
+                );
+            }
+        });
+
+        let ep = DshEndpoint {
+            host: "127.0.0.1".to_string(),
+            port,
+            launch_token: TOK43.to_string(),
+        };
+        // 超时给宽：这条用例跑在本机，慢的是测试线程的调度，不是被测逻辑。
+        // 生产路径的 800 ms 由 HTTP_TIMEOUT 决定，这里不重复验证它。
+        let reply = http_once(
+            &ep,
+            "GET",
+            &format!("/?token={TOK43}"),
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("应拿到回包");
+        assert_eq!(reply.status, 303);
+        assert_eq!(reply.set_cookie.as_deref(), Some("dsh-auth-t=tok"));
+        let _ = server.join();
     }
 
     // ---------- L-4：手写 SHA-256 的入库向量 ----------

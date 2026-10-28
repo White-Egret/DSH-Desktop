@@ -1297,3 +1297,38 @@ body.safe-mode #btn-safe {
   color: var(--text-dim);
   line-height: 1.6;
 }
+
+/* ---------- 退出确认弹窗（有长任务在跑时点 X / 托盘退出） ---------- */
+/* 与 .safe-modal-body 同一套间距：它也是「说明 + 清单 + 两枚按钮」的窄弹窗。
+   任务行只做两列（标题 / 计时），列表超高时自己滚，不把按钮挤出可视区。 */
+.exit-task-list {
+  margin: 12px 0 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-bg);
+}
+.exit-task-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.exit-task-row:last-child { border-bottom: none; }
+.exit-task-title {
+  font-weight: 600;
+  color: var(--text);
+}
+.exit-task-meta {
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.exit-task-empty {
+  padding: 14px 12px;
+  text-align: center;
+  color: var(--text-dim);
+}

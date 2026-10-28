@@ -18,6 +18,8 @@ let lastVersionCheckAt = 0;      // 上次版本检查完成时刻（自动检�
 let launchedByAutostart = false; // 本次进程是否由「开机自启」触发（决定静默+延迟策略）
 let statusMessage = null;        // 最近一次状态事件携带的附加消息（Rust 端已本地化）
 let lastErrorText = '';          // 最近一次错误文本（「复制错误信息」使用）
+// 上次退出时有任务被中断的提示文案；开机自启时窗口是隐藏的，攒到窗口首次显示再弹
+let pendingKilledNotice = null;
 // 最近一次环境检测结果（detect_environment 的返回）：向导、首选项的 Node 版本行共用。
 // 与 wiz.detection 的区别：这个在向导关闭后仍保留，首选项里打开设置时不需要重新检测。
 let lastEnvDetection = null;
@@ -188,7 +190,7 @@ window.addEventListener('keydown', (e) => {
 
 // ---------- 模态框（打开时隐藏内嵌 DSH webview，避免其盖住弹窗） ----------
 
-const MODALS = ['settings-modal', 'manage-modal', 'log-modal', 'update-modal', 'safe-modal', 'safe-verify-modal', 'uninstall-modal', 'uninstall-pnpm-modal'];
+const MODALS = ['settings-modal', 'manage-modal', 'log-modal', 'update-modal', 'safe-modal', 'safe-verify-modal', 'uninstall-modal', 'uninstall-pnpm-modal', 'exit-confirm-modal'];
 
 function anyModalOpen() {
   return MODALS.some((m) => !$(m).classList.contains('hidden'));
@@ -1385,6 +1387,55 @@ async function toggleToolbarMode() {
   }
 }
 
+// ---------- 退出确认弹窗（有长任务在跑时点 X / 托盘退出） ----------
+
+let exitListTimer = null;
+
+/// 把毫秒时长渲染成「已运行 N 秒 / N 分 M 秒」
+function fmtElapsed(startedAtMs) {
+  const s = Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
+  return s < 60 ? t('exit_elapsed_sec', s) : t('exit_elapsed_min', Math.floor(s / 60), s % 60);
+}
+
+/// 一行任务：标题按 kind 取文案（**不用**后端传来的 title），这样弹窗开着时切语言也跟着变。
+/// 动态文本一律 textContent —— title 来自 DSH/配置，属不可信数据，拼 innerHTML 就是注入面。
+function renderExitTaskRow(task) {
+  const row = document.createElement('div');
+  row.className = 'exit-task-row';
+  const title = document.createElement('span');
+  title.className = 'exit-task-title';
+  title.textContent = t('exit_task_kind_' + task.kind);
+  const meta = document.createElement('span');
+  meta.className = 'exit-task-meta';
+  meta.textContent = fmtElapsed(task.started_at_ms);
+  row.append(title, meta);
+  return row;
+}
+
+/// 重新拉一次任务列表并渲染。列表为空 = 任务刚好都跑完了，主按钮降级成「退出」。
+async function renderExitTasks() {
+  const tasks = await invoke('get_active_tasks').catch(() => []);
+  const box = $('exit-task-list');
+  if (!box) return;
+  box.textContent = '';
+  for (const task of tasks) box.append(renderExitTaskRow(task));
+  const forceBtn = $('btn-exit-force');
+  if (!tasks.length) {
+    const empty = document.createElement('div');
+    empty.className = 'exit-task-empty';
+    empty.textContent = t('exit_all_done');
+    box.append(empty);
+    forceBtn.textContent = t('exit_btn_quit_now');
+  } else {
+    forceBtn.textContent = t('exit_btn_force');
+  }
+}
+
+function stopExitListTimer() {
+  if (exitListTimer) clearInterval(exitListTimer);
+  exitListTimer = null;
+}
+
 // ---------- 事件监听 + 初始化 ----------
 
 async function init() {
@@ -1405,6 +1456,21 @@ async function init() {
   // 安全模式：进入/退出/闪退（safe-mode-change）与修复验证结果（safe-verify）
   await listen('safe-mode-change', (e) => onSafeModeChange(e.payload));
   await listen('safe-verify', (e) => onSafeVerify(e.payload));
+  // 退出闸：后端拦下退出后弹这个框；用户点完按钮再由后端回发 hide。
+  // 渲染完必须立刻回一条 ack —— 那是两段式握手的第一段，后端拿它区分
+  // 「前端活着、用户还在犹豫」与「前端已经死了，该弹原生降级框」。
+  // 收到第二次 show（用户又点了一次退出）会重走本监听器，重新 ack 一次，语义幂等。
+  await listen('exit-confirm-show', () => {
+    showModal('exit-confirm-modal');
+    renderExitTasks();
+    stopExitListTimer();
+    exitListTimer = setInterval(renderExitTasks, 1000);
+    invoke('exit_decision', { decision: 'ack' }).catch(() => {});
+  });
+  await listen('exit-confirm-hide', () => {
+    stopExitListTimer();
+    hideModal('exit-confirm-modal');
+  });
 
   await refreshConfig();
   // 应用外观（浅色/深色/跟随系统；theme-boot.js 已按缓存预设过，这里以配置为准纠正）
@@ -1431,12 +1497,29 @@ async function init() {
 
   bindUI();
 
+  // 上次退出时有任务被中断：报告一次（消费即清，后端读到就删文件，不会重复报）。
+  // 开机自启时窗口是隐藏的，toast 弹在看不见的地方等于没报 —— 记下待显示，
+  // 等窗口第一次真正显示（下面的 visibilitychange）再弹。
+  try {
+    const lastKill = await invoke('get_last_session_killed');
+    if (lastKill && lastKill.tasks && lastKill.tasks.length) {
+      const msg = t('notify_killed_body', lastKill.tasks.length);
+      if (document.hidden) pendingKilledNotice = msg;
+      else toast(msg, true);
+    }
+  } catch (_) { /* 读不到就当没有记录，不影响启动 */ }
+
   // 从托盘恢复窗口时刷新状态，并确保内嵌 DSH Webview 重新显示
   // （WebView2 在 hide→show 后偶发白屏，这里再触发一次重绘兜底）
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
       syncWebviewVisibility();
       invoke('get_status').then(onStatus).catch(() => {});
+      // 开机自启时窗口是隐藏的，上次被中断的任务提示得等到这一刻才有人看得见
+      if (pendingKilledNotice) {
+        toast(pendingKilledNotice, true);
+        pendingKilledNotice = null;
+      }
       // 窗口从托盘恢复：悬停状态可能在隐藏期间失真（mouseleave 收不到），
       // 这里重置一次并按正常规则重新计时，免得工具栏卡在"以为鼠标还在上面"
       toolbarHovered = false;
@@ -3621,6 +3704,11 @@ function bindUI() {
     const ok = await copyText(text);
     toast(ok ? t('toast_copied_log') : t('toast_copy_fail'), !ok);
   };
+
+  // 退出确认弹窗：只投递选择，后端用 mpsc 通道接收（命令本身无锁等待、无 IO）。
+  // 「继续后台运行」→ 取消本次退出、藏托盘；「强制退出」→ 杀进程树后退出。
+  $('btn-exit-keep').onclick = () => invoke('exit_decision', { decision: 'keep' }).catch(() => {});
+  $('btn-exit-force').onclick = () => invoke('exit_decision', { decision: 'force' }).catch(() => {});
 
   // 设置页：自动检测 Node/npm/DSH 路径并回填输入框
   $('btn-autodetect').onclick = async () => {

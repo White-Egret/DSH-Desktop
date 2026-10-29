@@ -281,7 +281,6 @@
     btn_manage_dsh: '安装 DSH…',
     // 「安装/卸载」弹窗（工具栏同名按钮打开）
     manage_title: '安装/卸载',
-    note_manage_moved: 'Python 环境、「Node.js，pnpm与DSH」与「包源 registry」已移到工具栏的「安装/卸载」里。',
     uninstall_hint: '从 npm 全局目录里卸载 DSH。卸载只会删除那个全局包：DSH 家目录（会话与配置）、本程序自身、以及 DSH 的插件都不会被删除。',
     btn_uninstall_dsh: '卸载 DSH…',
     uninstall_title: '卸载 DSH',
@@ -754,7 +753,6 @@
     btn_manage_dsh: 'Install DSH…',
     // "(Un)install" modal (opened from the toolbar button)
     manage_title: 'Install / Uninstall',
-    note_manage_moved: 'The Python environment, "Node.js, pnpm & DSH" and "Package sources (registry)" moved to "(Un)install" on the toolbar.',
     uninstall_hint: "Removes DSH from npm's global directory. Only that global package goes away: your DSH home dir (sessions and settings), this app itself and your DSH plugins are left alone.",
     btn_uninstall_dsh: 'Uninstall DSH…',
     uninstall_title: 'Uninstall DSH',

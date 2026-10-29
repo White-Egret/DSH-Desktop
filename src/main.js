@@ -1667,8 +1667,13 @@ function applyLanguage(lang) {
   // 搬家警告的显隐按「这一格有没有被改过」判（与语言无关），但正文是 data-i18n-html，
   // 切语言后仍要重判一次：此刻 config 已是新语言的值，未改过的一格不该被误判成改过
   if (!$('settings-modal').classList.contains('hidden')) refreshHomeMoveWarn();
-  // 包源 registry 那行由后端按语言拼好，切语言后同样要重绘
-  if (!$('manage-modal').classList.contains('hidden')) refreshRegistryInfo();
+  // 包源 registry 那行由后端按语言拼好，切语言后同样要重绘；
+  // npm 缓存 / npm 全局目录两行也是问后端拼的文案，一并按新语言重问一次
+  if (!$('manage-modal').classList.contains('hidden')) {
+    refreshRegistryInfo();
+    refreshNpmCacheInfo();
+    refreshNpmPathInfo();
+  }
 }
 
 // ---------- 设置 ----------
@@ -1677,7 +1682,6 @@ function openSettings() {
   if (!config) return;
   // npm / dsh 的程序路径不再有输入框（用户不该改动它们，见 index.html 的说明）：
   // 保存时原样带回内存里那份（后端加载时已自动检测/回填），不做任何界面读写。
-  $('set-npm-cache').value = config.npm_cache_dir || '';
   $('set-home-dir').value = config.dsh_home_dir;
   $('set-port').value = config.port;
   $('set-timeout').value = config.health_timeout_secs;
@@ -1702,18 +1706,16 @@ function openSettings() {
   // 用户环境变量 DSH_HOME 那行小字（新终端会拿到的持久值）：勾选框已经改成自动规则，
   // 这里只剩「每次打开设置页读一次注册表现值」
   refreshHomeEnvInfo();
-  refreshNpmCacheInfo();
-  // npm 全局目录 / 用户 PATH：每次打开重问一次（用户可能刚在外部改了 .npmrc 的 prefix）
-  refreshNpmPathInfo();
-  // 包源 registry 与「Node.js，pnpm与DSH（卸载 DSH）」两块已搬到「安装/卸载」弹窗
-  // （openManage），不在这里刷新 —— 它们已经不在这个面板上了。
+  // 「npm 缓存位置」「npm 全局目录 / 用户 PATH」与「包源 registry」、「Node.js，pnpm与DSH
+  // （卸载 DSH）」四块都在「安装/卸载」弹窗里（openManage），不在这里刷新 ——
+  // 它们已不在这个面板上。
   showModal('settings-modal');
 }
 
 /// 打开「安装/卸载」弹窗（工具栏「安装/卸载」按钮，英文版显示 "(Un)install"）。
 ///
 /// 内容 = 原来首选项里的「Python 环境」块 + 「Node.js，pnpm与DSH（卸载 DSH）」块
-/// + 「包源 registry」块（装到哪、源指哪，都属「本机环境」一类操作）。
+/// + 「npm 缓存位置」块 + 「npm 全局目录 / 用户 PATH」块 + 「包源 registry」块。
 /// 搬出来是因为它们都是低频、重量级、部分带破坏性的操作，混在设置表单里
 /// 既挤占版面又容易误点；而首选项该只管**程序自身的配置**。
 ///
@@ -1731,6 +1733,12 @@ function openManage() {
   refreshToolchainBlock();
   // 卸载确认框里那条命令要跟着当前 DSH 实际所在目录走
   refreshUninstallCmd();
+  // npm 缓存位置：把已保存的值填进输入框，并重问一次「实际生效的缓存目录」
+  // （用户可能刚在外部改了 ~/.npmrc 的 cache=）
+  if (config) $('set-npm-cache').value = config.npm_cache_dir || '';
+  refreshNpmCacheInfo();
+  // npm 全局目录 / 用户 PATH：每次打开重问一次（用户可能刚在外部改了 .npmrc 的 prefix）
+  refreshNpmPathInfo();
   // 包源 registry 那行状态（+ 两个按钮的可见性）：读是零风险的，每次打开都重问一次
   //（npm / pnpm 的源可能刚在外部被改过 —— 与 npm-path 行同一套「打开即读」的分工）
   refreshRegistryInfo();
@@ -1962,7 +1970,7 @@ function onManageInstallResult(p) {
   refreshRegistryInfo();
 }
 
-/// 首选项里「npm 缓存位置」那行小字：同时显示「npm 配置里的值」与「实际生效的值」。
+/// 「安装/卸载」里「npm 缓存位置」那行小字：同时显示「npm 配置里的值」与「实际生效的值」。
 /// 两者不同（被环境变量或项目级 .npmrc 覆盖）时必须都显示 —— 只显示一个，用户会以为
 /// 自己填的位置没生效，然后去改一个本来就对的值。
 async function refreshNpmCacheInfo() {
@@ -1980,8 +1988,41 @@ async function refreshNpmCacheInfo() {
       el.textContent = t('cache_eff_set', user);
     }
   } catch (e) {
-    // 问不到（npm 缺失等）就不显示这行：它是提示，不该挡住设置页
+    // 问不到（npm 缺失等）就不显示这行：它是提示，不该挡住面板
     el.textContent = '';
+  }
+}
+
+/// 「安装/卸载」里「npm 缓存位置」那一格的保存按钮。
+///
+/// 为什么单独一个动作、而不是并进首选项的 saveSettings：这一格已经不在首选项上了，
+/// 而「安装/卸载」弹窗里其余控件都是**即时生效**的（装/卸按钮点了就跑），没有全局保存。
+/// 所以给这一格一颗自己的「保存」，只动它该动的两处：config.json 的 `npm_cache_dir`
+/// 与 npm 自己的 `~/.npmrc`（后者才是让终端里的 npm 也认这个位置的关键）。
+///
+/// 顺序：先 `save_config`（会做路径校验，非法值在这里就被拦下、一个字节都不动），
+/// 成功后再 `apply_npm_cache` 写 npm 配置 —— 两步分开报结果，失败原因不会被对方吞掉。
+async function saveNpmCache() {
+  const input = $('set-npm-cache');
+  if (!input || !config) return;
+  const dir = input.value.trim();
+  // 用当前内存里的完整配置拼一份新配置：只换 npm_cache_dir 一个键，
+  // 其余字段原样带回（与 saveSettings 同一纪律 —— 漏字段会把用户的设置抹掉）。
+  const cfg = Object.assign({}, config, { npm_cache_dir: dir });
+  try {
+    config = await invoke('save_config', { config: cfg });
+  } catch (e) {
+    toast(String(e), true);
+    return;
+  }
+  try {
+    const msg = await invoke('apply_npm_cache', { dir: dir || null });
+    appendLog('launcher', '[launcher] ' + msg);
+    toast(msg);
+    refreshNpmCacheInfo();
+  } catch (e) {
+    toast(t('toast_npm_cache_fail', e), true);
+    appendLog('launcher', t('toast_npm_cache_fail', e));
   }
 }
 
@@ -2434,8 +2475,10 @@ async function saveSettings() {
     // 既不清空也不重新检测 —— 后端保存时只做校验，用户手改过的有效值不会被覆盖。
     // 万一内存里是空的（新装机器还没检测到 npm / DSH），后端会先自动检测再保存。
     npm_path: (config && config.npm_path) || '',
-    // npm 缓存位置（空 = 删除 npm 配置里的 cache 行，回到 npm 默认位置）
-    npm_cache_dir: $('set-npm-cache').value.trim(),
+    // npm 缓存位置不在这个面板上了（已搬到「安装/卸载」，由 saveNpmCache 单独保存）：
+    // 原样带回内存里那份，否则点一次「保存」就会把用户设过的缓存位置抹成空串 ——
+    // 那等于静默删掉 ~/.npmrc 里的 cache 行。
+    npm_cache_dir: (config && config.npm_cache_dir) || '',
     dsh_path: (config && config.dsh_path) || '',
     dsh_home_dir: newHome,
     port,
@@ -2501,18 +2544,8 @@ async function saveSettings() {
     $('set-config-path').textContent = config.config_path;
     $('port-val').textContent = config.port;
     toast(t('toast_saved'));
-    // 「npm 缓存位置」还要落到 npm **自己**的配置里（这样终端里的 npm 也跟着用），
-    // 这一步单独做、单独报结果：放在保存**之后**，是因为保存若被校验拦下就一个字节
-    // 都不该动；而这一步失败也只是「本程序记住了、npm 那边没改」，如实说明即可。
-    try {
-      const cacheMsg = await invoke('apply_npm_cache', { dir: cfg.npm_cache_dir || null });
-      appendLog('launcher', '[launcher] ' + cacheMsg);
-      toast(cacheMsg);
-      refreshNpmCacheInfo();
-    } catch (e) {
-      toast(t('toast_npm_cache_fail', e), true);
-      appendLog('launcher', t('toast_npm_cache_fail', e));
-    }
+    // 「npm 缓存位置」已搬到「安装/卸载」弹窗（见 saveNpmCache），这里不再顺带落
+    // npm 自己的配置 —— 那个面板上已经没有这一格了。
     // 用户环境变量 DSH_HOME 与 npm 缓存同款：保存之后单独做、单独报结果 —— 但它已经
     // **没有开关**：后端按「家目录是不是默认值」自动决定写还是删（is_default_home_dir）。
     // 影响面只有**用户另外打开的终端** —— 本程序启动 DSH（日常与安全模式）时都会显式
@@ -3778,7 +3811,10 @@ function bindUI() {
     }
   };
 
-  // ---- 首选项：把 npm 全局目录加进用户 PATH（终端里才能直接敲 dsh）----
+  // 「npm 缓存位置」那一格的保存（本弹窗其余控件都是即时生效的，只有它是输入框）
+  $('btn-save-npm-cache').onclick = () => saveNpmCache();
+
+  // ---- 「安装/卸载」：把 npm 全局目录加进用户 PATH（终端里才能直接敲 dsh）----
   // 与其它「点按钮才写」的入口同款：成功进日志 + toast，随后重问一次状态行
   // —— 按钮该不该继续显示，以刚发生的事实为准（加完之后它就该消失了）。
   $('btn-npm-path-add').onclick = async () => {

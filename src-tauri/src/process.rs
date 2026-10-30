@@ -745,9 +745,17 @@ pub(crate) fn current_endpoint(app: &AppHandle) -> Option<Arc<DshEndpoint>> {
     }
 }
 
-/// 从一条 DSH 输出行里尝试闩锁端点。解析失败按「每个 DSH 代次最多一条」节流记日志：
-/// 这条路径跑在日志读取线程上、每行都会走，不节流的话一条异常的启动输出就能刷满日志面板。
+/// 从一条 DSH 输出行里尝试闩锁端点。
+///
+/// 只有行里**确实含 `http://`** 才当成「地址行候选」：DSH 的 stdout 里绝大多数行
+/// （模型列表、插件日志、工具输出）本来就没有 URL，对它们报「忽略一条地址行」是假警报 ——
+/// 每个 DSH 代次固定刷一条，反而把真正「有地址行但校验失败」那一条淹没。
+/// 解析失败按「每个 DSH 代次最多一条」节流：这条路径跑在日志读取线程上、每行都会走。
 fn latch_endpoint_from_line(app: &AppHandle, line: &str) {
+    // 先做最便宜的筛选，再碰 AppState 的锁
+    if !line.contains("http://") {
+        return;
+    }
     let state = app.state::<AppState>();
     let Some(pid) = *state.pid.lock().unwrap() else {
         return; // 安全模式实例（3081）不是我们的端点，静默跳过
@@ -2251,6 +2259,12 @@ pub(crate) fn shutdown_dsh_tree(app: &AppHandle, graceful_wait: Duration) {
         let _ = c.wait();
     }
     state.close_jobs(); // 关 Job 句柄（KILL_ON_JOB_CLOSE 二次保险）
+    // 「更新 DSH」的 npm 跑在**另一个** Job 里（update_job）。强制退出时它可能还在下载：
+    // 不在这里关掉，就只剩「壳进程退出 → 内核关句柄」这一条兜底 —— 而那条路在
+    // create_kill_on_close_job 失败（OpenProcess 被拒 / Job 配额限制）时根本不成立，
+    // 于是 npm 会变成孤儿继续覆盖 DSH 的安装目录，而重启后的 DSH 正在用那个目录。
+    // 真机取证（2026-10-29）：更新下载中点 X 强制退出，日志里没有任何 npm 被终止的记录。
+    state.close_update_job();
     crate::safe::cleanup_safe_sync(app); // 安全模式实例同样要清（纯进程操作，线程安全）
 }
 
@@ -4095,10 +4109,19 @@ pub async fn setup_install_pnpm(app: AppHandle) -> Result<(), String> {
 /// CreateProcess，所以既不需要引号也不该加引号（加了 pip 会去找一个名字里带
 /// 引号的包）。现在不再有 extras 语法，这条约束自然消失。
 /// 同理它要求 Python ≥ 3.10，见 detect.rs。
-const PY_BASIC_PKGS: [&str; 12] = [
+///
+/// **`pypdf` 为什么进基本安装**（2026-10-24 决策，见 plans/doc-route-oxr-plan.md §13）：
+/// 三路路由的云端引擎单次上限是 20 页 / 10MB，超过要按 20 页切片（最多 3 片 = 60 页），
+/// 而切片与「扫描件 PDF 抽页内图给视觉模型」都需要它。纯 Python、无 C 扩展、约 300KB，
+/// 与 pdfminer / pdfplumber / mammoth 同类（都是「某种格式的后端」）。
+/// 不进扩展包：`PY_EXTRA_PKGS` 是**数据分析扩展包**，且有一条测试把它钉死在 4 项。
+/// 代码仍要能在**没装**时优雅退化（旧版基本安装里没有它）：>20 页时给出
+/// 「请点一次基本安装」的可操作提示，抽不出页内图时回落云端版面模型。
+const PY_BASIC_PKGS: [&str; 13] = [
     "markitdown",
     "pdfminer-six",
     "pdfplumber",
+    "pypdf",
     "mammoth",
     "olefile",
     "python-docx",
@@ -4154,7 +4177,12 @@ const PY_EXTRA_PKGS: [&str; 4] = ["numpy", "pandas", "python-dateutil", "tzdata"
 ///
 /// `typing_extensions` 已从清单移除（纯传递依赖，见 PY_BASIC_PKGS 的说明），
 /// 这里同步去掉，否则状态行会永远报它缺失。
-const PY_BASIC_MODULES: &str = "markitdown dsh_bridge docx pptx openpyxl xlsxwriter lxml PIL et_xmlfile pdfminer pdfplumber mammoth olefile";
+///
+/// `pypdf`（2026-10-30 三路路由）：切片与抽页内图的可选依赖。**必须在这里可见** ——
+/// 它缺席时工具不报错、只是 >20 页的 PDF 会给出「请点一次基本安装」的提示，
+/// 状态行不查它就等于让用户永远看不到该点哪颗按钮。`requests` 同样只进这一串
+/// （它是 markitdown 的传递依赖，进 PY_BASIC_PKGS 只会让 pip 多打一行）。
+const PY_BASIC_MODULES: &str = "markitdown dsh_bridge docx pptx openpyxl xlsxwriter lxml PIL et_xmlfile pdfminer pdfplumber mammoth olefile pypdf requests";
 const PY_EXTRA_MODULES: &str = "numpy pandas dateutil tzdata";
 
 /// 基本安装实际要装的那一组包（办公库 + 桥接运行时），供 pip 与文案共用。
@@ -7929,6 +7957,29 @@ mod tests {
                 "应拒绝：{line}"
             );
         }
+    }
+
+    /// 真机现场（2026-10-29 desktop.log）：DSH 每次启动后都会打印一行
+    /// `[llm-deepseek-account] model listing from https://api.deepseek.com/models loaded 2 model(s)`
+    /// 而 `latch_endpoint_from_line` 每行都会走 —— 这行既没有 `http://` 也没有 loopback，
+    /// 之前会被当成「被拒绝的地址行」记一条假警报，每个 DSH 代次一条，把真正的
+    /// 「有地址行但校验失败」淹没。
+    ///
+    /// 这个用例钉住两件事：①这行确实解析不出端点（NoCandidate）；②它不含 `http://`，
+    /// 因此会被 `latch_endpoint_from_line` 的便宜筛选挡在门外，不会产生任何日志。
+    #[test]
+    fn real_world_noise_line_is_not_an_address_line() {
+        let noise = "[2026-10-29T07:59:44.241Z] [llm-deepseek-account] model listing from https://api.deepseek.com/models loaded 2 model(s), skipped 0 row(s)";
+        assert_eq!(parse_listening_line(noise).err(), Some(EndpointError::NoCandidate));
+        assert!(
+            !noise.contains("http://"),
+            "这行不该含 http:// —— 正是靠这一点把它与真地址行区分开"
+        );
+
+        // 对照：真 banner 含 http://，必须通过筛选继续解析
+        let banner = format!("dsh web: http://127.0.0.1:3080/?token={TOK43}");
+        assert!(banner.contains("http://"));
+        assert!(parse_listening_line(&banner).is_ok());
     }
 
     #[test]

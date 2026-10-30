@@ -87,6 +87,22 @@ const BRIDGE_FILES: &[(&str, &str)] = &[
         "env_tools.py",
         include_str!("../resources/py-bridge/env_tools.py"),
     ),
+    // 三路路由的模块（2026-10-30）：doc_route 是编排 + 纯判据，oxr_client 是云端传输。
+    // 它们**不注册工具**（bridge_entry 不 import 它们），由 markitdown_tools 惰性 import ——
+    // 但**必须**进这张表：少一条 include_str! 就是桥接进程 import 阶段直接崩，
+    // 整组工具（含 Excel/Word）一起消失。
+    //
+    // 第三条路是 **Agent 自己看**（渲染页面图 → read_image），不是外部视觉模型：
+    // 曾经的 vlm_client.py 已删除 —— Agent 有视觉能力时，再配一个付费多模态 API
+    // 属于「假设自己没有眼睛」，见 plans/doc-route-oxr-plan.md 的修订记录。
+    (
+        "doc_route.py",
+        include_str!("../resources/py-bridge/doc_route.py"),
+    ),
+    (
+        "oxr_client.py",
+        include_str!("../resources/py-bridge/oxr_client.py"),
+    ),
 ];
 
 /// 释放进 bundle\ 的文件
@@ -1218,7 +1234,7 @@ mod tests {
     #[test]
     fn every_generated_file_is_compiled_in_and_non_empty() {
         // 少写一个 include_str 都不会编译不过，但内容空/名错会让 Python 侧 ModuleNotFoundError
-        assert_eq!(BRIDGE_FILES.len(), 8, "py-bridge 下应有 8 个文件");
+        assert_eq!(BRIDGE_FILES.len(), 10, "py-bridge 下应有 10 个文件");
         for (name, body) in BRIDGE_FILES.iter().chain(BUNDLE_FILES.iter()) {
             assert!(!body.trim().is_empty(), "{name} 内容为空");
             assert!(body.len() > 200, "{name}  suspiciously short");
@@ -1228,6 +1244,10 @@ mod tests {
         assert!(names.contains(&"utils.py"));
         assert!(names.contains(&"sandbox_tools.py"));
         assert!(names.contains(&"markitdown_tools.py"));
+        // 三路路由的两个模块：markitdown_tools 会 import 它们，少一个就是 ImportError。
+        // 第三路（页面图给 Agent 自己看）不需要额外模块 —— 它由 doc_route 自己渲染。
+        assert!(names.contains(&"doc_route.py"));
+        assert!(names.contains(&"oxr_client.py"));
     }
 
     #[test]

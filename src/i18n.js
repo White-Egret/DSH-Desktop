@@ -144,7 +144,7 @@
     py_uninstall_body_extra:
       '将卸载本机 Python 里的数据分析库（numpy / pandas 等）。AI 调用能力桥接与 12 个工具**不受影响**，仍然可用。',
     py_uninstall_cmd_basic:
-      'dsh plugin --profile web remove @local/dsh-desktop-python-bridge\npython -m pip uninstall -y markitdown pdfminer-six pdfplumber mammoth olefile python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile dsh-python-bridge',
+      'dsh plugin --profile web remove @local/dsh-desktop-python-bridge\npython -m pip uninstall -y markitdown pdfminer-six pdfplumber pypdf mammoth olefile python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile dsh-python-bridge',
     py_uninstall_cmd_extra:
       'python -m pip uninstall -y numpy pandas python-dateutil tzdata',
     py_uninstall_keeps_basic:
@@ -158,7 +158,7 @@
     btn_py_uninstall_extra_first: '先卸载扩展包，再卸办公包',
     py_uninstall_progress_basic: '正在卸载办公包与能力桥接…',
     py_uninstall_progress_extra: '正在卸载数据分析扩展包…',
-    py_packages_html: '基本安装：先安装最新稳定版 Python（系统已装 ≥ 3.10 则跳过本体），再安装 markitdown / pdfminer-six / pdfplumber / mammoth / olefile / python-docx / python-pptx / openpyxl / XlsxWriter / lxml / Pillow / et_xmlfile，以及把这些库挂成 AI 工具的桥接运行时 dsh-python-bridge；需要数据分析的，可在基本安装完成后再点「数据分析扩展包」安装 numpy / pandas / python-dateutil / tzdata。',
+    py_packages_html: '基本安装：先安装最新稳定版 Python（系统已装 ≥ 3.10 则跳过本体），再安装 markitdown / pdfminer-six / pdfplumber / pypdf / mammoth / olefile / python-docx / python-pptx / openpyxl / XlsxWriter / lxml / Pillow / et_xmlfile，以及把这些库挂成 AI 工具的桥接运行时 dsh-python-bridge；需要数据分析的，可在基本安装完成后再点「数据分析扩展包」安装 numpy / pandas / python-dateutil / tzdata。',
     py_busy: 'Python 安装任务正在进行，请等待完成…',
     py_progress_start: '正在准备 Python 安装…',
     toast_py_ok: 'Python 安装任务已完成',
@@ -619,7 +619,7 @@
     py_uninstall_body_extra:
       'Removes the data-analysis libraries (numpy / pandas …) from this machine\'s Python. The AI capability bridge and its 12 tools are **not** affected and stay usable.',
     py_uninstall_cmd_basic:
-      'dsh plugin --profile web remove @local/dsh-desktop-python-bridge\npython -m pip uninstall -y markitdown pdfminer-six pdfplumber mammoth olefile python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile dsh-python-bridge',
+      'dsh plugin --profile web remove @local/dsh-desktop-python-bridge\npython -m pip uninstall -y markitdown pdfminer-six pdfplumber pypdf mammoth olefile python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile dsh-python-bridge',
     py_uninstall_cmd_extra:
       'python -m pip uninstall -y numpy pandas python-dateutil tzdata',
     py_uninstall_keeps_basic:
@@ -633,7 +633,7 @@
     btn_py_uninstall_extra_first: 'Uninstall extras first, then office packages',
     py_uninstall_progress_basic: 'Removing the office packages and the capability bridge…',
     py_uninstall_progress_extra: 'Removing the data-analysis extras…',
-    py_packages_html: 'Basic install: installs the latest stable Python first (skipped when one of ≥ 3.10 is already present), then markitdown / pdfminer-six / pdfplumber / mammoth / olefile / python-docx / python-pptx / openpyxl / XlsxWriter / lxml / Pillow / et_xmlfile, plus dsh-python-bridge — the bridge runtime that exposes those libraries as AI tools. For data analysis, click “Data-analysis extras” afterwards to add numpy / pandas / python-dateutil / tzdata.',
+    py_packages_html: 'Basic install: installs the latest stable Python first (skipped when one of ≥ 3.10 is already present), then markitdown / pdfminer-six / pdfplumber / pypdf / mammoth / olefile / python-docx / python-pptx / openpyxl / XlsxWriter / lxml / Pillow / et_xmlfile, plus dsh-python-bridge — the bridge runtime that exposes those libraries as AI tools. For data analysis, click “Data-analysis extras” afterwards to add numpy / pandas / python-dateutil / tzdata.',
     py_busy: 'A Python install task is already running; please wait for it to finish…',
     py_progress_start: 'Preparing the Python install…',
     toast_py_ok: 'The Python install task finished',

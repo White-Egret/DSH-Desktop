@@ -63,6 +63,9 @@ enum Decision {
 pub struct ExitGuardState {
     pending: StdMutex<Option<mpsc::Sender<Decision>>>,
     reclick: AtomicBool,
+    /// 会话探针的日志节流：每代次只记一条「检测到 N 个会话」或「探针不可用」。
+    /// 弹窗 1 Hz 刷新，不节流的话一条日志能刷满整个面板。
+    session_logged: AtomicBool,
 }
 
 impl ExitGuardState {
@@ -70,7 +73,13 @@ impl ExitGuardState {
         Self {
             pending: StdMutex::new(None),
             reclick: AtomicBool::new(false),
+            session_logged: AtomicBool::new(false),
         }
+    }
+
+    /// DSH 重新启动时复位节流（与端点闩锁的复位点相同，见 `process::start_internal`）。
+    pub(crate) fn reset_session_log(&self) {
+        self.session_logged.store(false, Ordering::SeqCst);
     }
 }
 
@@ -87,6 +96,9 @@ pub fn request_exit(app: &AppHandle, source: ExitSource) {
     let registry = app.state::<TaskRegistry>();
     // 先对账：`updating` / `setup_busy` 是「有没有在跑」的权威，快照必须反映此刻
     registry.sync_shell_flags(app);
+    // 再刷新会话切片。**顺序不能反**：必须排在取 snapshot() 之前，否则
+    // 「明明有会话在跑却静默退出」—— 这正是 S2′ 要消灭的那个行为。
+    refresh_session_slice(app);
 
     if !registry.try_begin_intercept() {
         // 已在弹窗 / 已在退出：不开第二个流程，但记下「又点了一次」。
@@ -401,7 +413,77 @@ pub fn persist_exit_state_fallback(app: &AppHandle) {
 pub fn get_active_tasks(app: AppHandle) -> Vec<TaskSnapshot> {
     let registry = app.state::<TaskRegistry>();
     registry.sync_shell_flags(&app);
+    // 弹窗每秒刷新靠的就是这一句：任务跑完 → 探针判 Idle → 切片清空 → 行消失
+    refresh_session_slice(&app);
     registry.snapshot()
+}
+
+/// 刷新 DSH 会话切片（S2′）。`request_exit` 与 `get_active_tasks` 两个入口都调它。
+///
+/// 只在 DSH 真正在跑时探：`running-external` 不是我们的进程树，安全模式是 3081 的
+/// 独立 home（`current_status` 不是 `running` 时直接短路，两条都被挡在门外）。
+///
+/// 失败语义按设计文档 §15.4：**探针不可用时不造任务、不清切片**（保留上一轮的 stale
+/// 结果）—— 宁可多拦一次，也不让已知在跑的任务从清单里静默消失被腰斩。
+fn refresh_session_slice(app: &AppHandle) {
+    let registry = app.state::<TaskRegistry>();
+    if crate::process::current_status(app) != "running" {
+        // 权威：DSH 不在了 → 它那些会话当然也都不在了
+        registry.sync_session_slice(&[]);
+        return;
+    }
+    let (Some(home), Some(spawned_at)) = (
+        crate::process::validated_dsh_home(app),
+        crate::process::dsh_started_at(app),
+    ) else {
+        return; // 拿不到基线就什么都不动（保留上一轮切片）
+    };
+    match crate::session_probe::probe(
+        &home,
+        spawned_at,
+        std::time::SystemTime::now(),
+        crate::session_probe::SESSION_ACTIVE_WINDOW,
+    ) {
+        crate::session_probe::ProbeOutcome::Active(items) => {
+            registry.sync_session_slice(&items);
+            // 每个 DSH 代次只记一条：这条是手工验收的唯一依据，但 1 Hz 刷新会让它刷屏，
+            // 所以按代次节流。
+            //
+            // 参数是「N 个会话（工作目录末段 + 命中信号）」而不是光一个 N：排障时要能回答
+            // 「凭什么判它活跃」。只写个数字，遇到误判（缓存格式一变就可能）就无从下手。
+            let state = app.state::<ExitGuardState>();
+            if !state.session_logged.swap(true, Ordering::SeqCst) {
+                let detail = items
+                    .iter()
+                    .map(|it| {
+                        let sig: Vec<&str> = it.signals.iter().map(|s| s.as_str()).collect();
+                        format!(
+                            "{} [{}]",
+                            crate::session_probe::cwd_tail(&it.cwd),
+                            sig.join("+")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let summary = format!("{} — {}", items.len(), detail);
+                process::log_launcher(
+                    app,
+                    &i18n::fmt("log_session_probe_active", &[&summary]),
+                );
+            }
+        }
+        crate::session_probe::ProbeOutcome::Idle => registry.sync_session_slice(&[]),
+        crate::session_probe::ProbeOutcome::Unavailable(why) => {
+            // 不造任务、不清切片：与 S2 的 Transient 一致
+            let state = app.state::<ExitGuardState>();
+            if !state.session_logged.swap(true, Ordering::SeqCst) {
+                process::log_launcher(
+                    app,
+                    &i18n::fmt("log_session_probe_unavailable", &[&why]),
+                );
+            }
+        }
+    }
 }
 
 /// 命令：前端按钮回传用户选择。只投递 channel，无锁等待、无 IO；

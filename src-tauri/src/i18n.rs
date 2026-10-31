@@ -61,6 +61,15 @@ pub fn t(key: &str) -> &'static str {
         // 弹窗标题/说明/按钮只在前端用；Rust 侧用到的是「原生降级框」那三条 + 任务类别。
         "exit_task_kind_update" => if en { "Updating DSH" } else { "更新 DSH" },
         "exit_task_kind_install" => if en { "Setup install" } else { "引导安装" },
+        // 不带参数：前端按 `t('exit_task_kind_' + kind)` 拼接，带 {0} 会渲染成字面量
+        "exit_task_kind_dsh_session" => if en { "DSH session" } else { "DSH 会话" },
+        // 带 cwd 末段的标题由 Rust 生成（前端直接显示 title）
+        "exit_task_dsh_session_title" => if en { "Session running: {0}" } else { "会话进行中：{0}" },
+        // S2′ 会话探针：真机验收全靠这两条日志
+        "log_session_probe_active" => if en { "[launcher] {0} running DSH session(s) detected" } else { "[launcher] 检测到 {0} 个进行中的 DSH 会话" },
+        "log_session_probe_unavailable" => if en { "[launcher] Session probe unavailable: {0} (exit is not blocked)" } else { "[launcher] 会话探针不可用：{0}（退出不会因此被拦截）" },
+        // §14：记住的页面地址被拒时记一条，把「静默回落裸地址 → 401」变成可诊断
+        "log_url_from_config_rejected" => if en { "[launcher] Ignored the remembered DSH page address: {0}" } else { "[launcher] 忽略记住的 DSH 页面地址：{0}" },
         "exit_btn_keep" => if en { "Keep running in background" } else { "继续后台运行" },
         "exit_btn_force" => if en { "Force quit" } else { "强制退出" },
         "exit_fallback_title" => if en { "Quit DSH Desktop?" } else { "确认退出 DSH Desktop" },

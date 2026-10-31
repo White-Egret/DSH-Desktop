@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter, Manager};
 
 #[cfg(windows)]
@@ -133,6 +133,9 @@ pub struct AppState {
     /// 本代次「地址行被拒」的日志节流：同一个 DSH pid 只记一条，避免 2 秒一条刷屏。
     /// 值为已记过日志的 pid（0 = 还没记过）。
     endpoint_reject_logged: AtomicU32,
+    /// 本次 DSH 进程的 spawn 时刻。会话探针用它排除「上一代崩溃留下的未关闭 turn」——
+    /// 那个会话文件还在，但 mtime 早于新实例，不该算作本次的活跃任务。
+    started_at: Mutex<Option<SystemTime>>,
     /// 最近一次真正交给内嵌 webview 的地址（可能带 `?token=...`）。
     /// 只在内存里：进程退出即忘，落盘的那份是 DPAPI 密文（config::set_last_url）。
     /// 用途是「同一个地址的日志行反复出现时不要反复重导航」，见 spawn_log_reader。
@@ -200,6 +203,7 @@ impl AppState {
             detected_url: Mutex::new(None),
             endpoint: Mutex::new(None),
             endpoint_reject_logged: AtomicU32::new(0),
+            started_at: Mutex::new(None),
             last_loaded_url: Mutex::new(String::new()),
             toolbar_hidden: AtomicBool::new(false),
             dsh_webview_visible: AtomicBool::new(true),
@@ -668,6 +672,92 @@ fn check_endpoint_fields(url: &str, port: u16) -> Result<DshEndpoint, EndpointEr
     })
 }
 
+/// 页面地址被拒的原因。`Display` 只放稳定英文短句（与 `EndpointError` 同一考虑：
+/// 原因文本只写一份，中英日志模板复用它）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UrlReject {
+    Scheme,
+    Host,
+    Port,
+    Query,
+    Token,
+    UserInfo,
+}
+
+impl std::fmt::Display for UrlReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Scheme => "scheme is not http",
+            Self::Host => "host is not loopback",
+            Self::Port => "port is missing or does not match",
+            Self::Query => "query is not exactly one token parameter",
+            Self::Token => "token is not 43 base64url chars",
+            Self::UserInfo => "url carries userinfo",
+        };
+        f.write_str(s)
+    }
+}
+
+/// **页面地址的统一口径**（§14）：banner 形态（带 43 字符 token）与裸地址形态
+/// （无 query）都收，其余一律拒。
+///
+/// 它与 `parse_listening_line` 的关系是「同一份规则、不同入口」，**不是同一个函数**：
+/// 后者只用于 DSH 输出行、且要求必须有 token；而 `connect_existing` 传的是裸地址
+/// `http://127.0.0.1:<port>`，塞进强校验会被 token 规则拒掉 —— 那正是 §14 说的
+/// 「不能直接把 parse_listening_line 搬过去」。
+///
+/// `expected_port` 为 `Some(p)` 时要求端口严格等于 `p`（`remembered_url_for` 用：
+/// 复用上次地址时必须仍是配置里那个端口）；`None` 时不限制（`open_dsh_webview` 用：
+/// 所有导航的必经口，今天也接受别的端口的合法地址）。
+pub(crate) fn validate_page_url(
+    raw: &str,
+    expected_port: Option<u16>,
+) -> Result<tauri::Url, UrlReject> {
+    let parsed = tauri::Url::parse(raw.trim()).map_err(|_| UrlReject::Scheme)?;
+    if parsed.scheme() != "http" {
+        return Err(UrlReject::Scheme);
+    }
+    // userinfo（`user:pass@host`）一律拒：本程序只会加载本机 DSH，没有任何理由带凭据，
+    // 而带凭据的地址会把账号密码写进 last_url_enc 与日志。
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(UrlReject::UserInfo);
+    }
+    match parsed.host_str() {
+        Some("127.0.0.1") | Some("localhost") => {}
+        _ => return Err(UrlReject::Host),
+    }
+    let port = parsed.port().ok_or(UrlReject::Port)?;
+    if port == 0 {
+        return Err(UrlReject::Port);
+    }
+    if let Some(expected) = expected_port {
+        if port != expected {
+            return Err(UrlReject::Port);
+        }
+    }
+    // query：空 → 允许（裸地址）；非空 → 必须恰好一个 token 且形状对
+    match parsed.query() {
+        None | Some("") => {}
+        Some(q) => {
+            if q.contains('&') || q.contains(';') {
+                return Err(UrlReject::Query);
+            }
+            let (key, token) = q.split_once('=').ok_or(UrlReject::Query)?;
+            if key != "token" {
+                return Err(UrlReject::Query);
+            }
+            let ok = token.len() == 43
+                && token
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+            if !ok {
+                return Err(UrlReject::Token);
+            }
+        }
+    }
+    Ok(parsed)
+}
+
 /// 把解析成功的端点按 DSH 进程代次闩锁。
 ///
 /// 三条「不闩」的规矩各有死法：
@@ -769,6 +859,22 @@ fn latch_endpoint_from_line(app: &AppHandle, line: &str) {
             }
         }
     }
+}
+
+/// 本次 DSH 进程的 spawn 时刻（会话探针的代次基线）。没有 = 尚未成功启动过。
+pub(crate) fn dsh_started_at(app: &AppHandle) -> Option<SystemTime> {
+    *app.state::<AppState>().started_at.lock().unwrap()
+}
+
+/// 校验过的 DSH 家目录。
+///
+/// 会话探针**不能**自己拼 `%USERPROFILE%\.dsh`：家目录是可配置的，而且
+/// `config.dsh_home_dir` 可能是相对路径或空串 —— `start_internal` 本身就是走
+/// `config::validate_home_dir` 拿的规范值，探针必须用同一把尺子。
+pub(crate) fn validated_dsh_home(app: &AppHandle) -> Option<PathBuf> {
+    config::validate_home_dir(&config::load(app).dsh_home_dir)
+        .ok()
+        .map(PathBuf::from)
 }
 
 /// 端口可连接后，再发一个轻量 HTTP GET 确认服务真正能响应（任意响应码都算就绪）。
@@ -1250,16 +1356,17 @@ fn main_content_rect(app: &AppHandle) -> (f64, f64, f64) {
 /// 冻结在这里只有副作用没有防护价值，故全局关闭。请勿重新打开；若未来 Tauri 提供
 /// 按 webview 豁免该脚本的 API，可再评估只对 `dsh` 关闭。
 fn open_dsh_webview(app: &AppHandle, url: &str) {
-    // 先解析并校验一次，后面三处（记 last_url_enc / 刷新已有 webview / 新建 webview）共用它。
-    // 解析失败或不是 http 时什么都不做：宁可不加载，也不把未校验的字符串交给任何 webview。
-    let Ok(parsed) = url.parse::<tauri::Url>() else {
-        emit_log(app, "launcher", i18n::fmt("log_invalid_url", &[&url.to_string()]));
-        return;
+    // §14：与 S0 / remembered_url_for 同一套口径。这里 expected_port 传 None ——
+    // 这是所有导航的必经口，今天也接受别的端口的合法地址（连接现有服务、
+    // 安全模式 3081），收紧到配置端口会造成行为回退。
+    let parsed = match validate_page_url(url, None) {
+        Ok(p) => p,
+        Err(_) => {
+            // 日志沿用既有的 log_invalid_url，不改它的语义（仍是一条「这个地址不加载」）
+            emit_log(app, "launcher", i18n::fmt("log_invalid_url", &[&url.to_string()]));
+            return;
+        }
     };
-    if parsed.scheme() != "http" {
-        emit_log(app, "launcher", i18n::fmt("log_invalid_url", &[&url.to_string()]));
-        return;
-    }
     // 记录最近一次交给 WebView 的地址（next 频道带 ?token=... 会话令牌），
     // 供没有进程输出的场景（连接现有服务 / 页面重开）复用；只写 `last_url_enc` 一个键，
     // 且写进去的是 DPAPI 密文（安全审查 MEDIUM-2：明文绝不落盘，详见 config.rs 那段注释）。
@@ -1554,17 +1661,16 @@ fn remembered_url_for(app: &AppHandle, port: u16) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let parsed = tauri::Url::parse(trimmed).ok()?;
-    if parsed.scheme() != "http" {
-        return None;
+    // §14：与 S0 同一套口径（scheme / loopback / 端口 / query / token），
+    // 并且**丢弃时记一条日志** —— 原来这里是静默 `return None`，
+    // 用户只看到一个 401 页面，日志里什么都没有。
+    match validate_page_url(trimmed, Some(port)) {
+        Ok(parsed) => Some(parsed.as_str().to_string()),
+        Err(why) => {
+            log_launcher(app, &i18n::fmt("log_url_from_config_rejected", &[&why]));
+            None
+        }
     }
-    if !matches!(parsed.host_str(), Some("127.0.0.1") | Some("localhost")) {
-        return None;
-    }
-    if parsed.port() != Some(port) {
-        return None;
-    }
-    Some(parsed.as_str().to_string())
 }
 
 /// 销毁内嵌的 DSH Webview（服务停止后露出状态区）。
@@ -1862,6 +1968,12 @@ pub(crate) fn start_internal(app: &AppHandle) -> Result<(), String> {
     *state.detected_url.lock().unwrap() = None;
     *state.endpoint.lock().unwrap() = None;
     state.endpoint_reject_logged.store(0, Ordering::SeqCst);
+    // 会话探针的代次基线：新实例启动后，旧会话文件的 mtime 一律早于它 → 不算活跃
+    *state.started_at.lock().unwrap() = None;
+    // 探针日志节流同样按代次复位：新实例第一次探到会话/失败都该重新记一条
+    if let Some(g) = app.try_state::<crate::exit_guard::ExitGuardState>() {
+        g.reset_session_log();
+    }
 
     // 启动命令等价于："<dsh_path>" web --port <port> --no-open [extra_args]
     // --no-open：DSH 官方参数，禁止其自动打开默认浏览器（Edge）
@@ -1925,6 +2037,9 @@ pub(crate) fn start_internal(app: &AppHandle) -> Result<(), String> {
 
     *state.child.lock().unwrap() = Some(child);
     *state.pid.lock().unwrap() = Some(pid);
+    // spawn 成功之后才写：失败路径（spawn 报错）不该留下一个「本次启动时刻」，
+    // 否则下一轮探针会拿一个从未有过进程的时间戳去过滤会话。
+    *state.started_at.lock().unwrap() = Some(SystemTime::now());
     set_status(app, "starting", None);
 
     emit_log(
@@ -7883,6 +7998,47 @@ mod tests {
         assert!(
             parse_listening_line(&format!("http://127.0.0.1:3080/?token={TOK43}#/chat")).is_ok()
         );
+    }
+
+    // ---------- §14：页面地址的统一口径 ----------
+
+    /// 硬性约束 5：这三条今天能加载，改完必须仍能加载。
+    #[test]
+    fn page_url_keeps_the_three_existing_shapes() {
+        // banner 形态（带 43 字符 token）
+        assert!(validate_page_url(&format!("http://127.0.0.1:3080/?token={TOK43}"), None).is_ok());
+        // 裸地址（无 query）—— `extracts_plain_url` 一直接受它
+        assert!(validate_page_url("http://localhost:3000/", None).is_ok());
+        // 带 fragment —— `keeps_token_query` 一直接受它
+        assert!(validate_page_url("http://127.0.0.1:3080/#/chat", None).is_ok());
+    }
+
+    #[test]
+    fn page_url_rejects_out_of_scope_addresses() {
+        let cases: Vec<(&str, UrlReject)> = vec![
+            ("https://127.0.0.1:3080/", UrlReject::Scheme),
+            ("http://192.168.1.5:3080/", UrlReject::Host),
+            ("http://127.0.0.1:3080/?token=tooshort", UrlReject::Token),
+            ("http://127.0.0.1:3080/?token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&x=1", UrlReject::Query),
+            ("http://127.0.0.1:3080/?tk=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", UrlReject::Query),
+            ("http://user:pass@127.0.0.1:3080/", UrlReject::UserInfo),
+            ("http://127.0.0.1/", UrlReject::Port),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(validate_page_url(raw, None).err(), Some(want), "应拒绝：{raw}");
+        }
+    }
+
+    #[test]
+    fn page_url_honours_expected_port() {
+        // remembered_url_for 用 Some(port)：端口不符必须拒（复用上次地址时不能跨端口）
+        assert_eq!(
+            validate_page_url("http://127.0.0.1:9999/", Some(3080)).err(),
+            Some(UrlReject::Port)
+        );
+        assert!(validate_page_url("http://127.0.0.1:3080/", Some(3080)).is_ok());
+        // open_dsh_webview 用 None：接受别的端口的合法地址（安全模式 3081 也走这条）
+        assert!(validate_page_url("http://127.0.0.1:3081/", None).is_ok());
     }
 
     #[test]

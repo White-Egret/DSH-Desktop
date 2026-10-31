@@ -8,6 +8,7 @@ mod process;
 mod py_bridge;
 mod safe;
 mod secret;
+mod session_probe;
 mod tasks;
 mod window_state;
 

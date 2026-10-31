@@ -77,22 +77,65 @@ VALID_PREFER = ("auto", "fast", "layout", "accuracy")
 PAGE_PICS_DIRNAME = "page-pics"
 # 单次最多渲染这么多页：每页一张图进上下文，多了既费 token 也没意义
 MAX_RENDER_PAGES = 10
-# 渲染分辨率。150 DPI 是「正文可读 + 文件不过大」的折中：
-# 实测扫描件单页 150 DPI 约 100KB，正文与页边行号都清晰。
+# 渲染分辨率两档（实测依据见下）：
+#
+#   150 DPI：818x1317，约 93KB，约 1400 tokens —— 正文、斜体缩写、页眉都清晰，
+#            但**长音符/短音符/小标点会糊成普通字母**（拉丁词典里 cŏncĭcātō 这类词
+#            靠的就是这些符号区分）。
+#   300 DPI：1635x2633，约 220KB，约 5700 tokens —— 长音符、短音符、重音全部可辨，
+#            代价是 **token 成本 4 倍**（像素数是平方关系）。
+#
+# 所以不搞「一律 300」：默认 150（绝大多数文档够用），只有**小语种/多音标**这类
+# 明确需要逐字符号的场景才升到 300。判据是 script_profile：非拉丁非 CJK 字母占比
+# 超过阈值，或文本里出现了长音符/组合附加符号 —— 两者都指向「符号有意义」。
 RENDER_DPI = 150
+RENDER_DPI_DETAIL = 300
+# 触发高分辨率渲染的「第三类文字」占比阈值。比 needs_vlm 的 0.30 低：
+# 渲染是本地行为、不花钱，宁可多给一次高清，也不要让 Agent 看糊的字。
+DETAIL_DPI_RATIO = 0.15
 # 图片保留时长：超过就删。定时清理靠「每次渲染前扫一遍」实现 ——
 # 桥接进程没有常驻定时器（它只在工具调用时活着），用调用点触发既简单又够用。
 PAGE_PIC_TTL_SECONDS = 24 * 3600
 
+# 长音符 / 短音符 / 组合附加符号 / 希腊文重音区。这些字符的存在本身就是
+# 「这份文档靠符号区分字义」的证据，与语种无关（拉丁词典也用它们）。
+#
+# ⚠ 必须包含 Latin Extended-A/B（U+0100–U+024F）：`ĭ`(U+012D)、`ā`(U+0101)、
+# `ŏ`(U+014F) 这些**预组合**字符都在那儿，而它们正是拉丁词典区分长短音的主力。
+# 第一版只写了组合附加符号区（U+0300+），于是 `concĭcātrīzo` 被漏判 —— 自测当场抓到。
+_DIACRITIC_RE = re.compile(
+    "["
+    "\u0100-\u017f"   # Latin Extended-A（ĭ ā ŏ ū ē …，预组合长短音符）
+    "\u0180-\u024f"   # Latin Extended-B
+    "\u0300-\u036f"   # Combining Diacritical Marks（组合附加符号）
+    "\u02b0-\u02ff"   # 修饰字母、间距附加符号
+    "\u1d00-\u1dbf"   # 小型大写/修饰字母
+    "\u1e00-\u1eff"   # 拉丁扩展附加（ḗ ṑ ṝ …）
+    "\u1f00-\u1fff"   # 希腊文扩展（多音标希腊文的全部重音/送气符号）
+    "\u0370-\u03ff"   # 希腊文与科普特文
+    "\u0400-\u04ff"   # 西里尔文
+    "\u0590-\u05ff"   # 希伯来文
+    "\u0600-\u06ff"   # 阿拉伯文
+    "\u0900-\u097f"   # 天城文
+    "]"
+)
+
 
 @dataclass(frozen=True)
 class PdfProbe:
-    """PDF 侦察结果（只读，不落盘）。"""
+    """PDF 侦察结果（只读，不落盘）。
+
+    `sample_text` 是抽样页的文本片段（截断到几千字符），只用于**判断书写系统**，
+    不参与内容交付。为什么要带上它：文本层「干净」只说明字多，不说明字对 ——
+    希腊文/西里尔文这类文档的文本层可能又长又整齐，但符号在提取时就丢了
+    （实测：test.pdf 的 `concĭcātrīzo` 抽出来是 `concicatrizo`，长音符全没）。
+    """
 
     pages: int
     avg_chars: float
     images: int
     tables: int
+    sample_text: str = ""
 
 
 @dataclass
@@ -168,11 +211,19 @@ def decide_route(
     if prefer == "layout":
         return "structural", "prefer-layout"
     if prefer == "accuracy":
-        # 只有扫描件才值得渲染成图：干净文本层本来就是精确的（那是原生文本，不是
-        # OCR 出来的），渲染成图再让 Agent 读反而更慢、更贵、还可能看错。
-        # 这条同时是「防止为了精度把纯文本 PDF 也走一遍视觉」的回归用例。
+        # `prefer="accuracy"` 的语义是「我要逐字准确」。三条判断，按代价从低到高：
+        #
+        # ① 侦察失败 → 只能走本地（不为了猜而多跑一次）
+        # ② 文本层含大量非拉丁字母 → **即使文本层干净也渲染**：这类文档的文本层
+        #    常常「字多但不对」（实测 test.pdf 的希腊文：文本层 4335 字/页很干净，
+        #    但长音符在提取时就丢了）。原生文本对拉丁文可信，对多音标文字不可信，
+        #    所以这里不看字数看**书写系统**。
+        # ③ 其余干净文本层（真正的原生文本，如英文合同、中文公文）→ 走本地：
+        #    渲染成图再让 Agent 读只会更慢更贵，还可能看错。
         if probe is None:
             return "fast", "accuracy-probe-failed"
+        if probe.avg_chars >= SCANNED_AVG_CHARS and has_diacritics(probe.sample_text):
+            return "accuracy", "accuracy-diacritic-text-layer"
         if probe.avg_chars >= SCANNED_AVG_CHARS and probe.tables == 0:
             return "fast", "accuracy-clean-text-layer"
         if probe.avg_chars >= SCANNED_AVG_CHARS:
@@ -242,6 +293,39 @@ def other_ratio(text: str) -> float:
     p = script_profile(text)
     total = p["latin"] + p["cjk"] + p["other"]
     return (p["other"] / total) if total else 0.0
+
+
+def has_diacritics(text: str) -> bool:
+    """文本里是否有**承载信息**的附加符号（长音符、重音、组合符号、非拉丁文字）。
+
+    这是「该不该用 300 DPI」的第二条判据：`script_profile` 只数**字母**，
+    但拉丁词典里的 cŏncĭcātō 全是拉丁字母，靠的是附加符号区分 —— 只看字母
+    会把它判成「普通拉丁文」，于是给一张糊掉长音符的图。这里直接找符号本身。
+    """
+    return bool(_DIACRITIC_RE.search(text or ""))
+
+
+def pick_dpi(*, text: str = "", prefer: str = "auto", scanned: bool = False) -> int:
+    """按内容选渲染分辨率，返回 150 或 300。
+
+    ⚠ **文本层是不可靠的信号**（实测教训）：`test.pdf` 那份拉丁词典，纸面上满页
+    `concĭcātrīzo` 的长音符，但 pdfplumber 抽出的文本层是 `concicatrizo` ——
+    **符号在提取时就已经丢了**。所以「文本里有附加符号 → 300」只能当加分项，
+    不能当唯一判据；真正可靠的是下面三条：
+
+      ① 显式 `prefer="accuracy"` → **永远 300**：声明了要逐字准确，就不该省；
+      ② 文本里确实有附加符号 / 第三类文字占比 > 15% → 300（能判出来就判）；
+      ③ 其余 → 150。
+
+    `scanned` 目前不参与判定，保留参数是为了将来若要「扫描件一律高清」时有落点。
+    """
+    if prefer == "accuracy":
+        return RENDER_DPI_DETAIL
+    if has_diacritics(text):
+        return RENDER_DPI_DETAIL
+    if other_ratio(text) > DETAIL_DPI_RATIO:
+        return RENDER_DPI_DETAIL
+    return RENDER_DPI
 
 
 # ---------- 纯函数：后处理 ----------
@@ -369,7 +453,9 @@ def _safe_stem(name: str) -> str:
     return stem[:60]
 
 
-def render_pages(src: Path, *, max_pages: int = MAX_RENDER_PAGES, dpi: int = RENDER_DPI) -> list[str]:
+def render_pages(
+    src: Path, *, max_pages: int = MAX_RENDER_PAGES, dpi: int = RENDER_DPI
+) -> list[str]:
     """把文档的页面渲染成 PNG，返回绝对路径列表（按页序）。
 
     支持两类输入：
@@ -377,6 +463,9 @@ def render_pages(src: Path, *, max_pages: int = MAX_RENDER_PAGES, dpi: int = REN
         pdfplumber 是既有依赖，不再引入第二条渲染路径）；
       · **独立图片** —— 原样复制一份到 page-pics（Agent 可以直接读原文件，
         但复制过来能让「这次的产物」集中在一处，且同样受 TTL 清理约束）。
+
+    **`dpi` 对独立图片无效**：图片是按原样复制的，不重采样 —— 源图有多少像素就是
+    多少像素，放大不会凭空长出细节。只有 PDF 需要「栅格化」，也才有 DPI 可言。
 
     抽不出 / 渲染失败一律返回**已成功的那些页**（可能为空），不抛错：
     调用方据此决定是「部分可用」还是「这条路走不通」。
@@ -473,6 +562,8 @@ def probe_pdf(path: Path) -> "PdfProbe | None":
         avg_chars=sum(map(len, texts)) / max(1, len(texts)),
         images=images,
         tables=tables,
+        # 只留前 4000 字符：判断书写系统够用了，再多只是白占内存
+        sample_text="\n".join(texts)[:4000],
     )
 
 
@@ -553,7 +644,7 @@ def convert_any(src: Path, *, prefer: str = "auto", local_convert) -> RouteOutco
     if kind == "fast":
         return _run_fast(out, src, local_convert)
     if kind == "structural":
-        return _run_structural(out, src, local_convert)
+        return _run_structural(out, src, local_convert, prefer=prefer)
     return _run_accuracy(out, src, local_convert)
 
 
@@ -575,7 +666,9 @@ def _run_fast(out: RouteOutcome, src: Path, local_convert) -> RouteOutcome:
 # ---- 路线二：structural（OXR；体检不过则附页面图给 Agent 校对） ----
 
 
-def _run_structural(out: RouteOutcome, src: Path, local_convert) -> RouteOutcome:
+def _run_structural(
+    out: RouteOutcome, src: Path, local_convert, prefer: str = "auto"
+) -> RouteOutcome:
     blocked = _cloud_block_reason()
     if blocked:
         out.notes.append(blocked)
@@ -602,11 +695,11 @@ def _run_structural(out: RouteOutcome, src: Path, local_convert) -> RouteOutcome
     out.ok = True
     out.engine = "oxr"
     out.text = text
-    _maybe_escalate(out, src)
+    _maybe_escalate(out, src, prefer=prefer)
     return out
 
 
-def _maybe_escalate(out: RouteOutcome, src: Path) -> None:
+def _maybe_escalate(out: RouteOutcome, src: Path, prefer: str = "auto") -> None:
     """自动体检：OXR 结果里第三类文字占比过高 → 把原页渲染出来供 Agent 校对。
 
     这条规则是被希腊文样本逼出来的（方案 §1.2）：OXR 换温度、放大、重试都不动
@@ -621,7 +714,10 @@ def _maybe_escalate(out: RouteOutcome, src: Path) -> None:
     if not needs_vlm(out.text):
         return
     ratio = other_ratio(out.text)
-    images = render_pages(src)
+    # 分辨率按**已拿到的文本 + 用户声明的档位**挑：OXR 结果里有附加符号
+    # （希腊文重音、拉丁长音符）说明这些符号承载信息，必须 300 DPI 才看得清。
+    dpi = pick_dpi(text=out.text, prefer=prefer)
+    images = render_pages(src, dpi=dpi)
     if not images:
         out.degraded = True
         out.notes.append(
@@ -633,7 +729,7 @@ def _maybe_escalate(out: RouteOutcome, src: Path) -> None:
     out.escalated = True
     out.notes.append(
         f"版面模型在非拉丁文字上精度不足（体检：other={ratio:.0%}），"
-        f"已附上 {len(images)} 张页面图 —— 请用 read_image 自己核对"
+        f"已附上 {len(images)} 张页面图（{dpi} DPI）—— 请用 read_image 自己核对"
     )
 
 
@@ -648,8 +744,13 @@ def _run_accuracy(out: RouteOutcome, src: Path, local_convert) -> RouteOutcome:
 
     与旧实现的关键差别：这里**不产生文本**。页面图的像素交给 Agent，
     由 Agent 自己转写 —— 少一道有损转换，精度上限就是 Agent 自己的视觉能力。
+
+    **分辨率固定 300 DPI**：走到这条路的都是「声明要逐字准确」的场景
+    （多音标小语种、手写、极小字号），这时省 token 就是省错了地方。
+    实测 150 DPI 会把长音符糊成普通字母，而 300 DPI 全部可辨。
     """
-    images = render_pages(src)
+    dpi = RENDER_DPI_DETAIL
+    images = render_pages(src, dpi=dpi)
     if not images:
         # 渲染不出来（pdfplumber 缺失 / 加密 / 纯矢量页）才退到云端，并说清原因
         out.notes.append("页面图渲染失败（pdfplumber 不可用、文件加密或无可渲染页）")
@@ -684,7 +785,7 @@ def _run_accuracy(out: RouteOutcome, src: Path, local_convert) -> RouteOutcome:
             f"只渲染了前 {len(images)}/{out.pages} 页（单次上限 {MAX_RENDER_PAGES} 页）"
         )
     out.notes.append(
-        f"已把 {len(images)} 张页面图交给你自己读：请用 read_image 逐张查看，"
+        f"已把 {len(images)} 张页面图（{dpi} DPI）交给你自己读：请用 read_image 逐张查看，"
         "按页序拼接为 Markdown。这条路不经任何 OCR，精度取决于你自己的视觉"
     )
     return out
@@ -771,6 +872,26 @@ def _self_test() -> int:
     check("accuracy+有表格", decide(".pdf", table, "accuracy"), "structural")
     check("accuracy+扫描件", decide(".pdf", scanned, "accuracy"), "accuracy")
     check("accuracy+侦察失败", decide(".pdf", None, "accuracy"), "fast")
+    # 干净文本层但含多音标希腊文 → 即使字多也要渲染（文本层「字多但不对」）
+    greek_layer = PdfProbe(
+        pages=3,
+        avg_chars=4335,
+        images=0,
+        tables=0,
+        sample_text="1 Περὶ πολλῶν ἂν ποιησαίμην, ὦ ἄνδρες, τοῦτο ὑμᾶς ἐμοὶ δικαστὰς",
+    )
+    check("accuracy+希腊文文本层", decide(".pdf", greek_layer, "accuracy"), "accuracy")
+    check(
+        "理由 希腊文文本层",
+        decide_route(".pdf", greek_layer, "accuracy")[1],
+        "accuracy-diacritic-text-layer",
+    )
+    # 但 auto 档不受影响：文本层干净就还是本地（不主动多花 token）
+    check("auto+希腊文文本层", decide(".pdf", greek_layer, "auto"), "fast")
+    # 普通英文/中文的干净文本层仍走本地（回归用例不能丢）
+    en_layer = PdfProbe(pages=3, avg_chars=2000, images=0, tables=0,
+                        sample_text="This Agreement is made and entered into as of the date")
+    check("accuracy+英文文本层", decide(".pdf", en_layer, "accuracy"), "fast")
     check("xls 走本地", decide(".xls", None, "auto"), "fast")
     check("无扩展名", decide("", None, "auto"), "fast")
 
@@ -810,6 +931,23 @@ def _self_test() -> int:
     check("script_profile(拉丁)", script_profile("abc")["latin"], 3)
     check("script_profile(中文)", script_profile("物业")["cjk"], 2)
     check("other_ratio(空串)", other_ratio(""), 0.0)
+
+    # has_diacritics / pick_dpi：分辨率选择（实测依据见常量注释）
+    check_true("has_diacritics(长音符)", has_diacritics("concĭcātrīzo"))
+    check_true("has_diacritics(组合符号)", has_diacritics("concibo\u0304"))
+    check_true("has_diacritics(希腊文)", has_diacritics("Πρόκειται τῇδε"))
+    check("has_diacritics(纯英文)", has_diacritics("comrade-in-arms (C.I.L. 8. 9060)"), False)
+    check("has_diacritics(纯中文)", has_diacritics("物業收回通知書 請於七日內繳清欠款"), False)
+    check("has_diacritics(空串)", has_diacritics(""), False)
+
+    check("pick_dpi(默认)", pick_dpi(), RENDER_DPI)
+    check("pick_dpi(纯英文)", pick_dpi(text="comrade-in-arms"), RENDER_DPI)
+    check("pick_dpi(长音符)", pick_dpi(text="concĭcātrīzo, make to scar"), RENDER_DPI_DETAIL)
+    check("pick_dpi(希腊文)", pick_dpi(text=greek), RENDER_DPI_DETAIL)
+    # 显式 accuracy 永远 300：已经声明要逐字准确，就不该为省 token 降档
+    check("pick_dpi(accuracy 覆盖)", pick_dpi(text="comrade-in-arms", prefer="accuracy"), RENDER_DPI_DETAIL)
+    check_true("高分辨率确实更高", RENDER_DPI_DETAIL > RENDER_DPI)
+    check_true("高分辨率是默认的 2 倍", RENDER_DPI_DETAIL == RENDER_DPI * 2)
 
     # postprocess：剥图片链接，保留普通链接
     md = "正文 ![x](https://a/b.png) 还有 ![](https://c/d.png) 和 [文字](https://e/f)\n"

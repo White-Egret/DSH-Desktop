@@ -10,6 +10,7 @@
 
 use crate::i18n;
 use crate::process::AppState;
+use crate::session_probe::SessionActivity;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -27,6 +28,8 @@ pub const PHASE_EXITING: u8 = 2;
 pub enum TaskKind {
     Update,
     Install,
+    /// DSH 内部的 Agent 会话（S2′ 会话探针从本地缓存读出；不是壳内任务）
+    DshSession,
 }
 
 impl TaskKind {
@@ -34,6 +37,7 @@ impl TaskKind {
         match self {
             Self::Update => "exit_task_kind_update",
             Self::Install => "exit_task_kind_install",
+            Self::DshSession => "exit_task_kind_dsh_session",
         }
     }
 
@@ -42,6 +46,7 @@ impl TaskKind {
         match self {
             Self::Update => "update",
             Self::Install => "install",
+            Self::DshSession => "dsh_session",
         }
     }
 }
@@ -59,6 +64,10 @@ pub struct TaskSnapshot {
 /// `AppState` 里的两个 AtomicBool：同一时刻只可能各有一个，键天然稳定。
 const ID_UPDATE: &str = "shell-update";
 const ID_INSTALL: &str = "shell-install";
+
+/// DSH 会话任务在表里的键前缀。S2′ 用 `dsh:<session-id>`，S2 的端点落地后沿用同一片
+/// 切片（键跨刷新稳定 → 列表不跳动、计时真实）。
+const ID_DSH_PREFIX: &str = "dsh:";
 
 pub struct TaskRegistry {
     phase: AtomicU8,
@@ -173,6 +182,51 @@ impl TaskRegistry {
             } else {
                 map.remove(id);
             }
+        }
+    }
+
+    /// DSH 会话切片的整片替换（S2′ 会话探针的数据出口）。
+    ///
+    /// 语义与 §4 规划的 `replace_dsh_slice` 一致：先删掉所有 `dsh:` 前缀的旧条目，再按
+    /// 传入的列表重建。键用 `dsh:<session-id>`，跨刷新稳定 —— 同一会话在两轮探测之间
+    /// id 不变，`started_at_ms` 由**首次观察**记下，所以弹窗里的秒数是真的在走而不是
+    /// 每次刷新都归零。
+    ///
+    /// 传空切片 = 权威地「没有活跃会话」（DSH 不在跑 / 探针判 Idle），会清空这一片。
+    /// 探针**不可用**时不要调它 —— 那种情况要保留上一轮切片（stale），宁可多拦一次。
+    pub(crate) fn sync_session_slice(&self, items: &[SessionActivity]) {
+        let may_insert = self.phase() != PHASE_EXITING;
+        let now = now_ms();
+        let mut map = self.tasks.lock().unwrap();
+        // 先记住旧条目的 started_at：已有会话必须沿用第一次看到它的时刻
+        let prev: BTreeMap<String, u64> = map
+            .iter()
+            .filter(|(k, _)| k.starts_with(ID_DSH_PREFIX))
+            .map(|(k, v)| (k.clone(), v.started_at_ms))
+            .collect();
+        map.retain(|k, _| !k.starts_with(ID_DSH_PREFIX));
+        if !may_insert {
+            return; // Exiting：只删不加
+        }
+        for item in items {
+            let id = format!("{ID_DSH_PREFIX}{}", item.session_id);
+            let started_at_ms = prev.get(&id).copied().unwrap_or(now);
+            let tail = crate::session_probe::cwd_tail(&item.cwd);
+            // 标题带上工作目录末段：弹窗里两三个会话并列时，光「DSH 会话」分不出是哪个
+            let title = if tail.is_empty() {
+                i18n::t("exit_task_kind_dsh_session").to_string()
+            } else {
+                i18n::fmt("exit_task_dsh_session_title", &[&tail])
+            };
+            map.insert(
+                id.clone(),
+                TaskSnapshot {
+                    id,
+                    kind: TaskKind::DshSession,
+                    title,
+                    started_at_ms,
+                },
+            );
         }
     }
 }

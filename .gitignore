@@ -9,3 +9,9 @@ src-tauri/gen/schemas/
 *.tgz
 .DS_Store
 Thumbs.db
+
+# Python 字节码缓存：src-tauri/resources/py-bridge/ 下的 .py 会被本机 Python 导入，
+# 于是生成 __pycache__/*.pyc。它们是**机器相关**的产物（含 Python 版本号、
+# 甚至绝对路径），换个 Python 版本就得全部重生成，进仓库纯属噪声。
+__pycache__/
+*.py[cod]

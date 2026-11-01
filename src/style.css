@@ -1299,10 +1299,25 @@ body.safe-mode #btn-safe {
 }
 
 /* ---------- 退出确认弹窗（有长任务在跑时点 X / 托盘退出） ---------- */
-/* 与 .safe-modal-body 同一套间距：它也是「说明 + 清单 + 两枚按钮」的窄弹窗。
-   任务行只做两列（标题 / 计时），列表超高时自己滚，不把按钮挤出可视区。 */
+/* `.modal-box` 只给标题栏与按钮栏留了 18px 内边距，正文容器必须自带 padding ——
+   否则说明文字与任务列表会直接贴到弹窗左右边框上（真机截图确认过一次：
+   文字挤到边缘、圆角被文字压住）。与 .safe-modal-body / .modal-body 同一套数值。 */
+.exit-modal-box { width: 560px; }
+.exit-modal-body {
+  padding: 4px 18px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text);
+  overflow-y: auto;
+}
+/* 说明段：不靠 .safe-fact —— 那个类的定位是「安全模式横幅里的一行事实」，
+   在这里复用它会把两件事的样式绑在一起（改一处影响另一处）。 */
+.exit-modal-desc { color: var(--text-dim); }
+/* 任务行两列（标题 / 计时），列表超高时自己滚，不把按钮挤出可视区。 */
 .exit-task-list {
-  margin: 12px 0 4px;
   max-height: 220px;
   overflow-y: auto;
   border: 1px solid var(--border);
@@ -1321,11 +1336,16 @@ body.safe-mode #btn-safe {
 .exit-task-title {
   font-weight: 600;
   color: var(--text);
+  /* 会话标题带工作目录末段，极端长的目录名不能把计时挤出去 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .exit-task-meta {
   color: var(--text-dim);
   font-size: 12px;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .exit-task-empty {
   padding: 14px 12px;

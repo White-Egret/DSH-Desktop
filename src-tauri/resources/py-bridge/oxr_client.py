@@ -226,9 +226,25 @@ def parse_bytes(name: str, blob: bytes, mime: str = "") -> str:
         return extract_markdown(_post(blob, name, mime))
 
 
+def _pypdf_available() -> bool:
+    """pypdf 是否**真的**能导入。
+
+    单独一个函数而不是散落各处的 `try: import pypdf`：自测要用它当守卫
+    （「装了 pypdf」与「PDF 损坏」是两件事，`page_count` 对两者都返回 None，
+    拿它当守卫会在装了 pypdf 的机器上误判）。
+    """
+    try:
+        import pypdf  # noqa: F401, PLC0415 — 只探测，不用
+
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def page_count(blob: bytes) -> "int | None":
     """用 pypdf 数页数。**pypdf 缺失就返回 None**（不抛）—— 老版本基本安装里没有它，
-    这时按「不知道页数」处理：能传就传，服务端嫌大再报错（方案 §8 硬约束 1）。"""
+    这时按「不知道页数」处理：能传就传，服务端嫌大再报错（方案 §8 硬约束 1）。
+    """
     try:
         from pypdf import PdfReader  # noqa: PLC0415 — 可选依赖，必须惰性导入
     except Exception:  # noqa: BLE001
@@ -454,8 +470,16 @@ def self_test() -> list[str]:
         globals()["parse_bytes"] = original_parse
         globals()["split_pdf"] = original_split
 
-    # 缺 pypdf 时的退化文案（真实路径，不装桩）
-    if page_count(b"%PDF-1.4 stub") is None:
+    # 缺 pypdf 时的退化文案（真实路径，不装桩）。
+    #
+    # ⚠ 守卫条件必须是「pypdf 到底在不在」，**不能**用 `page_count(...) is None`：
+    # 那个函数对「没装 pypdf」和「PDF 损坏」都返回 None，用它当守卫会让本段在
+    # 装了 pypdf 的机器上照样执行，然后拿损坏文件的 unsupported 去撞 too-large 断言
+    # —— 真机踩过：pypdf 装上后这条自测突然变红，而代码本身没问题。
+    #
+    # 装了 pypdf 就**没有**这条退化路径可测（`split_pdf` 会去解析真实 PDF），
+    # 所以这里跳过，而不是强行造一个假象。
+    if not _pypdf_available():
         try:
             split_pdf(b"%PDF-1.4 stub")
         except OxrError as exc:

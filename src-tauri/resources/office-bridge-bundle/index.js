@@ -49,6 +49,11 @@ const DOC_TYPES = {
   docx: 'word', doc: 'word', odt: 'word', rtf: 'word', txt: 'word', epub: 'word',
   xlsx: 'cell', xls: 'cell', ods: 'cell', csv: 'cell',
   pptx: 'slide', ppt: 'slide', odp: 'slide',
+  // PDF 是 Document Server 10.x 的**一等编辑器**（web-apps/apps/pdfeditor，
+  // documentType = 'pdf'）。真机教训 2026-11-05：缺这一条时，上传能进目录、
+  // 列表里也看得见，但「编辑」「浏览器」两个按钮都会被扩展名校验拒掉 ——
+  // 用户看到的是「文件在列表里，却打不开」。
+  pdf: 'pdf',
 }
 const OFFICE_EXTS = Object.keys(DOC_TYPES)
 
@@ -603,6 +608,12 @@ try { new DocsAPI.DocEditor('placeholder', config) } catch (e) { document.body.t
   function handleUpload(req, res, url, sendJson) {
     const rawName = String(url.searchParams.get('name') || '').trim()
     const name = rawName ? path.basename(rawName) : `upload-${Date.now()}.docx`
+    // 上传口与打开口用同一张扩展名表：否则会出现「文件躺在目录里、列表看得见，
+    // 但编辑/浏览器两个按钮都报不支持」的鬼条目（真机教训 2026-11-05，pdf）。
+    const ext = path.extname(name).slice(1).toLowerCase()
+    if (!DOC_TYPES[ext]) {
+      return sendJson(400, { error: `不支持的扩展名 .${ext}（支持：${OFFICE_EXTS.join(', ')}）` })
+    }
     readBody(req, MAX_UPLOAD_BYTES).then((buf) => {
       if (!buf.length) return sendJson(400, { error: '空文件' })
       const target = uniquePath(docsDir, name)

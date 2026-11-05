@@ -304,7 +304,15 @@
              （office_status 的 ds_message / plugin_message），前端只显示不拼装。
              动态文案刻意不挂 data-i18n（会被 applyDom 打回默认，见 i18n.js 头注）。 -->
         <div class="field office-block">
-          <span class="py-head" data-i18n="lbl_office_env">OnlyOffice 文档服务（docx / xlsx / pptx 在线编辑与 AI 生成）</span>
+          <span class="py-head" data-i18n="lbl_office_env">OnlyOffice 文档服务（docx / xlsx / pptx / pdf 在线编辑与 AI 生成）</span>
+          <!-- 说明文字放在状态行**之前**：先讲清「这是做什么、要下多大、会弹 UAC」，
+               再给检测结果与按钮，读起来是「介绍 → 现状 → 操作」的顺序。 -->
+          <div class="hint" data-i18n-html="office_packages_html">
+            将下载并静默安装 OnlyOffice Docs 社区版（AGPLv3，约 874 MB，仅监听本机
+            127.0.0.1:8080，不对外网开放；哈希与数字签名校验不通过会直接中止），
+            随后部署「AI 文档桥接」插件（转换 / 读取 / 生成 / 强制保存 / 打开编辑六个工具）。
+            安装是整机级别的，过程中会弹一次 UAC 提权确认。卸载不会删除你的任何文档。
+          </div>
           <div id="office-status" class="py-status" data-i18n="office_checking">正在检测 OnlyOffice…</div>
           <div id="office-dir-row" class="py-dir hidden">
             <span data-i18n="lbl_office_dir">安装位置（留空 = 官方默认 C:\Program Files\ONLYOFFICE\DocumentServer；可改到 D 盘等目录）</span>
@@ -316,12 +324,6 @@
           <div class="row gap">
             <button id="btn-office-install" class="btn primary">安装 OnlyOffice（Document Server + AI 桥接）</button>
             <button id="btn-office-cleanup" class="btn subtle hidden">清扫残余…</button>
-          </div>
-          <div class="hint" data-i18n-html="office_packages_html">
-            将下载并静默安装 OnlyOffice Docs 社区版（AGPLv3，约 874 MB，仅监听本机
-            127.0.0.1:8080，不对外网开放；哈希与数字签名校验不通过会直接中止），
-            随后部署「AI 文档桥接」插件（转换 / 读取 / 生成 / 强制保存 / 打开编辑六个工具）。
-            安装是整机级别的，过程中会弹一次 UAC 提权确认。卸载不会删除你的任何文档。
           </div>
           <div class="py-bridge-row">
             <span class="py-bridge-label" data-i18n="office_bridge_label">AI 调用能力（文档桥接插件）：</span>

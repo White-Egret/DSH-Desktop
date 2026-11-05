@@ -24,7 +24,8 @@ window.__ModuleLoader__.load({
 
 		const PKG_ID = "@local/dsh-desktop-office-bridge";
 		const KIND = "office-docs";
-		const OFFICE_EXTS = ["docx", "doc", "odt", "rtf", "txt", "epub", "xlsx", "xls", "ods", "csv", "pptx", "ppt", "odp"];
+		// 与 Host 半身的 DOC_TYPES 保持一致（含 pdf —— Document Server 10.x 有 pdfeditor）
+		const OFFICE_EXTS = ["docx", "doc", "odt", "rtf", "txt", "epub", "xlsx", "xls", "ods", "csv", "pptx", "ppt", "odp", "pdf"];
 		const S = {
 			root: { height: "100%", display: "flex", flexDirection: "column", fontFamily: "inherit" },
 			fill: { flex: 1, position: "relative", minHeight: 0 },
@@ -92,6 +93,11 @@ window.__ModuleLoader__.load({
 			const [editor, setEditor] = React.useState(null)
 			const [error, setError] = React.useState(null)
 			const [editorMsg, setEditorMsg] = React.useState(null)
+			// 文档目录由 /docs 一并返回：显示出来，用户才知道「最近文档」到底扫的是哪个文件夹
+			// （真机教训 2026-11-05：目录被改到别处时，列表看起来像"缓存/幽灵条目"）
+			const [docsDir, setDocsDir] = React.useState("")
+			// 「刷新」的可见反馈：数据没变时列表不动，加一行时间戳说明确实刷过
+			const [refreshedAt, setRefreshedAt] = React.useState(0)
 
 			React.useEffect(() => {
 				let dead = false
@@ -103,7 +109,13 @@ window.__ModuleLoader__.load({
 				if (!base) return
 				let dead = false
 				fetch(base + "/docs").then((r) => r.json())
-					.then((j) => { if (!dead) { setDocs(j.docs || []); setError(null) } })
+					.then((j) => {
+						if (dead) return
+						setDocs(j.docs || [])
+						setDocsDir(j.docsDir || "")
+						setRefreshedAt(Date.now()) // 「刷新」的可见反馈
+						setError(null)
+					})
 					.catch((e) => { if (!dead) setError(String((e && e.message) || e)) })
 				return () => { dead = true }
 			}, [base])
@@ -181,6 +193,10 @@ window.__ModuleLoader__.load({
 					h("label", { style: S.btnPrimary }, "打开本地文档…",
 						h("input", { type: "file", accept: "." + OFFICE_EXTS.join(",."), style: { display: "none" }, onChange: onUpload })),
 					h("button", { style: S.btn, onClick: refreshDocs }, "刷新")),
+				// 目录 + 刷新时间：列表不变时至少能看出「刷过了、扫的是哪个目录」
+				h("div", { style: Object.assign({}, S.muted, { padding: "2px 12px 4px" }) },
+					(docsDir ? "目录：" + docsDir : "") +
+					(refreshedAt ? (docsDir ? " ｜ " : "") + "已刷新 " + new Date(refreshedAt).toLocaleTimeString() : "")),
 				error ? h("div", { style: Object.assign({}, S.err, { padding: "0 12px" }) }, error) : null,
 				h("div", { style: S.body },
 					docs === null ? h("div", { style: S.muted }, "加载中…")
@@ -245,7 +261,7 @@ window.__ModuleLoader__.load({
 						id: "office-docs",
 						order: 50,
 						title: () => "文档（OnlyOffice）",
-						description: () => "打开、上传并编辑 docx / xlsx / pptx",
+						description: () => "打开、上传并编辑 docx / xlsx / pptx / pdf",
 					}],
 				});
 				ctx.effect(() => d, "office-bridge: tab type");

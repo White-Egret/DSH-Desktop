@@ -168,7 +168,7 @@
     py_bridge_label: 'AI 调用能力（Python 能力桥接）：',
     py_bridge_checking: '正在检测能力桥接状态…',
     // ---- OnlyOffice 块（office.rs，P3）：状态行由后端按当前语言生成，这里只放静态文案 ----
-    lbl_office_env: 'OnlyOffice 文档服务（docx / xlsx / pptx 在线编辑与 AI 生成）',
+    lbl_office_env: 'OnlyOffice 文档服务（docx / xlsx / pptx / pdf 在线编辑与 AI 生成）',
     office_checking: '正在检测 OnlyOffice…',
     office_status_fail: '检测 OnlyOffice 失败: {0}',
     lbl_office_dir: '安装位置（留空 = 官方默认 C:\\Program Files\\ONLYOFFICE\\DocumentServer；可改到 D 盘等目录）',
@@ -667,7 +667,7 @@
     py_bridge_label: 'AI-callable capabilities (Python capability bridge):',
     py_bridge_checking: 'Detecting the capability bridge…',
     // ---- OnlyOffice block (office.rs, P3): status lines are composed backend-side ----
-    lbl_office_env: 'OnlyOffice document service (docx / xlsx / pptx editing and AI generation)',
+    lbl_office_env: 'OnlyOffice document service (docx / xlsx / pptx / pdf editing and AI generation)',
     office_checking: 'Detecting OnlyOffice…',
     office_status_fail: 'Failed to detect OnlyOffice: {0}',
     lbl_office_dir: 'Install location (empty = official default C:\\Program Files\\ONLYOFFICE\\DocumentServer; another drive works too)',

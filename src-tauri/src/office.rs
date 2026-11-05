@@ -715,11 +715,9 @@ fn write_office_bundle_config(
     })
 }
 
-/// 已释放的 bundle 配置是否可用（照 py_bridge::bridge_config_usable 的口径）：
-/// 四个键都非空、URL 形状对、workspace 是真实目录。activate_pending 用它判定
-/// 「已注册但配置失效」的机器要不要重注册。
-fn office_config_usable(bun: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(bun.join("cordis.patch.yml")) else {
+/// 可由【任意一份】cordis.patch.yml 判断的配置可用性（profile 副本 / 暂存副本通用）。
+fn office_config_usable_file(patch: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(patch) else {
         return false;
     };
     let url = crate::py_bridge::read_bundle_scalar(&text, "docserverUrl").unwrap_or_default();
@@ -736,13 +734,52 @@ fn office_config_usable(bun: &Path) -> bool {
         && Path::new(&ws).is_dir()
 }
 
-/// 文档落盘目录：优先沿用已释放配置里的值（用户重装时目录不漂移），
-/// 首装用 `%USERPROFILE%\Documents\DSH-Office`（bundle 模板注释里的默认约定）。
-fn resolve_workspace_dir(bun: &Path) -> String {
-    if let Ok(text) = std::fs::read_to_string(bun.join("cordis.patch.yml")) {
-        if let Some(ws) = crate::py_bridge::read_bundle_scalar(&text, "workspaceDir") {
-            if !ws.trim().is_empty() {
-                return ws;
+/// 已释放的 bundle 配置是否可用（照 py_bridge::bridge_config_usable 的口径）。
+fn office_config_usable(bun: &Path) -> bool {
+    office_config_usable_file(&bun.join("cordis.patch.yml"))
+}
+
+/// profile 里**已安装副本**的 cordis.patch.yml —— 那才是 DSH 真正加载的那份。
+/// `%DSH_PROFILE_DIR%` 直接给的是 profile 目录本身；退路是 `DSH_HOME\profiles\<name>`。
+fn profile_bundle_patch(profile: &str) -> Option<PathBuf> {
+    let dir = match std::env::var("DSH_PROFILE_DIR").ok().filter(|s| !s.trim().is_empty()) {
+        Some(d) => PathBuf::from(d),
+        None => match std::env::var("DSH_HOME").ok().filter(|s| !s.trim().is_empty()) {
+            Some(home) => PathBuf::from(home).join("profiles").join(profile),
+            None => return None,
+        },
+    };
+    Some(
+        dir.join("node_modules")
+            .join("@local")
+            .join("dsh-desktop-office-bridge")
+            .join("cordis.patch.yml"),
+    )
+}
+
+/// 文档落盘目录。优先级（**顺序很要紧**）：
+///   ① profile 里已安装副本的 workspaceDir —— 那是当前真正在用的值；
+///   ② APPDATA 暂存副本的 workspaceDir；
+///   ③ 默认 `%USERPROFILE%\Documents\DSH-Office`。
+///
+/// ⚠ 为什么必须有 ①：1.6.3 首次启动时 activate_pending 会把模板（四键全空）释放到
+/// APPDATA 暂存目录，再读暂存副本来定目录 —— 只读 ② 的话永远拿到空值，于是文档
+/// 目录被静默改成默认目录（真机事故 2026-11-05：`D:\DSH\Workspace\office-docs`
+/// 被换成 `%USERPROFILE%\Documents\DSH-Office`，用户已有的文档"消失"）。
+fn resolve_workspace_dir(app: &AppHandle, bun: &Path) -> String {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(profile) = py_bridge_probe_profile(app) {
+        if let Some(patch) = profile_bundle_patch(&profile) {
+            candidates.push(patch);
+        }
+    }
+    candidates.push(bun.join("cordis.patch.yml"));
+    for patch in candidates {
+        if let Ok(text) = std::fs::read_to_string(&patch) {
+            if let Some(ws) = crate::py_bridge::read_bundle_scalar(&text, "workspaceDir") {
+                if !ws.trim().is_empty() {
+                    return ws;
+                }
             }
         }
     }
@@ -1057,7 +1094,7 @@ fn deploy_office_after_install(
             cfg.office_docserver_url.trim().to_string()
         }
     };
-    let workspace = resolve_workspace_dir(&bun);
+    let workspace = resolve_workspace_dir(app, &bun);
     write_office_bundle_config(&bun, &docserver_url, secret, doc_port, &workspace)?;
     process::setup_progress(app, "deploy", &i18n::fmt("office_bundle_configured", &[&docserver_url, &doc_port.to_string()]));
 
@@ -1455,8 +1492,17 @@ pub fn activate_pending(app: &AppHandle) -> Option<String> {
     // 已注册 ≠ 还能用：换端口 / 换安装目录后，profile 里那份 cordis.patch.yml
     // 副本还带着旧值。判据失败就走重写配置 + 重注册（改源目录没用，
     // DSH 加载的是 profile 里那份安装副本 —— py_bridge.rs:630-640 的教训）。
+    //
+    // ⚠ 判据要读 **profile 副本**，不是 APPDATA 暂存副本：暂存副本是刚由模板
+    // （四键全空）释放出来的，拿它判几乎必然"失效"，于是每次启动都无谓重注册、
+    // 还把 workspaceDir 重置成默认目录（真机事故 2026-11-05）。
     if registered {
-        if office_config_usable(&bun) {
+        let installed = profile_bundle_patch(&profile);
+        let usable = match &installed {
+            Some(p) if p.is_file() => office_config_usable_file(p),
+            _ => office_config_usable(&bun),
+        };
+        if usable {
             if pending {
                 let _ = clear_office_pending(app);
             }
@@ -1470,7 +1516,7 @@ pub fn activate_pending(app: &AppHandle) -> Option<String> {
             &format!("http://127.0.0.1:{docserver_port}"),
             &secret,
             if doc_port > 0 { doc_port } else { DEFAULT_DOC_PORT },
-            &resolve_workspace_dir(&bun),
+            &resolve_workspace_dir(app, &bun),
         ) {
             let line = format!("[office-bridge] 重写插件配置失败：{e}");
             logger::append_line(&logger::desktop_log_path(app), &line);
@@ -1500,7 +1546,7 @@ pub fn activate_pending(app: &AppHandle) -> Option<String> {
         &format!("http://127.0.0.1:{docserver_port}"),
         &secret,
         doc_port,
-        &resolve_workspace_dir(&bun),
+        &resolve_workspace_dir(app, &bun),
     ) {
         logger::append_line(
             &logger::desktop_log_path(app),

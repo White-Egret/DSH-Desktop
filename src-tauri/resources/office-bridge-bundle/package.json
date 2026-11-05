@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-desktop-office-bridge",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "private": true,
   "type": "module",
   "description": "DSH Desktop —— OnlyOffice 能力桥接宿主插件：六个 office_* 工具 + 本地文档服务（取文件 / 保存回调 / 编辑器宿主页）+ 右侧栏「文档」入口（Client 半身）",

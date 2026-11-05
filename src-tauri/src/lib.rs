@@ -4,6 +4,7 @@ mod elevate;
 mod exit_guard;
 mod i18n;
 mod logger;
+mod office;
 mod process;
 mod py_bridge;
 mod safe;
@@ -128,6 +129,12 @@ pub fn run(launched_by_autostart: bool) {
             // 刻意不提供手动部署命令 —— 它与自动激活完全重叠，多一颗按钮只会
             // 让人误以为「装完还得再点一下」）
             py_bridge::bridge_status,
+            // OnlyOffice 能力桥接（P3）：状态探测 + 一键安装/卸载/清扫。
+            // 释放与注册同样由「进入 DSH 时自动激活」承担（office::activate_pending）。
+            office::office_status,
+            office::setup_install_office,
+            office::setup_uninstall_office,
+            office::setup_office_cleanup,
             process::finish_setup,
             process::set_language,
             // 首次运行向导的「Node 版本过低」告警：保留旧版本并继续（只写 node_min_ack 一个键）

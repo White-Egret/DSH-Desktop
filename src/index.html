@@ -299,6 +299,42 @@
             <pre id="python-log" class="update-progress-log hidden"></pre>
           </div>
         </div>
+        <!-- OnlyOffice 块（P3）：结构与 Python 块同款（py-head/py-status/py-dir/py-progress
+             全部复用现有样式，见 style.css 的 py-* 清单）。状态两行都由后端拼好
+             （office_status 的 ds_message / plugin_message），前端只显示不拼装。
+             动态文案刻意不挂 data-i18n（会被 applyDom 打回默认，见 i18n.js 头注）。 -->
+        <div class="field office-block">
+          <span class="py-head" data-i18n="lbl_office_env">OnlyOffice 文档服务（docx / xlsx / pptx 在线编辑与 AI 生成）</span>
+          <div id="office-status" class="py-status" data-i18n="office_checking">正在检测 OnlyOffice…</div>
+          <div id="office-dir-row" class="py-dir hidden">
+            <span data-i18n="lbl_office_dir">安装位置（留空 = 官方默认 C:\Program Files\ONLYOFFICE\DocumentServer；可改到 D 盘等目录）</span>
+            <div class="row">
+              <input id="set-office-dir" type="text" spellcheck="false" placeholder="留空 = 官方默认安装位置" data-i18n-placeholder="ph_office_dir" />
+              <button class="btn small" data-pick="folder" data-kind="office" data-target="set-office-dir" data-i18n="btn_browse">浏览</button>
+            </div>
+          </div>
+          <div class="row gap">
+            <button id="btn-office-install" class="btn primary">安装 OnlyOffice（Document Server + AI 桥接）</button>
+            <button id="btn-office-cleanup" class="btn subtle hidden">清扫残余…</button>
+          </div>
+          <div class="hint" data-i18n-html="office_packages_html">
+            将下载并静默安装 OnlyOffice Docs 社区版（AGPLv3，约 874 MB，仅监听本机
+            127.0.0.1:8080，不对外网开放；哈希与数字签名校验不通过会直接中止），
+            随后部署「AI 文档桥接」插件（转换 / 读取 / 生成 / 强制保存 / 打开编辑六个工具）。
+            安装是整机级别的，过程中会弹一次 UAC 提权确认。卸载不会删除你的任何文档。
+          </div>
+          <div class="py-bridge-row">
+            <span class="py-bridge-label" data-i18n="office_bridge_label">AI 调用能力（文档桥接插件）：</span>
+            <div id="office-bridge-status" class="py-status" data-i18n="office_bridge_checking">正在检测文档桥接状态…</div>
+          </div>
+          <div id="office-progress" class="py-progress hidden">
+            <div class="py-progress-head">
+              <div class="spinner small"></div>
+              <div id="office-progress-text" class="py-progress-text"></div>
+            </div>
+            <pre id="office-log" class="update-progress-log hidden"></pre>
+          </div>
+        </div>
         <div class="field uninstall-block">
           <span data-i18n="lbl_node_pnpm_dsh">Node.js，pnpm与DSH</span>
           <div id="toolchain-versions" class="toolchain-versions">正在读取版本号…</div>
@@ -557,6 +593,29 @@
         <button id="btn-py-uninstall-cancel" class="btn" data-i18n="btn_cancel">取消</button>
         <button id="btn-py-uninstall-extra-first" class="btn hidden" data-i18n="btn_py_uninstall_extra_first">先卸载扩展包，再卸办公包</button>
         <button id="btn-py-uninstall-confirm" class="btn danger" data-i18n="btn_py_uninstall_confirm">确认卸载</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 卸载 OnlyOffice 的确认框（「安装 OnlyOffice」装好后变成「卸载…」→ 这里 → 执行）。
+       与「卸载 DSH」、py-uninstall-modal 刻意互不共用：这三者卸的东西和要交代的话完全不同。
+       会删：Document Server（整机，含四个 Windows 服务）、office-bridge 插件、释放代码。
+       不会删：你的任何文档文件、DSH 家目录、DSH Desktop 本身。 -->
+  <div id="office-uninstall-modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-title" id="office-uninstall-title">卸载</div>
+      <div class="modal-body">
+        <div id="office-uninstall-body"></div>
+        <div class="upd-cmd-label" data-i18n="uninstall_will_run">将执行：</div>
+        <code class="block-code" id="office-uninstall-cmd"></code>
+        <div class="upd-backup">
+          <div class="upd-backup-title" data-i18n="uninstall_keeps_title">不会被删除</div>
+          <div class="upd-backup-note" id="office-uninstall-keeps"></div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-office-uninstall-cancel" class="btn" data-i18n="btn_cancel">取消</button>
+        <button id="btn-office-uninstall-confirm" class="btn danger" data-i18n="btn_office_uninstall_confirm">确认卸载</button>
       </div>
     </div>
   </div>

@@ -1453,6 +1453,8 @@ async function init() {
   await listen('setup-result', (e) => onSetupResult(e.payload));
   // 首选项「Python 安装」的逐行输出（pip 的实时输出；由后端 spawn_log_reader 转发）
   await listen('python-log', (e) => appendPythonLog(e.payload.line));
+  // 首选项「OnlyOffice 安装」的逐行输出（下载重试 / npm pack / dsh plugin add 的实时输出）
+  await listen('office-log', (e) => appendOfficeLog(e.payload.line));
   // 安全模式：进入/退出/闪退（safe-mode-change）与修复验证结果（safe-verify）
   await listen('safe-mode-change', (e) => onSafeModeChange(e.payload));
   await listen('safe-verify', (e) => onSafeVerify(e.payload));
@@ -1724,6 +1726,8 @@ function openSettings() {
 function openManage() {
   // Python 状态（版本 / 路径 / 包是否装齐）—— 顺带会刷新桥接状态行
   refreshPythonStatus();
+  // OnlyOffice 状态（Document Server / 插件 phase）—— 顺带刷新文档桥接状态行
+  refreshOfficeStatus();
   // 一键安装还在后台跑（弹窗曾被关掉）：先把进度区按最后的消息摆回来
   if (manageInstall.active) {
     setManageInstallProgress(true, manageInstall.message || t('ver_line_checking'));
@@ -2143,6 +2147,15 @@ async function refreshRegistryInfo() {
 //
 const pythonTask = { active: false };
 
+/// OnlyOffice 安装任务的会话内状态（与 pythonTask 同一分流纪律：setup-status /
+/// setup-result 是全局通道，靠这个标志决定进度落到哪个进度区）。
+const officeTask = { active: false };
+/// 最近一次 office_status 快照：按钮两态（安装 ⇄ 卸载）与目录行的显隐依据。
+const officeState = { installed: false };
+/// 卸载成功后置位：官方卸载器必留残余（~33MB + %ProgramData%\ONLYOFFICE），
+/// 「清扫残余」按钮只在卸载过一次的会话里露出（§6 的两段式）。
+let officeCleanupOffered = false;
+
 /// 最近一次 `python_status` 的快照，只给按钮高亮用。
 /// 初始按「什么都没装」处理 —— 与 index.html 里两个按钮的初始 class（基本安装 = 蓝、
 /// 数据分析 = 白）一致，这样探测结果没回来之前不会出现高亮来回跳。
@@ -2450,6 +2463,188 @@ async function refreshBridgeStatus() {
     // 问不到就如实说一句，别让这一行空着像卡住了
     el.textContent = t('toast_py_status_fail', e);
   }
+}
+
+// ============ OnlyOffice 块（office.rs，P3） ============
+// 结构照 Python 块。状态两行由后端拼好（office_status 的 ds_message /
+// plugin_message，§2.2 的「一行四段事实」在后端做，前端只显示不拼装）；
+// 安装/卸载/清扫共用 setup-status / setup-result 通道，target = "office"。
+// officeLastAction 记录「这次跑的是哪件事」：卸载成功后要亮「清扫残余」
+// （官方卸载器必留残余，§6），并在结果里重取全局 config（见 onOfficeResult）。
+let officeLastAction = '';
+
+async function refreshOfficeStatus() {
+  const el = $('office-status');
+  if (!el) return;
+  // 安装进行中不去打扰后端（它正忙着），状态行由进度区负责
+  if (!officeTask.active) el.textContent = t('office_checking');
+  try {
+    renderOfficeStatus(await invoke('office_status'));
+  } catch (e) {
+    el.textContent = t('office_status_fail', e);
+    const dirRow = $('office-dir-row');
+    if (dirRow) dirRow.classList.remove('hidden');
+  }
+  // 插件 phase 是第二条独立探测，跟着一起刷
+  refreshOfficeBridgeStatus();
+}
+
+function renderOfficeStatus(s) {
+  const el = $('office-status');
+  if (!el || !s) return;
+  officeState.installed = !!s.installed;
+  el.textContent = s.ds_message || '';
+  const bridgeEl = $('office-bridge-status');
+  if (bridgeEl) bridgeEl.textContent = s.plugin_message || '';
+  // 目录行只在「未安装」时露出（与 python-dir-row 同款规则）
+  const dirRow = $('office-dir-row');
+  if (dirRow) dirRow.classList.toggle('hidden', !!s.installed);
+  const cleanBtn = $('btn-office-cleanup');
+  if (cleanBtn) cleanBtn.classList.toggle('hidden', !(officeCleanupOffered && !officeTask.active));
+  renderOfficeButtons();
+}
+
+function renderOfficeButtons() {
+  const b = $('btn-office-install');
+  if (!b) return;
+  if (officeState.installed) {
+    b.textContent = t('btn_office_uninstall');
+    b.classList.remove('primary');
+    b.classList.add('subtle');
+  } else {
+    b.textContent = t('btn_office_install');
+    b.classList.add('primary');
+    b.classList.remove('subtle');
+  }
+  b.disabled = officeTask.active;
+}
+
+function setOfficeProgress(show, text) {
+  const el = $('office-progress');
+  if (!el) return;
+  el.classList.toggle('hidden', !show);
+  if (text) $('office-progress-text').textContent = text;
+}
+
+function setOfficeSpinner(show) {
+  const sp = document.querySelector('#office-progress .spinner');
+  if (sp) sp.classList.toggle('hidden', !show);
+}
+
+function appendOfficeLog(line) {
+  const pre = $('office-log');
+  if (!pre) return;
+  pre.classList.remove('hidden');
+  pre.textContent += (pre.textContent ? '\n' : '') + line;
+  // 300 行封顶（与 python-log 同一条纪律：874 MB 的下载日志能把 DOM 拖死）
+  const lines = pre.textContent.split('\n');
+  if (lines.length > 300) pre.textContent = lines.slice(-300).join('\n');
+  pre.scrollTop = pre.scrollHeight;
+}
+
+async function runOfficeInstall() {
+  if (officeTask.active) {
+    toast(t('office_busy'), true);
+    return;
+  }
+  const dirEl = $('set-office-dir');
+  const dir = dirEl ? dirEl.value.trim() : '';
+  officeTask.active = true;
+  officeLastAction = 'install';
+  renderOfficeButtons();
+  const log = $('office-log');
+  if (log) { log.textContent = ''; log.classList.add('hidden'); }
+  setOfficeProgress(true, t('office_progress_start'));
+  setOfficeSpinner(true);
+  try {
+    await invoke('setup_install_office', { dir: dir || null });
+    // 后续由 setup-status / setup-result（target = "office"）事件接手
+  } catch (e) {
+    officeTask.active = false;
+    renderOfficeButtons();
+    setOfficeSpinner(false);
+    setOfficeProgress(true, String(e));
+    appendOfficeLog(String(e));
+    toast(String(e), true);
+  }
+}
+
+function openOfficeUninstallConfirm() {
+  if (officeTask.active) {
+    toast(t('office_busy'), true);
+    return;
+  }
+  $('office-uninstall-title').textContent = t('office_uninstall_title');
+  $('office-uninstall-body').textContent = t('office_uninstall_body');
+  $('office-uninstall-cmd').textContent = t('office_uninstall_cmd');
+  $('office-uninstall-keeps').textContent = t('office_uninstall_keeps');
+  showModal('office-uninstall-modal');
+}
+
+function startOfficeUninstall() {
+  officeTask.active = true;
+  officeLastAction = 'uninstall';
+  renderOfficeButtons();
+  const log = $('office-log');
+  if (log) { log.textContent = ''; log.classList.add('hidden'); }
+  setOfficeProgress(true, t('office_uninstall_progress'));
+  setOfficeSpinner(true);
+  invoke('setup_uninstall_office').catch((e) => {
+    officeTask.active = false;
+    renderOfficeButtons();
+    setOfficeSpinner(false);
+    setOfficeProgress(true, String(e));
+    appendOfficeLog(String(e));
+    toast(String(e), true);
+  });
+}
+
+async function runOfficeCleanup() {
+  if (officeTask.active) {
+    toast(t('office_busy'), true);
+    return;
+  }
+  officeTask.active = true;
+  officeLastAction = 'cleanup';
+  renderOfficeButtons();
+  setOfficeProgress(true, t('office_cleanup_progress'));
+  setOfficeSpinner(true);
+  try {
+    await invoke('setup_office_cleanup');
+  } catch (e) {
+    setOfficeProgress(true, String(e));
+    appendOfficeLog(String(e));
+    toast(String(e), true);
+  }
+}
+
+function onOfficeResult(p) {
+  officeTask.active = false;
+  renderOfficeButtons();
+  const msg = p.message || (p.success ? t('office_done_ok') : t('office_done_fail'));
+  setOfficeProgress(true, msg);
+  setOfficeSpinner(false);
+  appendOfficeLog(msg);
+  toast(msg, !p.success);
+  // 卸载成功：官方卸载器必留残余（§6），本会话内亮出「清扫残余」
+  if (p.success && officeLastAction === 'uninstall') {
+    officeCleanupOffered = true;
+  }
+  // 全局 config 快照重取：它里面可能还揣着卸载前的 office_install_dir 等字段，
+  // 不刷新的话下一次「保存首选项」会把已清掉的值原样写回（save_config 整份落盘）。
+  // ⚠ get_config 返回的是整个 ConfigReport（config 字段是 #[serde(flatten)] 出来的，
+  // JSON 里没有嵌套的 config 键）——必须赋整个 report，别处还依赖 dsh_exists /
+  // first_run / config_path 这些 report 级字段（与 init/saveSettings 的口径一致）。
+  invoke('get_config').then((r) => { if (r) config = r; }).catch(() => {});
+  refreshOfficeStatus();
+}
+
+async function refreshOfficeBridgeStatus() {
+  const el = $('office-bridge-status');
+  if (!el) return;
+  // 插件行不用单独探测：office_status 一次就带回了 plugin_message
+  // （refreshOfficeStatus 已写入）。这个函数保留为空实现是为了让调用点
+  // 与 Python 块的 refreshBridgeStatus 形状一致，将来拆分探测时不用改调用点。
 }
 
 async function saveSettings() {
@@ -3516,6 +3711,13 @@ function setWizProgress(show, text) {
 }
 
 function onSetupStatus(p) {
+  // 首选项的 OnlyOffice 安装任务在跑时，进度归它（与 Python 共用后端 setup_busy，
+  // 同一时刻只有一个任务；office 的 phase 集合多了 config / deploy 两档）
+  if (officeTask.active) {
+    setOfficeProgress(true, p.message);
+    appendOfficeLog(p.message);
+    return;
+  }
   // 首选项的 Python 安装任务在跑时，进度归它（两者共用后端的 setup_busy，
   // 同一时刻只会有一个，所以这里可以直接让 Python 优先）
   if (pythonTask.active) {
@@ -3539,6 +3741,11 @@ function onSetupStatus(p) {
 }
 
 function onSetupResult(p) {
+  // 首选项里发起的 OnlyOffice 安装/卸载/清扫：进度区在设置页里，与向导无关
+  if (p.target === 'office') {
+    onOfficeResult(p);
+    return;
+  }
   // 首选项里发起的 Python 安装（基本安装 / 数据分析扩展包）：进度区在设置页里，
   // 与向导无关 —— 不碰 wiz.busy，也不触发向导的「重新检测」
   if (p.target && p.target.indexOf('python') === 0) {
@@ -3798,6 +4005,16 @@ function bindUI() {
   $('btn-py-uninstall-confirm').onclick = () => doPyUninstall(false);
   $('btn-py-uninstall-extra-first').onclick = () => doPyUninstall(true);
   // 能力桥接**没有按钮**：释放 + 注册由「进入 DSH 时自动激活」承担，见 refreshBridgeStatus
+  // OnlyOffice 块（P3）：一键按钮两态（安装 ⇄ 卸载），卸载过确认框；清扫只在卸载后露出
+  $('btn-office-install').onclick = () => (officeState.installed
+    ? openOfficeUninstallConfirm()
+    : runOfficeInstall());
+  $('btn-office-cleanup').onclick = () => runOfficeCleanup();
+  $('btn-office-uninstall-cancel').onclick = () => hideModal('office-uninstall-modal');
+  $('btn-office-uninstall-confirm').onclick = () => {
+    hideModal('office-uninstall-modal');
+    startOfficeUninstall();
+  };
 
   // 检测全局包名
   $('btn-detect-package').onclick = async () => {

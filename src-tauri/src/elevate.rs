@@ -86,6 +86,66 @@ pub fn remove_paths_elevated(paths: &[String]) -> Option<ElevatedOutcome> {
     Some(outcome)
 }
 
+/// 通用提权执行器（OnlyOffice 的安装器/配置合并/卸载器共用，§3.3 ⑤ 的
+/// `run_elevated_office_step` 落在这里，因为它只是骨架、不含任何 office 语义）。
+///
+/// 流程与 [`remove_paths_elevated`] 完全同款：私有临时目录放脚本与结果文件
+/// （结果文件先建空文件作为「脚本写完了」的信号）→ `ShellExecuteExW` + runas
+/// → 轮询结果文件。差别只有两处：
+///
+/// 1. **脚本文本由调用方给**。调用方必须自己保证内容可信（office.rs 里的脚本
+///    全部由常量 + 本模块写下的路径拼成）；本函数不再设白名单 —— 白名单挡的
+///    是「调用方传错路径」，而这里没有路径参数可传错。
+/// 2. **超时由调用方给**。OnlyOffice 安装器要跑几分钟到几十分钟，120 秒那套
+///    默认值对它毫无意义。
+///
+/// 返回值三态与 [`remove_paths_elevated`] 相同：`None` = 没能提权；
+/// `Some(text)` = 提权了（text 是结果文件内容，可能为空串 = 超时没写回）。
+/// 结果文件由 PowerShell 以 `-Encoding UTF8` 写出（带 BOM），返回前剥掉 BOM。
+pub fn run_elevated(script_body: &str, timeout: std::time::Duration) -> Option<String> {
+    let dir = private_temp_dir()?;
+    let script = dir.join("run.ps1");
+    let result = dir.join("result.txt");
+    if std::fs::write(&result, b"").is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return None;
+    }
+    // UTF-8 **带 BOM** 落盘（P0 实测教训，§10.2：PS 5.1 把无 BOM 的 UTF-8 按 GBK
+    // 读，脚本里出现非 ASCII（比如中文安装目录）就直接破坏解析）。纯 ASCII 的
+    // 脚本加 BOM 也无害。
+    let mut bytes = Vec::with_capacity(script_body.len() + 3);
+    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    bytes.extend_from_slice(script_body.as_bytes());
+    if std::fs::write(&script, bytes).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return None;
+    }
+
+    if !win::launch_runas(&script, &result) {
+        // 用户在 UAC 点了「否」：如实报「没能提权」，不重试、不追问。
+        let _ = std::fs::remove_dir_all(&dir);
+        return None;
+    }
+
+    let started = std::time::Instant::now();
+    let text = loop {
+        if let Ok(meta) = std::fs::metadata(&result) {
+            if meta.len() > 0 {
+                break std::fs::read_to_string(&result).unwrap_or_default();
+            }
+        }
+        if started.elapsed() >= timeout {
+            // 超时 = 脚本没写回结果。返回空串，由调用方按「提权了但没拿到结果」处理
+            // —— 绝不能当成成功。
+            break String::new();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    // 剥掉 PowerShell 写结果文件时带的 UTF-8 BOM，调用方拿到的是干净文本
+    Some(text.strip_prefix('\u{feff}').map(str::to_string).unwrap_or(text))
+}
+
 /// 结果文件里的一行：`OK<TAB>路径` 或 `ERR<TAB>路径<TAB>原因`。
 fn parse_result(text: &str) -> ElevatedOutcome {
     let mut out = ElevatedOutcome::default();

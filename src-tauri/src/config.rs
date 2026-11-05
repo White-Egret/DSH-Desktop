@@ -142,6 +142,29 @@ pub struct Config {
     /// 「缺字段沿用磁盘值」兜底（与 node_min_ack 同款）；③activate_pending
     /// 的自愈进门 —— 标记丢了，只要桥接代码已释放就照样补注册。
     pub python_bridge_pending: String,
+    /// OnlyOffice Document Server 的端口（默认 8080）。
+    /// 安装时原样写进安装器参数 `/DS_PORT=<port>`，之后探测与健康检查都用它。
+    /// 目前不在设置页暴露（预检会实际试绑，占用时报错而不是静默换端口——
+    /// 换端口会让 §3.3 的 local.json 合并与插件配置对不上）。
+    pub office_docserver_port: u16,
+    /// office-bridge 插件文档服务的端口（默认 3310）。
+    /// 这里记的是**期望值**：插件被占时会自动顺延（最多 10 个），实际端口以
+    /// 插件自己的 `GET /status` 为准（`docPort` vs `docPortConfigured`）。
+    pub office_doc_port: u16,
+    /// Document Server 对外 URL；空串 = `http://127.0.0.1:<office_docserver_port>`。
+    /// 目前没有任何路径会把它写成非空（本机固定 127.0.0.1），字段留着是为了
+    /// 将来「Document Server 装在别的机器/端口」时不改结构体。
+    pub office_docserver_url: String,
+    /// Document Server 的实际安装目录（探测的兜底来源 + 卸载时定位 `unins000*.exe`）。
+    /// 安装成功后由 office.rs 写入；运行时记忆字段，不是设置页字段。
+    pub office_install_dir: String,
+    /// office-bridge 的「待激活」标记（内容 = 安装时的 docserver 端口快照，仅作日志线索）。
+    /// 空串 = 没有 pending。
+    ///
+    /// ⚠ 与 python_bridge_pending 同一条真机教训：**必须**是 Config 正式字段 +
+    /// save_config 的「缺字段沿用磁盘值」兜底 + activate_pending 自愈三选一，
+    /// 否则任何一次「load → 整体写回」都会把它当未知键抹掉（详见那个字段的注释）。
+    pub office_bridge_pending: String,
 }
 
 impl Default for Config {
@@ -190,6 +213,13 @@ impl Default for Config {
             startup_music_volume: 60,
             // 空 = 没有「待激活」的 Python 桥接（见结构体字段注释）
             python_bridge_pending: String::new(),
+            // OnlyOffice：端口默认 8080/3310（§3.3 的预检会对它们实际试绑）；
+            // 三个字符串字段空 = 未安装 / 用默认 URL / 没有 pending
+            office_docserver_port: 8080,
+            office_doc_port: 3310,
+            office_docserver_url: String::new(),
+            office_install_dir: String::new(),
+            office_bridge_pending: String::new(),
         }
     }
 }
@@ -510,6 +540,23 @@ const PYTHON_DIR_ERR: DirErrKeys = DirErrKeys {
     is_file: "err_node_dir_is_file",
 };
 
+/// OnlyOffice 的安装目录：Inno Setup 系安装器，`/DIR=<路径>` 交给提权的
+/// `onlyoffice-documentserver.exe`（§3.3 ④）。
+///
+/// 与 Python 刻意相反：**不额外禁整棵 `Program Files` 子树**——这是系统级整机
+/// 安装（要走 UAC），官方默认位置就在 `C:\Program Files\ONLYOFFICE\` 下；
+/// `validate_install_dir_common` 已经禁了「Program Files 根目录本身」，
+/// 这里不再加码。长度上限与 Python 一致（200，§3.2）。
+const OFFICE_INSTALL_DIR_MAX_CHARS: usize = 200;
+
+const OFFICE_DIR_ERR: DirErrKeys = DirErrKeys {
+    chars: "err_node_dir_chars",
+    too_long: "err_office_dir_too_long",
+    drive: "err_node_dir_drive",
+    system: "err_office_dir_system",
+    is_file: "err_node_dir_is_file",
+};
+
 /// 「某个目录马上要被安装器写入」的共用校验，返回规范化后的路径（调用方已挡掉空串）。
 ///
 /// 为什么抽出来共用：Node 的安装目录（`INSTALLDIR` 交给提权的 MSI）与 DSH 的安装位置
@@ -662,6 +709,27 @@ pub fn validate_python_install_dir(raw: &str) -> Result<Option<String>, String> 
         }
     }
     Ok(Some(norm))
+}
+
+/// 校验「引导安装 OnlyOffice 的自定义安装目录」，返回规范化后的路径。
+///
+/// 与 Node/Python 同一把尺子（`validate_install_dir_common`），报错里点的是
+/// OnlyOffice 自己的名字（`lbl_office_install_dir`）。**刻意不加** Python 那条
+/// 「禁整棵 Program Files」的加码：OnlyOffice 的安装器要走 UAC 提权，官方默认
+/// 位置就在 `C:\Program Files\ONLYOFFICE\` 下（§3.2）。
+///
+/// `raw` 为空 = 用户没填 = 用官方默认目录，返回 `Ok(None)`。
+pub fn validate_office_install_dir(raw: &str) -> Result<Option<String>, String> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let field = i18n::t("lbl_office_install_dir");
+    Ok(Some(validate_install_dir_common(
+        field,
+        raw,
+        OFFICE_INSTALL_DIR_MAX_CHARS,
+        &OFFICE_DIR_ERR,
+    )?))
 }
 
 
@@ -1926,6 +1994,67 @@ mod tests {
             r"D:\Programs\Python\python.exe",
             "pending 标记必须在整体写盘往返中存活"
         );
+    }
+
+    #[test]
+    fn office_fields_survive_roundtrip_and_default_sensibly() {
+        // 与 python_bridge_pending 同一条教训：office_* 五个字段都必须是正式字段，
+        // 任何一次 load → 写回（前端保存首选项、set_last_url 单键写…）不能丢它们。
+        let mut c = Config::default();
+        assert_eq!(c.office_docserver_port, 8080);
+        assert_eq!(c.office_doc_port, 3310);
+        assert!(c.office_docserver_url.is_empty());
+        assert!(c.office_install_dir.is_empty());
+        assert!(c.office_bridge_pending.is_empty());
+        c.office_docserver_port = 8090;
+        c.office_doc_port = 3311;
+        c.office_docserver_url = "http://127.0.0.1:8090".to_string();
+        c.office_install_dir = r"D:\Programs\ONLYOFFICE\DocumentServer".to_string();
+        c.office_bridge_pending = "docserver:8090".to_string();
+        let text = serde_json::to_string(&c).expect("serialize Config");
+        let back: Config = serde_json::from_str(&text).expect("deserialize Config");
+        assert_eq!(back.office_docserver_port, 8090);
+        assert_eq!(back.office_doc_port, 3311);
+        assert_eq!(back.office_docserver_url, "http://127.0.0.1:8090");
+        assert_eq!(back.office_install_dir, r"D:\Programs\ONLYOFFICE\DocumentServer");
+        assert_eq!(back.office_bridge_pending, "docserver:8090");
+    }
+
+    #[test]
+    fn office_config_without_fields_falls_back_to_defaults() {
+        // 旧版 config.json 没有 office_* 键：serde(default) 必须兜住，
+        // 不能让整份配置反序列化失败（那会连用户其它设置一起打回默认值）。
+        let legacy = r#"{"port": 3080, "language": "zh"}"#;
+        let c: Config = serde_json::from_str(legacy).expect("legacy config must parse");
+        assert_eq!(c.office_docserver_port, 8080);
+        assert_eq!(c.office_doc_port, 3310);
+        assert!(c.office_bridge_pending.is_empty());
+    }
+
+    // 依赖 Windows 路径语义（盘符 / 反斜杠 / Program Files 环境变量）：
+    // 非 Windows 平台上 path_shape 会把 `C:\...` 判成相对路径，第一条断言必挂，
+    // 所以与文件里其它路径类测试一样加 #[cfg(windows)]
+    #[cfg(windows)]
+    #[test]
+    fn validate_office_install_dir_rules() {
+        // 空串 = 用官方默认，不是错误
+        assert!(validate_office_install_dir("").unwrap().is_none());
+        assert!(validate_office_install_dir("   ").unwrap().is_none());
+        // Program Files 子目录放行（官方默认就在那里；与 Python 那条刻意相反）
+        assert!(validate_office_install_dir(r"C:\Program Files\ONLYOFFICE\DocumentServer").is_ok());
+        // 系统目录拒绝
+        assert!(validate_office_install_dir(r"C:\Windows\OnlyOffice").is_err());
+        assert!(validate_office_install_dir(r"C:\ProgramData\OnlyOffice").is_err());
+        // Program Files 根目录本身拒绝（common 已挡，这里确认没被 office 层放掉）
+        assert!(validate_office_install_dir(r"C:\Program Files").is_err());
+        // 盘符根拒绝
+        assert!(validate_office_install_dir(r"D:\\").is_err());
+        // 相对路径 / UNC 拒绝（path_shape）
+        assert!(validate_office_install_dir("relative\\path").is_err());
+        assert!(validate_office_install_dir(r"\\server\share\onlyoffice").is_err());
+        // 非 office 层的新增：长度上限与其它安装一致（200）
+        let long = format!("C:\\{}", "a".repeat(300));
+        assert!(validate_office_install_dir(&long).is_err());
     }
     use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;

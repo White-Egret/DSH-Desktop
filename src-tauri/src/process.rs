@@ -475,6 +475,11 @@ pub(crate) fn set_status(app: &AppHandle, status: &str, message: Option<String>)
             // 插件 spawn，目录不再被锁，空壳可以删掉。
             crate::py_bridge::cleanup_stale_bridge_dirs(&app2);
             crate::py_bridge::activate_pending(&app2);
+            // OnlyOffice 桥接的「待激活」走同一扇门（install 时 DSH 在跑 → 留
+            // pending → 这里补注册）。office 的 activate_pending 自带「Document
+            // Server 必须已安装」的硬前提，卸载后残留标记不会把插件复活。
+            crate::office::cleanup_stale_office_dirs(&app2);
+            crate::office::activate_pending(&app2);
         });
     }
 }
@@ -1054,7 +1059,7 @@ pub(crate) fn spawn_log_reader(
 }
 
 /// 读取整个管道（进程退出后调用）
-fn drain_pipe(r: &mut Option<impl Read>) -> Vec<u8> {
+pub(crate) fn drain_pipe(r: &mut Option<impl Read>) -> Vec<u8> {
     let mut buf = Vec::new();
     if let Some(r) = r.as_mut() {
         let _ = r.read_to_end(&mut buf);
@@ -3006,6 +3011,23 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
         && !old_cfg.python_bridge_pending.trim().is_empty()
     {
         config.python_bridge_pending = old_cfg.python_bridge_pending.clone();
+    }
+    // OnlyOffice 桥接的三个运行时记忆字段：同样不是设置页字段，缺了沿用磁盘值。
+    // （office_install_dir / office_docserver_url 由安装流程写、卸载流程清；
+    // 两个 u16 端口字段有 serde default 兜底，前端漏传也不会归零，不需要守卫。）
+    if config.office_bridge_pending.trim().is_empty()
+        && !old_cfg.office_bridge_pending.trim().is_empty()
+    {
+        config.office_bridge_pending = old_cfg.office_bridge_pending.clone();
+    }
+    if config.office_install_dir.trim().is_empty() && !old_cfg.office_install_dir.trim().is_empty()
+    {
+        config.office_install_dir = old_cfg.office_install_dir.clone();
+    }
+    if config.office_docserver_url.trim().is_empty()
+        && !old_cfg.office_docserver_url.trim().is_empty()
+    {
+        config.office_docserver_url = old_cfg.office_docserver_url.clone();
     }
     config::save(&app, &config)?;
     // 固定显示模式下「收起」没有意义：顺手清掉，免得前端漏同步时内容区仍按 0 偏移
@@ -5277,7 +5299,7 @@ const SHA_K: [u32; 64] = [
 ];
 
 /// 标准 SHA-256，返回 64 位小写十六进制。输入是一次性读入的整个文件（约 30MB）。
-fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     let mut h: [u32; 8] = [
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
         0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
@@ -5393,7 +5415,7 @@ fn random_temp_suffix(counter: u32) -> String {
 /// 原来直接写 `%TEMP%\node-v<版本>-x64.msi`：文件名完全可预测，同用户进程可以
 /// 抢先把该名字做成符号链接（curl 的 CREATE_ALWAYS 会顺着链接覆盖任意可写文件），
 /// 或抢先落一个自己的 MSI。随机目录 + create_dir 排他创建能同时挡住这两种。
-fn create_private_temp_dir(tag: &str) -> Result<PathBuf, String> {
+pub(crate) fn create_private_temp_dir(tag: &str) -> Result<PathBuf, String> {
     let base = std::env::temp_dir();
     for attempt in 0u32..5 {
         let dir = base.join(format!("dsh-{}-setup-{}", tag, random_temp_suffix(attempt)));
@@ -5793,7 +5815,7 @@ fn mb_str(bytes: u64) -> String {
 }
 
 /// 按 `Content-Length` + 已落盘字节数，向前端/日志发一次下载进度。
-fn emit_download_progress(app: &AppHandle, done: u64, total: Option<u64>) {
+pub(crate) fn emit_download_progress(app: &AppHandle, done: u64, total: Option<u64>) {
     let msg = match total {
         Some(t) if t > 0 => {
             // 卡在 0..100：探大小那次 HEAD 不带 `--compressed`，而 GET 现在带 ——
@@ -5810,7 +5832,7 @@ fn emit_download_progress(app: &AppHandle, done: u64, total: Option<u64>) {
 /// 用 curl HEAD 探测下载总大小（失败只影响百分比显示，不阻断下载）。
 /// `-sIL`：静默 + HEAD + 跟随重定向；取最后一个 content-length（重定向后的生效值）。
 /// 同样限制协议（M-3）：这次请求只是探大小，但没理由是唯一一条允许降级的请求。
-fn probe_content_length(curl: &Path, url: &str) -> Option<u64> {
+pub(crate) fn probe_content_length(curl: &Path, url: &str) -> Option<u64> {
     let args: Vec<String> = vec![
         "-sIL".into(),
         "--proto".into(),
@@ -5862,7 +5884,7 @@ fn is_allowed_download_url(url: &str) -> bool {
 /// 这**不是**注入防线（脚本已整体 base64 化，命令行上没有待解释的字符了），
 /// 而是为了正确性：路径里的撇号（例如用户名 `O'Brien` 让 `%TEMP%` 带上单引号）
 /// 会让脚本里的单引号字符串提前闭合，PowerShell 直接报语法错、下载失败。
-fn ps_single_quote(s: &str) -> String {
+pub(crate) fn ps_single_quote(s: &str) -> String {
     s.replace('\'', "''")
 }
 
@@ -5870,7 +5892,7 @@ fn ps_single_quote(s: &str) -> String {
 ///
 /// 两个细节都是 PowerShell 的硬要求：**UTF-16 小端**（不是 UTF-8、也不是本机 ANSI 代码页），
 /// 以及标准 base64 的 `=` 填充。
-fn encode_powershell_command(script: &str) -> String {
+pub(crate) fn encode_powershell_command(script: &str) -> String {
     let mut utf16 = Vec::with_capacity(script.len() * 2);
     for unit in script.encode_utf16() {
         utf16.extend_from_slice(&unit.to_le_bytes());

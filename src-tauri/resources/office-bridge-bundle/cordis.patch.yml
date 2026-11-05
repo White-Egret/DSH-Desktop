@@ -1,0 +1,23 @@
+# DSH Desktop —— OnlyOffice 能力桥接：Cordis 组合补丁（生成文件，请勿手工编辑）
+#
+# **只有一个 patch 块，而且不要往 preset 里加东西**（理由与 py-bridge-bundle 完全相同：
+# dsh-tools 的 view(scope) 先取 Host 根的注册，再叠加祖先层，根作用域的注册本来就会被
+# 会话继承；动 preset 既多余、又会覆盖用户在 Web 编辑器里改过的 standard 配置）。
+#
+# 四项 config 刻意**留空**：由桌面端在「安装/卸载 → OnlyOffice → 安装」之后按本机实际
+# 情况写进 config（见 plans/DSH-Desktop-1.6.2-OnlyOffice-部署方案.md 的 §3.3 ⑥）：
+#   docserverUrl  ← http://127.0.0.1:<office_docserver_port>
+#   jwtSecret     ← 与 local.json 里 services.CoAuthoring.secret.*.string 一致的那个密钥
+#   workspaceDir  ← 文档落盘目录（默认 %USERPROFILE%\Documents\DSH-Office）
+#   docPort       ← 文档服务端口（默认 3310）
+# 留空时插件不会崩，而是安静地不注册任何工具 —— 「没装 OnlyOffice」不该让 DSH 起不来。
+- insert:
+    - id: dsh-desktop-office-bridge
+      name: '@local/dsh-desktop-office-bridge'
+      displayName: OnlyOffice 文档桥接（DSH Desktop）
+      config:
+        docserverUrl: ''
+        jwtSecret: ''
+        docPort: 3310
+        workspaceDir: ''
+        failOnStartupError: false

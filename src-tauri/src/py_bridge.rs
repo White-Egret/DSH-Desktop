@@ -781,7 +781,7 @@ fn patch_bundle_config(text: &str, python_path: &str, bridge_dir: &str) -> Strin
 ///
 /// 解析刻意极简（只认 `key: 'value'` / `key: ""`）—— 这个文件是我们自己
 /// 释放的，结构固定；引第三方 YAML 库只为读几行不值得。
-fn read_bundle_scalar(text: &str, key: &str) -> Option<String> {
+pub(crate) fn read_bundle_scalar(text: &str, key: &str) -> Option<String> {
     for line in text.lines() {
         let t = line.trim();
         let Some(rest) = t.strip_prefix(key) else {
@@ -936,7 +936,7 @@ fn register_bundle(app: &AppHandle, profile: &str, bun: &Path) -> Result<(), Str
 /// Rust 的 `Command::new("npm")` 靠 PATHEXT 解析到 `.cmd`，本身不受该策略影响，
 /// 所以这里直接用现成的 `detect::find_npm_cmd()`——它已经处理了 PATH 顺序与
 /// 「node 同目录」这条退路，别再自己写一份 which。
-fn pack_bundle(bun: &Path) -> Result<PathBuf, String> {
+pub(crate) fn pack_bundle(bun: &Path) -> Result<PathBuf, String> {
     let npm = detect::find_npm_cmd().ok_or_else(|| "npm.cmd not found".to_string())?;
     // pack 的产物名从**输出**里取，不猜：`npm pack` 最后会打印一行纯文件名。
     // 但 npm 也会打 notice / warning，所以扫全部 token 找一个 `.tgz` 结尾的。
@@ -977,7 +977,7 @@ fn pack_bundle(bun: &Path) -> Result<PathBuf, String> {
 /// 两条路必须各自决定 program：`.cmd` 走 `cmd.exe`，而 `.ps1` / 裸 `dsh`
 /// 要直接跑 —— 早先的版本把 program 写死成 `cmd.exe`，于是配置里指向
 /// `dsh.ps1` 的机器会去执行一个根本不存在的东西（`cmd /C dsh.ps1` 不成立）。
-fn dsh_argv(app: &AppHandle) -> Option<(String, Vec<String>)> {
+pub(crate) fn dsh_argv(app: &AppHandle) -> Option<(String, Vec<String>)> {
     // `dsh_cmd_path` 给的是 `String`，`dsh_argv_for` 收 `&str` —— 借一下再传，
     // 别把 String 直接塞进去（`?` 不会替你借用，`String` 也 `as &str` 不掉）。
     let path = dsh_cmd_path(app)?;
@@ -1022,7 +1022,7 @@ fn dsh_argv_for(dsh: &str) -> Option<(String, Vec<String>)> {
 /// 真正在跑的那个 profile 的目录），否则退到 `<DSH_HOME>\profiles\<name>`。
 /// 刻意不缓存 —— 环境变量可能在运行期变（安全模式会换 home），缓存会把上一次
 /// 的结论带到下一次状态查询里，而界面上的「已激活」必须对应当下。
-fn bundle_registered(profile: &str) -> bool {
+pub(crate) fn bundle_registered(profile: &str) -> bool {
     let dir = match profile_dir_from_env() {
         Some(d) => d,
         None => match std::env::var("DSH_HOME").ok().filter(|s| !s.trim().is_empty()) {
@@ -1067,7 +1067,7 @@ fn dsh_home_dir() -> Option<PathBuf> {
 /// `dsh --profile <p> --dump-config` 会打印整份组合后的配置，profile 名就在里面；
 /// 同时也顺带确认这个 profile 确实存在（不存在时 DSH 会报错）。取不到就退到 `web`
 /// —— 桌面端起的就是 `dsh web`，而 `web` 正是 DSH 默认的 web profile。
-fn probe_profile(app: &AppHandle) -> Option<String> {
+pub(crate) fn probe_profile(app: &AppHandle) -> Option<String> {
     // ① 宿主进程环境（由 DSH 启动时注入，最权威 —— 它就是**正在跑的那个** profile）
     for var in ["DSH_PROFILE", "DSH_PROFILE_NAME"] {
         if let Ok(p) = std::env::var(var) {
@@ -1148,7 +1148,7 @@ fn dsh_cmd_path_requires_a_real_file(configured: &str) -> Option<String> {
 /// 这里**只判端口在不在监听**，不去问「是不是我们启动的那个实例」：同一时刻
 /// 同端口上只可能有一个 DSH，而端口是最便宜也最不容易出错的那个信号。
 /// 判错的后果都很轻（保守地多留一次 pending / 多注册一次）。
-fn dsh_port_busy(app: &AppHandle) -> bool {
+pub(crate) fn dsh_port_busy(app: &AppHandle) -> bool {
     let port = config::load(app).port;
     std::net::TcpStream::connect_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], port)),

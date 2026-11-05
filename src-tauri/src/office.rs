@@ -365,9 +365,9 @@ fn bridge_phase_message(phase: OfficeBridgePhase, pending: bool, profile: Option
             if pending {
                 // 注册已发生但标记还在（或 DSH 在跑时注册被延后）：按 py_bridge 的口径
                 // 显示「已注册进 profile」，不谎称「已激活」
-                i18n::fmt("office_bridge_registered_pending", &[profile.unwrap_or("")])
+                i18n::fmt("office_bridge_registered_pending", &[&profile.unwrap_or("")])
             } else {
-                i18n::fmt("office_bridge_active", &[profile.unwrap_or("")])
+                i18n::fmt("office_bridge_active", &[&profile.unwrap_or("")])
             }
         }
     }
@@ -440,7 +440,9 @@ fn parse_uninstall_reg(out: &str) -> (String, String, String) {
         let Some(idx) = line.find("REG_SZ") else { continue };
         let name = line[..idx].trim().trim_end();
         // reg 的对齐空白可能把键名与 REG_SZ 隔开；取「REG_SZ 之前」的最后一段
-        let name = name.rsplit_whitespace().next().unwrap_or("");
+        // ⚠ name 取「REG_SZ 之前」的最后一个空白分隔 token；str 没有
+        // rsplit_whitespace（CI 编译抓出），用 split_whitespace().last() 等价实现
+        let name = name.split_whitespace().last().unwrap_or("");
         let value = line[idx + "REG_SZ".len()..].trim();
         let value = value
             .strip_prefix('"')
@@ -572,7 +574,7 @@ fn verify_authenticode(path: &Path) -> Result<(), String> {
         return Err(i18n::fmt("office_verify_signer", &[&format!("status={status}")]));
     }
     if !subject.starts_with(OFFICE_SIGNER_CN) {
-        return Err(i18n::fmt("office_verify_signer", &[subject]));
+        return Err(i18n::fmt("office_verify_signer", &[&subject]));
     }
     Ok(())
 }
@@ -768,7 +770,7 @@ fn clear_office_pending(app: &AppHandle) -> Result<(), String> {
 /// DSH 解析不到（py_bridge.rs:867-880 的真机教训）。
 fn register_office_bundle(app: &AppHandle, profile: &str, bun: &Path) -> Result<(), String> {
     if !crate::py_bridge::profile_name_usable(profile) {
-        return Err(i18n::fmt("office_bad_profile", &[profile]));
+        return Err(i18n::fmt("office_bad_profile", &[&profile]));
     }
     let Some((program, mut args)) = crate::py_bridge::dsh_argv(app) else {
         let hint = {
@@ -814,7 +816,7 @@ fn register_office_bundle(app: &AppHandle, profile: &str, bun: &Path) -> Result<
 /// 两处，手删 node_modules 会留下幽灵清单条目（§6 步骤 1）。
 fn remove_office_bundle(app: &AppHandle, profile: &str) -> Result<(), String> {
     if !crate::py_bridge::profile_name_usable(profile) {
-        return Err(i18n::fmt("office_bad_profile", &[profile]));
+        return Err(i18n::fmt("office_bad_profile", &[&profile]));
     }
     let Some((program, mut args)) = crate::py_bridge::dsh_argv(app) else {
         return Err(i18n::fmt("office_no_dsh", &[&"".to_string()]));
@@ -969,7 +971,9 @@ fn office_install_inner(
     if hash != OFFICE_INSTALLER_SHA256 {
         return Err(i18n::fmt(
             "office_verify_hash",
-            &[&OFFICE_INSTALLER_SHA256[..8], &hash[..8]],
+            // 切片结果是不定长的 &str：args 数组的元素要 &&str 才能落到 &dyn Display，
+            // 这里干脆转成 String（CI 编译抓出的 E0277）
+            &[&OFFICE_INSTALLER_SHA256[..8].to_string(), &hash[..8].to_string()],
         ));
     }
     verify_authenticode(&installer)?;
@@ -1184,7 +1188,11 @@ fn download_installer(app: &AppHandle, dest: &Path) -> Result<(), String> {
             Err(e) => return Err(e.to_string()),
         }
     }
-    Err(i18n::fmt("office_dl_fail", &[i18n::t("office_dl_attempts"), OFFICE_MANUAL_PAGE]))
+    Err(i18n::fmt(
+        "office_dl_fail",
+        // t() 返回 &'static str：args 元素必须再套一层引用（CI 编译抓出的 E0277）
+        &[&i18n::t("office_dl_attempts"), &OFFICE_MANUAL_PAGE],
+    ))
 }
 
 // ---------- 提权脚本（全部 ASCII 结构 + 路径经单引号转义；BOM 在 run_elevated 里加） ----------
@@ -1374,10 +1382,10 @@ fn office_cleanup_blocking(app: &AppHandle) -> Result<String, String> {
             return Err(i18n::fmt("office_cleanup_bad_path", &[p]));
         }
     }
-    let psq = |s: &str| format!("'{}'", s.replace('\'', "''"));
     let mut body = String::from("$ErrorActionPreference = 'SilentlyContinue'\n");
     body.push_str("$out = New-Object System.Collections.ArrayList\n");
     for p in &paths {
+        // 单引号 PS 字面量里的 `'` 写成 `''`（与其它脚本生成函数同一规则）
         let single = p.replace('\'', "''");
         body.push_str(&format!(
             "$p = '{single}'\n\

@@ -562,6 +562,7 @@ pub fn t(key: &str) -> &'static str {
         "office_dl_retry" => if en { "Download attempt {0} failed ({1}); resuming..." } else { "第 {0} 次下载中断（{1}），断点续传重试…" },
         "office_dl_fail" => if en { "Could not download the OnlyOffice installer ({0}). Download it manually from {1} and rerun setup." } else { "OnlyOffice 安装包下载失败（{0}）。可到 {1} 手动下载后重试。" },
         "office_dl_attempts" => if en { "10 attempts exhausted" } else { "已重试 10 次" },
+        "office_dl_cache_hit" => if en { "Reusing the cached installer {0}; skipping the 874 MB download..." } else { "复用已缓存的安装包 {0}，跳过 874 MB 下载…" },
         "office_step_verify" => if en { "Verifying the installer (size / SHA-256 / Authenticode)..." } else { "正在校验安装包（大小 / SHA-256 / 数字签名）…" },
         "office_verify_size" => if en { "Installer size mismatch (expected {0} bytes, got {1}). Aborting." } else { "安装包大小不符（期望 {0} 字节，实际 {1} 字节），已中止。" },
         "office_verify_hash" => if en { "Installer SHA-256 mismatch (expected {0}…, got {1}…). Aborting — do not trust this download." } else { "安装包 SHA-256 不符（期望 {0}…，实际 {1}…），已中止——请勿信任本次下载。" },

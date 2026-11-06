@@ -994,8 +994,20 @@ fn office_install_inner(
     process::setup_progress(app, "download", &i18n::t("office_step_download"));
 
     // ---- ② 下载（curl + 断点续传；874 MB，§10.2：中途停摆是常态） ----
+    // 先看跨运行缓存：874 MB 重下一次是纯浪费（真机 2026-11-06 卸载后重装，光下载
+    // 就断了 6 次、从 0 起了 4 遍）。命中判据与校验步骤完全相同，命中即「已验过」。
     let installer = temp.join("onlyoffice-documentserver.exe");
-    download_installer(app, &installer)?;
+    let cache = installer_cache_path(app);
+    if installer_cache_hit(&cache) {
+        process::setup_progress(
+            app,
+            "download",
+            &i18n::fmt("office_dl_cache_hit", &[&cache.to_string_lossy()]),
+        );
+        seed_installer_from_cache(&cache, &installer)?;
+    } else {
+        download_installer(app, &installer)?;
+    }
 
     // ---- ③ 校验（大小 → SHA-256 → Authenticode，任一不符直接中止） ----
     process::setup_progress(app, "verify", &i18n::t("office_step_verify"));
@@ -1016,6 +1028,8 @@ fn office_install_inner(
         ));
     }
     verify_authenticode(&installer)?;
+    // 三道校验都过了才进缓存：缓存里只留能直接装的那一份
+    cache_installer(app, &installer);
 
     // ---- ④ 静默安装（提权一次；/DIR /DS_PORT 均为 P0 实测可用参数） ----
     process::setup_progress(app, "install", &i18n::t("office_step_install"));
@@ -1142,10 +1156,89 @@ fn deploy_office_after_install(
 
 // ---------- 下载（curl + 断点续传，§10.2：874 MB 中途停摆是常态） ----------
 
+/// Schannel 的吊销检查连不上 CRL/OCSP 时握手直接失败（`(35) CRYPT_E_REVOCATION_OFFLINE`，
+/// 2026-11-06 真机六次中断里占两次），跟网速无关。安装包另有 大小 + SHA-256 +
+/// Authenticode 三道校验，吊销检查在这里不承担安全责任，能关就关。
+/// `--ssl-no-revoke` 是 Schannel 专属开关：其它 SSL 后端（OpenSSL 等）见到它会直接报错
+/// 退出，把「下载中断」变成「立刻失败」，所以先认后端再加。
+fn curl_is_schannel(curl: &Path) -> bool {
+    std::process::Command::new(curl)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_ascii_lowercase().contains("schannel"))
+        .unwrap_or(false)
+}
+
+/// 只有「服务端不接受 Range」才值得删掉半截文件整段重来：curl 33 = 服务端不认断点
+/// 续传，HTTP 416 = 本地半截比远端还长（文件已坏）。超时 (28)、TLS (35) 都是暂时性
+/// 故障，半截文件是资产不是垃圾 —— 2026-11-06 真机：一次续传失败把 235 MB 清零，
+/// 此后每轮都从 0 开始，六次中断白烧近 1.5 GB 流量。
+fn needs_full_restart(err_text: &str) -> bool {
+    err_text.contains("(33)")
+        || err_text.contains("(416)")
+        || err_text.to_ascii_lowercase().contains("byte ranges")
+}
+
+/// 安装包跨运行缓存的位置：跟着 config 的 `npm_cache_dir` 走 —— 用户已经把它放在
+/// D 盘，874 MB 没有理由落到系统盘。子目录 `dsh-office\` 是为了跟 npm 自己的
+/// `_cacache` 区分开；`npm_cache_dir` 没配置时退回 `%LOCALAPPDATA%`。
+/// **不放 %APPDATA%**：那是漫游配置目录，域环境会整份同步，874 MB 进去是事故。
+fn installer_cache_path(app: &AppHandle) -> PathBuf {
+    let cfg = config::load(app);
+    let configured = cfg.npm_cache_dir.trim();
+    let base = if configured.is_empty() {
+        app.path()
+            .app_local_data_dir()
+            .unwrap_or_else(|_| PathBuf::from(".dsh-desktop"))
+    } else {
+        PathBuf::from(configured)
+    };
+    base.join("dsh-office").join("onlyoffice-documentserver.exe")
+}
+
+/// 缓存命中判据 = 字节数 + SHA-256，与下载后的校验用的是同一对常量：命中即等于「已验过」，
+/// 不再重复下载，也不放松任何一道校验。
+fn installer_cache_hit(path: &Path) -> bool {
+    if !matches!(std::fs::metadata(path), Ok(m) if m.len() == OFFICE_INSTALLER_BYTES) {
+        return false;
+    }
+    sha256_of_large_file(path)
+        .map(|h| h == OFFICE_INSTALLER_SHA256)
+        .unwrap_or(false)
+}
+
+/// 把缓存里的安装包搬进本轮临时目录：同卷硬链接（零拷贝、秒完成），跨卷退回复制。
+fn seed_installer_from_cache(src: &Path, dest: &Path) -> Result<(), String> {
+    std::fs::hard_link(src, dest)
+        .or_else(|_| std::fs::copy(src, dest).map(|_| ()))
+        .map_err(|e| e.to_string())
+}
+
+/// 三道校验都过了之后留一份到缓存，下次重装 0 下载。先写 `.partial` 再改名，
+/// 半份文件不会被下一次当成命中（命中另有 SHA-256 判据，这里只是双保险）。
+fn cache_installer(app: &AppHandle, installer: &Path) {
+    let cache = installer_cache_path(app);
+    if installer_cache_hit(&cache) {
+        return;
+    }
+    let Some(dir) = cache.parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let tmp = cache.with_extension("partial");
+    let _ = std::fs::remove_file(&tmp);
+    if std::fs::copy(installer, &tmp).is_ok() {
+        let _ = std::fs::rename(&tmp, &cache);
+    }
+}
+
 fn download_installer(app: &AppHandle, dest: &Path) -> Result<(), String> {
     let Some(curl) = crate::detect::where_lookup("curl.exe") else {
         return Err(i18n::t("setup_no_curl").to_string());
     };
+    let no_revoke = curl_is_schannel(Path::new(&curl));
     let total = process::probe_content_length(&curl, OFFICE_DOWNLOAD_URL);
     let mut resume_failed = false;
     for attempt in 1u32..=10 {
@@ -1171,6 +1264,10 @@ fn download_installer(app: &AppHandle, dest: &Path) -> Result<(), String> {
             "60".into(),
             "-sS".into(),
         ];
+        if no_revoke {
+            // 见 curl_is_schannel：Schannel 吊销检查离线时握手必挂
+            args.push("--ssl-no-revoke".into());
+        }
         let use_resume = dest.exists() && !resume_failed;
         if use_resume {
             // 断点续传：curl 自己发 Range 请求
@@ -1215,8 +1312,8 @@ fn download_installer(app: &AppHandle, dest: &Path) -> Result<(), String> {
                 return Ok(());
             }
             Ok(_) => {
-                if use_resume {
-                    // 服务端不支持 Range（416/33）之类：删掉半截文件，整段重来
+                if use_resume && needs_full_restart(&err_text) {
+                    // 服务端不接受 Range（33/416）：半截文件不可续，删掉整段重来
                     resume_failed = true;
                     let _ = std::fs::remove_file(dest);
                 }
@@ -1402,16 +1499,35 @@ fn uninstall_script_body(uninstaller: &str) -> String {
     )
 }
 
-/// 清 config.json 的 office 字段（不碰用户其它设置；类型安全，不走单键写 ——
-/// write_config_key 只会写字符串，写进 u16 字段会把整份配置打回默认值）。
-fn clear_office_config(app: &AppHandle) -> Result<(), String> {
-    let mut c = config::load(app);
-    c.office_install_dir = String::new();
+/// 卸载后要归零的 office 字段。`office_install_dir` **刻意不在其中**：它是第二段
+/// 「清扫残余」唯一的定位依据，第 ③ 步刚把它补记进 config，这里清掉就等于让清扫
+/// 按钮「成功」却一个文件没删（真机 2026-11-06：卸载与清扫双双报成功，
+/// D:\Programs\ONLYOFFICE 里 460 个文件 / 13.6 MB 原样躺着）。这条记录改由清扫
+/// 成功之后的 `clear_office_install_dir` 抹掉。
+fn reset_office_after_uninstall(c: &mut config::Config) {
     c.office_docserver_url = String::new();
     c.office_bridge_pending = String::new();
     c.office_docserver_port = DEFAULT_DOCSERVER_PORT;
     c.office_doc_port = DEFAULT_DOC_PORT;
+}
+
+/// 清 config.json 的 office 字段（不碰用户其它设置；类型安全，不走单键写 ——
+/// write_config_key 只会写字符串，写进 u16 字段会把整份配置打回默认值）。
+fn clear_office_config(app: &AppHandle) -> Result<(), String> {
+    let mut c = config::load(app);
+    reset_office_after_uninstall(&mut c);
     config::save(app, &c)
+}
+
+/// 清扫成功后抹掉记录的安装目录。留着它等于给下一次清扫留一个「删掉用户此刻放在
+/// 那个路径下的任何东西」的目标。
+fn clear_office_install_dir(app: &AppHandle) {
+    let mut c = config::load(app);
+    if c.office_install_dir.is_empty() {
+        return;
+    }
+    c.office_install_dir = String::new();
+    let _ = config::save(app, &c);
 }
 
 /// 两段式卸载的第二段：清扫官方卸载器留下的残余（§6 修订）。
@@ -1457,6 +1573,7 @@ fn office_cleanup_blocking(app: &AppHandle) -> Result<String, String> {
     let result = elevate_run(&body, Duration::from_secs(15 * 60))?;
     let failed: Vec<&str> = result.lines().filter(|l| l.starts_with("ERR\t")).collect();
     if failed.is_empty() {
+        clear_office_install_dir(app);
         Ok(i18n::fmt("office_cleanup_done", &[&paths.join(", ")]))
     } else {
         Err(i18n::fmt("office_cleanup_fail", &[&failed.join(" / ")]))
@@ -1773,6 +1890,23 @@ HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ONL
         );
     }
 
+    /// 回归测试（真机 2026-11-06）：一次「太慢」的续传失败被当成「服务端不支持
+    /// Range」，把 235 MB 半截文件删了，此后每轮都从 0 开始。只有 33/416 才该整段重来。
+    #[test]
+    fn needs_full_restart_only_for_range_unsupported() {
+        assert!(needs_full_restart(
+            "curl: (33) HTTP server doesn't seem to support byte ranges. Cannot resume."
+        ));
+        assert!(needs_full_restart("curl: (22) The requested URL returned error: 416"));
+        assert!(!needs_full_restart(
+            "curl: (28) Operation too slow. Less than 10240 bytes/sec transferred the last 60 seconds"
+        ));
+        assert!(!needs_full_restart(
+            "curl: (35) schannel: next InitializeSecurityContext failed: CRYPT_E_REVOCATION_OFFLINE (0x80092013)"
+        ));
+        assert!(!needs_full_restart(""));
+    }
+
     #[test]
     fn office_phase_truth_table() {
         use OfficeBridgePhase::*;
@@ -1788,6 +1922,28 @@ HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ONL
         assert_eq!(parse_result_code("CODE\t1622\n"), Some(1622));
         assert_eq!(parse_result_code("ERR\tboom\n"), None);
         assert_eq!(parse_result_code(""), None);
+    }
+
+    /// 回归测试（真机 2026-11-06）：卸载第 ④ 步曾把 `office_install_dir` 一起清空，
+    /// 于是「清扫残余」只剩 `%ProgramData%\ONLYOFFICE` 一个来源 —— 报「清扫完成」，
+    /// 安装目录里 460 个文件一个没删。
+    #[test]
+    fn uninstall_keeps_install_dir_for_cleanup() {
+        let mut c = config::Config::default();
+        c.office_install_dir = r"D:\Programs\ONLYOFFICE".to_string();
+        c.office_docserver_url = "http://127.0.0.1:8080".to_string();
+        c.office_bridge_pending = "docserver:8080".to_string();
+        c.office_docserver_port = 8090;
+        c.office_doc_port = 3311;
+        reset_office_after_uninstall(&mut c);
+        assert_eq!(
+            c.office_install_dir, r"D:\Programs\ONLYOFFICE",
+            "清扫残余要靠这条记录定位安装目录"
+        );
+        assert!(c.office_docserver_url.is_empty());
+        assert!(c.office_bridge_pending.is_empty());
+        assert_eq!(c.office_docserver_port, DEFAULT_DOCSERVER_PORT);
+        assert_eq!(c.office_doc_port, DEFAULT_DOC_PORT);
     }
 
     #[test]

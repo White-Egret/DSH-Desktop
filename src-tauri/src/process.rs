@@ -474,12 +474,31 @@ pub(crate) fn set_status(app: &AppHandle, status: &str, message: Option<String>)
             // 删不掉、留下一个空壳目录。此刻 DSH 刚起来、桥接进程**还没**被
             // 插件 spawn，目录不再被锁，空壳可以删掉。
             crate::py_bridge::cleanup_stale_bridge_dirs(&app2);
-            crate::py_bridge::activate_pending(&app2);
             // OnlyOffice 桥接的「待激活」走同一扇门（install 时 DSH 在跑 → 留
             // pending → 这里补注册）。office 的 activate_pending 自带「Document
             // Server 必须已安装」的硬前提，卸载后残留标记不会把插件复活。
             crate::office::cleanup_stale_office_dirs(&app2);
-            crate::office::activate_pending(&app2);
+            // ⚠ 这条线程**必须**有 panic 兜底：activate_pending 链路里任何一处
+            // panic 都会让线程无声死亡——不写日志、pending 不消费、插件永远
+            // 注册不上（真机事故 2026-11-06：安装后重启，激活线程静默消失，
+            // 状态行显示「已激活」——那是文件存在性判据——而 boot graph 里
+            // 根本没有插件）。panic 原因必须落盘。
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::py_bridge::activate_pending(&app2);
+                crate::office::cleanup_stale_office_dirs(&app2);
+                crate::office::activate_pending(&app2);
+            }));
+            if let Err(payload) = result {
+                let detail = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "non-string panic payload".to_string());
+                logger::append_line(
+                    &logger::desktop_log_path(&app2),
+                    &format!("[office-bridge] activate_pending panicked: {detail}"),
+                );
+            }
         });
     }
 }
@@ -1868,6 +1887,38 @@ pub(crate) fn resolve_npm_for_path(app: &AppHandle, cfg: &Config) -> String {
     }
 }
 
+/// 启动前把 office-bridge 的 pending 注册做掉（start_internal 里的调用点有完整注释）。
+///
+/// 只读一次 config 判标记：无标记时零开销（常态路径）。注册本身有几秒耗时
+/// （npm pack + pnpm add），期间状态行显示进度——用户看到的是「启动中多了一步」，
+/// 比「启动完了插件却不在」诚实。
+fn register_pending_office_before_start(app: &AppHandle) {
+    if !config::read_config_flag(app, "office_bridge_pending") {
+        return;
+    }
+    set_status(
+        app,
+        "starting",
+        Some(i18n::t("status_office_registering").to_string()),
+    );
+    // 注册链路里 pnpm / npm 是外部子进程，正常不 panic；但这条线程上 panic 不能
+    // 让启动跟着死 —— 捕获、落日志、放行启动（与 set_status 钩子同一纪律）。
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::office::activate_pending(app)
+    }));
+    match outcome {
+        // activate_pending 的成功/失败行它自己已写进 desktop.log；这里补一条 UI 日志
+        Ok(Some(line)) => emit_log(app, "launcher", line),
+        Ok(None) => {} // 安静路径（或它已按原因写过日志）
+        Err(_) => {
+            logger::append_line(
+                &logger::desktop_log_path(app),
+                "[office-bridge] 启动前注册 panic（不阻断启动，下次启动重试）",
+            );
+        }
+    }
+}
+
 pub(crate) fn start_internal(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let st = current_status(app);
@@ -1966,6 +2017,14 @@ pub(crate) fn start_internal(app: &AppHandle) -> Result<(), String> {
         set_status(app, "port-busy", Some(msg.clone()));
         return Err(msg);
     }
+
+    // ---- OnlyOffice 插件：待注册必须在 spawn **之前**完成（2026-11-06 真机教训） ----
+    // 安装发生在 DSH 运行期间 → 留 pending 标记；若等 set_status("running") 的钩子
+    // 再注册，组件清单（boot graph）早在插件扫描完毕后就组装好了 —— 插件进不了本次
+    // 清单，入口与工具都要**再**重启一次才出现。此刻 DSH 还没起、profile 无人占用，
+    // 是唯一能「一次重启生效」的窗口。注册耗时几秒（npm pack + pnpm add），期间状态
+    // 行显示进度；失败只记日志，绝不阻断启动（下次启动再试）。
+    register_pending_office_before_start(app);
 
     // 本轮启动前清空上一次解析到的实际地址与端点闩锁。
     // 端点必须在这里清（而不是 spawn_log_reader 里）：那个读取器被安全模式实例复用，

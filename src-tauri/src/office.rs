@@ -1489,6 +1489,17 @@ pub fn activate_pending(app: &AppHandle) -> Option<String> {
         }
         return None;
     }
+    // 激活路径的可观测性锚点：真机事故 2026-11-06（激活线程静默死亡、profile
+    // 里插件消失、零日志）暴露了「这条路上任何一步断掉都无从排查」。此后每次
+    // 真正走到激活（而不是已激活的安静早退）都留一行现场。
+    logger::append_line(
+        &logger::desktop_log_path(app),
+        &format!(
+            "[office-bridge] activate_pending：pending={pending} released={released} registered={registered} installed={} dir={}",
+            probe.installed,
+            probe.install_dir,
+        ),
+    );
 
     // pending 在但代码被清过（用户动过 %APPDATA%）：重新释放，别让标记永远悬空
     if !released {

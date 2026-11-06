@@ -89,18 +89,25 @@ pub fn remove_paths_elevated(paths: &[String]) -> Option<ElevatedOutcome> {
 /// 通用提权执行器（OnlyOffice 的安装器/配置合并/卸载器共用，§3.3 ⑤ 的
 /// `run_elevated_office_step` 落在这里，因为它只是骨架、不含任何 office 语义）。
 ///
-/// 流程与 [`remove_paths_elevated`] 完全同款：私有临时目录放脚本与结果文件
+/// 流程与 [`remove_paths_elevated`] 同款：私有临时目录放脚本与结果文件
 /// （结果文件先建空文件作为「脚本写完了」的信号）→ `ShellExecuteExW` + runas
-/// → 轮询结果文件。差别只有两处：
+/// → 等结果文件。差异有三处：
 ///
 /// 1. **脚本文本由调用方给**。调用方必须自己保证内容可信（office.rs 里的脚本
 ///    全部由常量 + 本模块写下的路径拼成）；本函数不再设白名单 —— 白名单挡的
 ///    是「调用方传错路径」，而这里没有路径参数可传错。
 /// 2. **超时由调用方给**。OnlyOffice 安装器要跑几分钟到几十分钟，120 秒那套
 ///    默认值对它毫无意义。
+/// 3. **结果路径以字面量拼进脚本，并拿到提权 powershell 的进程句柄**：
+///    - 真机事故 2026-11-06：原来把结果路径放进 `$env:DSH_ELEVATE_RESULT`，
+///      但 UAC 提权出的进程**不继承**调用方运行期 `set_var` 的环境变量 ——
+///      卸载器跑成功了，脚本里的 `Set-Content -LiteralPath $env:…` 却两次都
+///      因为路径为空而失败，结果文件 0 字节，轮询干等 30 分钟超时。
+///    - 有了进程句柄，脚本崩掉（什么都没写）也能在 powershell 退出的那一刻
+///      立刻失败，不用等满超时。
 ///
 /// 返回值三态与 [`remove_paths_elevated`] 相同：`None` = 没能提权；
-/// `Some(text)` = 提权了（text 是结果文件内容，可能为空串 = 超时没写回）。
+/// `Some(text)` = 提权了（text 是结果文件内容，可能为空串 = 脚本没写回）。
 /// 结果文件由 PowerShell 以 `-Encoding UTF8` 写出（带 BOM），返回前剥掉 BOM。
 pub fn run_elevated(script_body: &str, timeout: std::time::Duration) -> Option<String> {
     let dir = private_temp_dir()?;
@@ -110,37 +117,54 @@ pub fn run_elevated(script_body: &str, timeout: std::time::Duration) -> Option<S
         let _ = std::fs::remove_dir_all(&dir);
         return None;
     }
+    // 结果路径以单引号字面量进脚本文本：脚本文本里的 `$env:DSH_ELEVATE_RESULT`
+    // 被原样替换成 `'C:\...\result.txt'`。路径是本函数刚创建的随机私有目录
+    // （ASCII、无引号），字面量拼接没有注入面。
+    let result_literal = format!("'{}'", result.to_string_lossy().replace('\'', "''"));
+    let body = script_body.replace("$env:DSH_ELEVATE_RESULT", &result_literal);
     // UTF-8 **带 BOM** 落盘（P0 实测教训，§10.2：PS 5.1 把无 BOM 的 UTF-8 按 GBK
     // 读，脚本里出现非 ASCII（比如中文安装目录）就直接破坏解析）。纯 ASCII 的
     // 脚本加 BOM 也无害。
-    let mut bytes = Vec::with_capacity(script_body.len() + 3);
+    let mut bytes = Vec::with_capacity(body.len() + 3);
     bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
-    bytes.extend_from_slice(script_body.as_bytes());
+    bytes.extend_from_slice(body.as_bytes());
     if std::fs::write(&script, bytes).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
         return None;
     }
 
-    if !win::launch_runas(&script, &result) {
+    let Some(handle) = win::launch_runas_handle(&script, &result) else {
         // 用户在 UAC 点了「否」：如实报「没能提权」，不重试、不追问。
         let _ = std::fs::remove_dir_all(&dir);
         return None;
-    }
+    };
 
     let started = std::time::Instant::now();
     let text = loop {
+        // 结果文件非空 = 脚本写完了（空文件是本函数预置的完成信号）
         if let Ok(meta) = std::fs::metadata(&result) {
             if meta.len() > 0 {
-                break std::fs::read_to_string(&result).unwrap_or_default();
+                if let Ok(t) = std::fs::read_to_string(&result) {
+                    break t;
+                }
             }
         }
+        // 提权 powershell 退出 = 脚本跑完了（无论有没有写出结果）。给它半秒钟
+        // 落盘缓冲再读一次；还是空就如实返回空 —— 调用方按「脚本没写回」处理，
+        // **绝不**当成成功，也**不再**等满超时（真机事故的教训）。
+        let code = unsafe { WaitForSingleObject(handle as _, 200) };
+        if code == WAIT_OBJECT_0 {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            break std::fs::read_to_string(&result).unwrap_or_default();
+        }
         if started.elapsed() >= timeout {
-            // 超时 = 脚本没写回结果。返回空串，由调用方按「提权了但没拿到结果」处理
-            // —— 绝不能当成成功。
+            // 超时：强杀提权脚本，返回空串。绝不因为「没拿到结果」就当成成功。
+            unsafe { TerminateProcess(handle as _, 1) };
             break String::new();
         }
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::thread::sleep(std::time::Duration::from_millis(50));
     };
+    unsafe { CloseHandle(handle as _) };
     let _ = std::fs::remove_dir_all(&dir);
     // 剥掉 PowerShell 写结果文件时带的 UTF-8 BOM，调用方拿到的是干净文本
     Some(text.strip_prefix('\u{feff}').map(str::to_string).unwrap_or(text))
@@ -283,7 +307,9 @@ mod win {
     //   - `SEE_MASK_NOCLOSEPROCESS` 也在 `Win32::UI::Shell`，**不在** Foundation；
     //   - `SWC_NORMAL` **不存在**（SW_SHOWNORMAL 没有对应的 windows-sys 常量），
     //     所以 nShow 直接用整数 1，见下面的 SW_SHOWNORMAL。
-    use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject, WAIT_OBJECT_0};
+    use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_NOCLOSEPROCESS};
 
     /// `SW_SHOWNORMAL`：以「正常窗口」方式显示。
     /// 不能用 `SWC_NORMAL`（不存在），这个值与 Win32 的 SW_SHOWNORMAL 相同。
@@ -303,12 +329,14 @@ mod win {
     /// `runas` 动词是 Windows 官方给「以管理员身份运行」用的那一个 —— 对话框由系统绘制，
     /// 有发布者签名、有「取消」按钮，在任务管理器里也如实显示。
     ///
-    /// 结果文件路径经**环境变量**传给脚本：环境块跟着进程启动一起过去，不需要把它
-    /// 拼进命令行（少一处引号地狱）。用 `set_var` / 还原只影响本进程，
-    /// ShellExecute 派生的进程继承的正是这份环境。
+    /// ⚠ 结果文件路径**不再经环境变量**传给脚本（`launch_runas_handle` 的注释里有
+    /// 真机事故）：UAC 提权出的进程**不继承**调用方运行期 `set_var` 的环境变量，
+    /// 脚本里 `$env:DSH_ELEVATE_RESULT` 拿到的是空。现在由 [`run_elevated`] 把结果
+    /// 路径作为**字面量**拼进脚本文本（路径是刚建的随机私有目录，ASCII、无引号）。
     ///
-    /// 返回 false = 用户点了「否」或 UAC 不可用。
-    pub(super) fn launch_runas(script: &Path, result: &Path) -> bool {
+    /// 返回值：`Some(句柄)` = 提权成功，句柄指向提权的 powershell 进程（调用方负责
+    /// CloseHandle，可 WaitForSingleObject）；`None` = 用户点了「否」或 UAC 不可用。
+    pub(super) fn launch_runas_handle(script: &Path, result: &Path) -> Option<isize> {
         // 缓冲区必须在调用期间活着（SHELLEXECUTEINFOW 只读指针）—— 先算好再借用。
         let verb = wide("runas");
         let file = wide("powershell.exe");
@@ -318,28 +346,40 @@ mod win {
         ));
         let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
         info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
-        // 刻意**不**设 SEE_MASK_NOCLOSEPROCESS：整个流程不等待进程结束 ——
-        // 我们轮询结果文件（那才是真正可靠的完成信号），而 runas 派生的是提权进程，
-        // 拿到它的句柄也没有可等的东西。
-        info.fMask = 0;
+        // SEE_MASK_NOCLOSEPROCESS：把提权 powershell 的进程句柄留在 info.hProcess 里。
+        // 有了它才能「等脚本进程退出」—— 脚本崩掉（没写结果文件）时立刻失败，
+        // 而不是干等结果文件超时（真机事故 2026-11-06：卸载流程干等 30 分钟）。
+        info.fMask = SEE_MASK_NOCLOSEPROCESS;
         info.lpVerb = verb.as_ptr();
         info.lpFile = file.as_ptr();
         info.lpParameters = params.as_ptr();
         info.nShow = SW_SHOWNORMAL;
         info.hwnd = std::ptr::null_mut();
 
-        let prev = std::env::var_os("DSH_ELEVATE_RESULT");
-        std::env::set_var("DSH_ELEVATE_RESULT", result);
         // SAFETY: 结构体零初始化后填齐了 cbSize / fMask / 三个以 NUL 结尾的字符串指针
         // 与 nShow；三个 wide() 缓冲区在整个调用期间都在作用域内活着。
         // hwnd 传 null —— 提权进程与本进程没有窗口属主关系，给错的 hwnd 会让 UAC 对话框
         // 找不到前台窗口（真机上就表现为「UAC 弹在别的窗口后面」）。
         let ok = unsafe { ShellExecuteExW(&mut info) } != 0;
-        match prev {
-            Some(v) => std::env::set_var("DSH_ELEVATE_RESULT", v),
-            None => std::env::remove_var("DSH_ELEVATE_RESULT"),
+        if !ok {
+            return None;
         }
-        ok
+        let h = info.hProcess;
+        if h.is_null() {
+            None
+        } else {
+            Some(h as isize)
+        }
+    }
+
+    /// 旧入口：不关心进程句柄的调用方（py_bridge 的删除流程）用这个。
+    pub(super) fn launch_runas(script: &Path, result: &Path) -> bool {
+        let h = launch_runas_handle(script, result);
+        if let Some(h) = h {
+            // 调用方不等进程：立刻关掉句柄，别泄漏
+            unsafe { CloseHandle(h as _) };
+        }
+        h.is_some()
     }
 }
 

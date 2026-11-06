@@ -295,7 +295,13 @@ fn office_status_blocking(app: &AppHandle) -> OfficeStatus {
     let phase = office_bridge_phase(released, effective_registered);
 
     let ds_message = build_ds_message(&probe, docserver_port_of(&cfg), services_running, services_total, healthcheck_ok);
-    let plugin_message = bridge_phase_message(phase, pending, profile.as_deref());
+    // DS 不在时，插件行的「注册残留/待激活」话术只会让人困惑（用户刚卸载完，
+    // 看到的是「会自动修复」却什么都没发生）：统一口径为「未部署」。
+    let plugin_message = if !probe.installed {
+        i18n::t("office_bridge_missing").to_string()
+    } else {
+        bridge_phase_message(phase, pending, profile.as_deref())
+    };
 
     OfficeStatus {
         installed: probe.installed,
@@ -385,20 +391,16 @@ fn py_bridge_bundle_registered(profile: &str) -> bool {
 
 // ---------- Document Server 安装探测 ----------
 
-/// 探测 Document Server：注册表卸载键为准，config 记录的目录兜底。
+/// 探测 Document Server：**注册表卸载键是唯一权威判据**。
 /// 任何一步失败都退化成「未安装」，绝不报错（状态行不是报错入口）。
-fn probe_install(app: &AppHandle) -> InstallProbe {
-    let mut probe = probe_install_registry();
-    if !probe.installed {
-        // 注册表拿不到（被手动删过键 / reg.exe 异常）：退回 config 记录的目录
-        let cfg = config::load(app);
-        let dir = cfg.office_install_dir.trim().to_string();
-        if !dir.is_empty() && Path::new(&dir).is_dir() {
-            probe.installed = true;
-            probe.install_dir = dir;
-        }
-    }
-    probe
+///
+/// ⚠ 刻意**不做**「config 记录的目录兜底」：卸载后官方卸载器会留 ~45MB 残余目录，
+/// 那个目录存在、注册表键已删 —— 兜底会让 `office_status` 在卸载后仍然报「已安装」，
+/// 「安装 OnlyOffice」按钮也随之消失（真机 2026-11-06 卸载实测）。残余目录的
+/// 清理走「清扫残余」按钮（它读的是卸载时记录下的 `office_install_dir`），
+/// 不该反过来污染安装探测。
+fn probe_install(_app: &AppHandle) -> InstallProbe {
+    probe_install_registry()
 }
 
 fn probe_install_registry() -> InstallProbe {
@@ -1023,6 +1025,10 @@ fn office_install_inner(
     match parse_result_code(&result) {
         Some(0) => {}
         Some(code) => return Err(i18n::fmt("office_install_fail", &[&code.to_string()])),
+        // 空结果 = 提权脚本没写回（run_elevated 在 PS 退出时立刻失败，不再干等）
+        None if result.trim().is_empty() => {
+            return Err(i18n::t("office_elevate_no_result").to_string())
+        }
         None => return Err(i18n::fmt("office_install_fail", &[&result.trim()])),
     }
     let probe = probe_install(app);
@@ -1333,6 +1339,12 @@ fn office_uninstall_blocking(app: &AppHandle) -> Result<String, String> {
     // ---- ③ 提权跑官方卸载器（/VERYSILENT /NORESTART，P0 实测退出码 0） ----
     let probe = probe_install(app);
     if probe.installed {
+        // 把安装目录记进 config：两段式的「清扫残余」（office_cleanup_blocking）
+        // 靠它定位残留 —— 手动装的 DS 在 config 里本来没有这个字段，
+        // 不在这里补记的话，清扫按钮会"成功"却什么都没删（真机教训 2026-11-06）。
+        if !probe.install_dir.is_empty() {
+            let _ = config::write_config_key(app, "office_install_dir", &probe.install_dir);
+        }
         let uninstaller = if probe.uninstaller.is_empty() {
             if probe.install_dir.is_empty() {
                 String::new()
@@ -1353,6 +1365,11 @@ fn office_uninstall_blocking(app: &AppHandle) -> Result<String, String> {
                     // 卸载器失败不回滚前两步（已摘干净的部分如实报告，§6）
                     notes.push(i18n::fmt("office_uninstall_fail", &[&code.to_string()]));
                 }
+                // 空结果 = 提权脚本没写回（run_elevated 在 PS 退出时立刻失败）。
+                // 卸载器可能**其实已经跑成**——让用户先核实现场，而不是空口报错。
+                None if result.trim().is_empty() => {
+                    notes.push(i18n::t("office_elevate_no_result").to_string());
+                }
                 None => notes.push(i18n::fmt("office_uninstall_fail", &[&result.trim()])),
             }
         }
@@ -1361,6 +1378,8 @@ fn office_uninstall_blocking(app: &AppHandle) -> Result<String, String> {
     }
 
     // ---- ④ 清 config 的 office 字段（load → 归零 → save，类型安全） ----
+    // ⚠ `office_install_dir` **刻意不清**：两段式的「清扫残余」还要靠它定位残留，
+    //    它会在清扫成功后由 cleanup 自己清掉。其余字段照常归零。
     if let Err(e) = clear_office_config(app) {
         notes.push(i18n::fmt("office_config_reset_fail", &[&e]));
     }

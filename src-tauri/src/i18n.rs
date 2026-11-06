@@ -568,6 +568,7 @@ pub fn t(key: &str) -> &'static str {
         "office_verify_signer" => if en { "Authenticode check failed ({0}). Aborting." } else { "数字签名校验未通过（{0}），已中止。" },
         "office_step_install" => if en { "Running the silent installer (a UAC prompt will appear)..." } else { "正在静默安装（会弹一次 UAC 提权确认）…" },
         "office_elevate_denied" => if en { "Administrator permission was not granted (UAC declined or failed); setup stopped." } else { "未能获得管理员权限（UAC 被取消或失败），安装中止。" },
+        "office_elevate_no_result" => if en { "The elevated script finished without writing back a result — it may not have run at all. Check whether the change actually took effect (e.g. is the folder gone?), then retry or clean up manually." } else { "提权脚本执行完毕但没有写回结果（可能根本没运行）。请先核实改动是否实际生效（例如目标目录是否已被移除），再重试或手动清理。" },
         "office_install_fail" => if en { "The OnlyOffice installer exited with code {0}." } else { "OnlyOffice 安装器退出码 {0}。" },
         "office_install_verify_fail" => if en { "The installer finished, but no OnlyOffice installation was detected afterwards." } else { "安装器已退出，但没有检测到 OnlyOffice 安装。" },
         "office_step_config" => if en { "Merging Document Server config (JWT + private-IP allowlist) and restarting services..." } else { "正在合并 Document Server 配置（JWT + 私网放行）并重启服务…" },

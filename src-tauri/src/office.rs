@@ -1176,9 +1176,12 @@ fn curl_is_schannel(curl: &Path) -> bool {
 /// 故障，半截文件是资产不是垃圾 —— 2026-11-06 真机：一次续传失败把 235 MB 清零，
 /// 此后每轮都从 0 开始，六次中断白烧近 1.5 GB 流量。
 fn needs_full_restart(err_text: &str) -> bool {
-    err_text.contains("(33)")
-        || err_text.contains("(416)")
-        || err_text.to_ascii_lowercase().contains("byte ranges")
+    let low = err_text.to_ascii_lowercase();
+    // 416 在 curl 的话术里是 `The requested URL returned error: 416`，**不带括号**；
+    // 顺手认 `(416)` 只为兜住别的拼法。别写成裸 "416"：`after 416 ms` 这类超时详情
+    // 会误伤，把该保留的半截文件删掉。
+    low.contains("(33)") || low.contains("(416)") || low.contains("returned error: 416")
+        || low.contains("byte ranges")
 }
 
 /// 安装包跨运行缓存的位置：跟着 config 的 `npm_cache_dir` 走 —— 用户已经把它放在

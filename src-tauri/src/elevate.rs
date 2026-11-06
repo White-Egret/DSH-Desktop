@@ -139,32 +139,20 @@ pub fn run_elevated(script_body: &str, timeout: std::time::Duration) -> Option<S
         return None;
     };
 
-    let started = std::time::Instant::now();
-    let text = loop {
-        // 结果文件非空 = 脚本写完了（空文件是本函数预置的完成信号）
-        if let Ok(meta) = std::fs::metadata(&result) {
-            if meta.len() > 0 {
-                if let Ok(t) = std::fs::read_to_string(&result) {
-                    break t;
-                }
-            }
-        }
-        // 提权 powershell 退出 = 脚本跑完了（无论有没有写出结果）。给它半秒钟
-        // 落盘缓冲再读一次；还是空就如实返回空 —— 调用方按「脚本没写回」处理，
-        // **绝不**当成成功，也**不再**等满超时（真机事故的教训）。
-        let code = unsafe { WaitForSingleObject(handle as _, 200) };
-        if code == WAIT_OBJECT_0 {
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            break std::fs::read_to_string(&result).unwrap_or_default();
-        }
-        if started.elapsed() >= timeout {
-            // 超时：强杀提权脚本，返回空串。绝不因为「没拿到结果」就当成成功。
-            unsafe { TerminateProcess(handle as _, 1) };
-            break String::new();
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    // 等待循环全部收进 win 模块（Win32 符号不外泄）；`check` 闭包查「结果文件
+    // 已写回」。`written = false` 的两种可能：超时强杀，或提权 PS 退出但脚本
+    // 崩了没写回 —— 两种都必须如实报失败，绝不当成成功。
+    let check = || match std::fs::metadata(&result) {
+        Ok(meta) => meta.len() > 0,
+        Err(_) => false,
     };
-    unsafe { CloseHandle(handle as _) };
+    let written = win::wait_process_or_kill(handle, timeout, check);
+    let text = if written {
+        std::fs::read_to_string(&result).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    win::close_handle(handle);
     let _ = std::fs::remove_dir_all(&dir);
     // 剥掉 PowerShell 写结果文件时带的 UTF-8 BOM，调用方拿到的是干净文本
     Some(text.strip_prefix('\u{feff}').map(str::to_string).unwrap_or(text))
@@ -305,15 +293,22 @@ mod win {
     //   - `ShellExecuteExW` 与 `SHELLEXECUTEINFOW` 在 `Win32::UI::Shell`，但后者**额外**
     //     需要 `Win32_System_Registry` feature（结构体带 hkeyClass 字段，被条件编译）；
     //   - `SEE_MASK_NOCLOSEPROCESS` 也在 `Win32::UI::Shell`，**不在** Foundation；
+    //   - `CloseHandle` 在 `Win32::Foundation`；
+    //   - `WaitForSingleObject` / `TerminateProcess` 在 `Win32::System::Threading`；
+    //   - `WAIT_OBJECT_0` 在 windows-sys 0.59 里**不在** Threading（CI 第 2 轮实测
+    //     E0432），干脆用本地常量——Win32 约定它的值就是 0；
     //   - `SWC_NORMAL` **不存在**（SW_SHOWNORMAL 没有对应的 windows-sys 常量），
     //     所以 nShow 直接用整数 1，见下面的 SW_SHOWNORMAL。
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
     use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_NOCLOSEPROCESS};
+    use std::time::{Duration, Instant};
 
     /// `SW_SHOWNORMAL`：以「正常窗口」方式显示。
     /// 不能用 `SWC_NORMAL`（不存在），这个值与 Win32 的 SW_SHOWNORMAL 相同。
     const SW_SHOWNORMAL: i32 = 1;
+    /// `WaitForSingleObject` 的返回值：对象已触发（进程退出）。
+    const WAIT_OBJECT_0: u32 = 0;
 
     fn wide(s: &str) -> Vec<u16> {
         std::ffi::OsStr::new(s)
@@ -336,7 +331,7 @@ mod win {
     ///
     /// 返回值：`Some(句柄)` = 提权成功，句柄指向提权的 powershell 进程（调用方负责
     /// CloseHandle，可 WaitForSingleObject）；`None` = 用户点了「否」或 UAC 不可用。
-    pub(super) fn launch_runas_handle(script: &Path, result: &Path) -> Option<isize> {
+    pub(super) fn launch_runas_handle(script: &Path, _result: &Path) -> Option<isize> {
         // 缓冲区必须在调用期间活着（SHELLEXECUTEINFOW 只读指针）—— 先算好再借用。
         let verb = wide("runas");
         let file = wide("powershell.exe");
@@ -381,14 +376,61 @@ mod win {
         }
         h.is_some()
     }
+
+    /// 等待提权 powershell 退出，期间每个轮询周期调一次 `check`（调用方用它查
+    /// 结果文件是否已写回）。语义：
+    ///   - `check()` 命中，或进程退出后缓冲期内 `check()` 命中 → `true`；
+    ///   - 超时 → 强杀提权进程并返回 `false`；
+    ///   - 进程退出但缓冲期内 `check()` 仍不命中（脚本崩了没写回）→ `false`。
+    /// 调用方拿到 `false` 必须**如实报失败**，绝不当成成功。
+    pub(super) fn wait_process_or_kill(
+        handle: isize,
+        timeout: Duration,
+        mut check: impl FnMut() -> bool,
+    ) -> bool {
+        let started = Instant::now();
+        loop {
+            if check() {
+                return true;
+            }
+            let code = unsafe { WaitForSingleObject(handle as _, 200) };
+            if code == WAIT_OBJECT_0 {
+                // 给 Set-Content 半秒钟落盘缓冲，再让调用方最后确认一次
+                std::thread::sleep(Duration::from_millis(400));
+                return check();
+            }
+            if started.elapsed() >= timeout {
+                // 超时：强杀提权脚本。绝不因为「没拿到结果」就当成成功。
+                unsafe { TerminateProcess(handle as _, 1) };
+                unsafe { WaitForSingleObject(handle as _, 2000) };
+                return false;
+            }
+        }
+    }
+
+    pub(super) fn close_handle(handle: isize) {
+        unsafe { CloseHandle(handle as _) };
+    }
 }
 
 #[cfg(not(windows))]
 mod win {
     use super::*;
+    use std::time::Duration;
     pub(super) fn launch_runas(_script: &Path, _result: &Path) -> bool {
         false
     }
+    pub(super) fn launch_runas_handle(_script: &Path, _result: &Path) -> Option<isize> {
+        None
+    }
+    pub(super) fn wait_process_or_kill(
+        _handle: isize,
+        _timeout: Duration,
+        _check: impl FnMut() -> bool,
+    ) -> bool {
+        false
+    }
+    pub(super) fn close_handle(_handle: isize) {}
 }
 
 #[cfg(test)]

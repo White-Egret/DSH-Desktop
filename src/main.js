@@ -23,6 +23,24 @@ let pendingKilledNotice = null;
 // 最近一次环境检测结果（detect_environment 的返回）：向导、首选项的 Node 版本行共用。
 // 与 wiz.detection 的区别：这个在向导关闭后仍保留，首选项里打开设置时不需要重新检测。
 let lastEnvDetection = null;
+// 「自动检测」按钮（安装/卸载弹窗顶部）最近一次的检测结果：结果行据此显示与切语言重绘。
+let autodetectLast = null;
+
+/// 按 autodetectLast 重绘「自动检测」结果行（无缓存时整行隐藏）。
+/// 动态文案不挂 data-i18n，切语言后由 applyLanguage 调这里重绘。
+function renderAutodetect() {
+  const el = $('autodetect-result');
+  if (!el) return;
+  if (!autodetectLast) { el.classList.add('hidden'); return; }
+  const row = (label, found, path) => t('detect_result_line',
+    label, found ? path : t('detect_result_notfound'));
+  el.textContent = [
+    row('Node', autodetectLast.node_found, autodetectLast.node_path),
+    row('npm', autodetectLast.npm_found, autodetectLast.npm_path),
+    row('DSH', autodetectLast.dsh_found, autodetectLast.dsh_path),
+  ].join('\n');
+  el.classList.remove('hidden');
+}
 // 「安装/卸载」弹窗的一键安装任务（node / pnpm / dsh）：与向导、Python 安装共用
 // 后端的 setup_busy / updating 标志，同一时刻全程序只有一个安装任务在跑。
 // message 是最后一条进度/结果文案 —— 弹窗被关掉再打开时，进度区按它恢复。
@@ -1654,6 +1672,18 @@ function applyLanguage(lang) {
   // 切语言后按新词典重绘。注意：那两颗按钮的文案**无论如何**都要重绘（见下），
   // 因为它们不挂 data-i18n，applyDom 管不到。
   if (!$('manage-modal').classList.contains('hidden')) refreshPythonStatus();
+  // 「自动检测」结果行（同在安装/卸载弹窗）：由动态文案拼成，切语言后按缓存重绘；
+  // 没有缓存（本次还没点过）就保持隐藏 —— 占位行没有存在的意义。
+  if (!$('manage-modal').classList.contains('hidden')) renderAutodetect();
+  // 首选项顶部的桌面端版本行：语言切换后按新词典重绘（版本号本身不变；
+  // 后端异常时保持原样，不值得为它做空态处理）。
+  if (!$('settings-modal').classList.contains('hidden')) {
+    invoke('desktop_version').then((v) => {
+      const el = $('desktop-version-line');
+      el.textContent = t('lbl_desktop_version', String(v));
+      el.classList.remove('hidden');
+    }).catch(() => {});
+  }
   // 「Node.js，pnpm与DSH」块的版本行与安装/卸载切换同理：整行由动态文案拼成、
   // 按钮显隐由检测结果决定，都不挂 data-i18n —— 切语言后按缓存重绘；
   // 连检测缓存都没有时版本行退回「正在读取」占位（新语言）
@@ -1702,6 +1732,13 @@ function openSettings() {
   // 启动音乐：开关 / 音量 / 文件路径。音量取不到字段（老配置）时按默认 60 显示。
   syncMusicSettingsFromConfig();
   $('set-config-path').textContent = config.config_path;
+  // 顶部版本行：桌面端自己的版本（问后端；默认隐藏，拿到才显示 ——
+  // 失败时不留一个空灰框）。每次打开都问一次，成本为零（读的是编译期常量）。
+  invoke('desktop_version').then((v) => {
+    const el = $('desktop-version-line');
+    el.textContent = t('lbl_desktop_version', String(v));
+    el.classList.remove('hidden');
+  }).catch(() => {});
   markFlag('home-exists-flag', config.home_exists);
   // 搬家警告：每次打开设置页按「这一格是不是被改过」重判一次（与浏览/输入事件共用同一条判定）
   refreshHomeMoveWarn();
@@ -1726,6 +1763,11 @@ function openSettings() {
 function openManage() {
   // Python 状态（版本 / 路径 / 包是否装齐）—— 顺带会刷新桥接状态行
   refreshPythonStatus();
+  // 上一次点「自动检测」留下的结果行：弹窗重开时先藏掉 —— 数据可能已过期，
+  // 重新点一次按钮才重新出现（检测是重活，不自动重跑）
+  autodetectLast = null;
+  const adEl = $('autodetect-result');
+  if (adEl) adEl.classList.add('hidden');
   // OnlyOffice 状态（Document Server / 插件 phase）—— 顺带刷新文档桥接状态行
   refreshOfficeStatus();
   // 一键安装还在后台跑（弹窗曾被关掉）：先把进度区按最后的消息摆回来
@@ -3950,13 +3992,17 @@ function bindUI() {
   $('btn-exit-keep').onclick = () => invoke('exit_decision', { decision: 'keep' }).catch(() => {});
   $('btn-exit-force').onclick = () => invoke('exit_decision', { decision: 'force' }).catch(() => {});
 
-  // 设置页：自动检测 Node/npm/DSH 路径并回填输入框
+  // 安装/卸载页：自动检测 Node/npm/DSH 路径（原在首选项顶部，2026-11-07 搬入）
+  // 结果显示在按钮正下方的 autodetect-result 行 —— 路径本来就是要给用户看的，
+  // 不能只进日志；autodetectLast（模块级）缓存最后一份结果，切语言后重绘走
+  // applyLanguage → renderAutodetect。
   $('btn-autodetect').onclick = async () => {
     appendLog('launcher', t('log_detect_start'));
     try {
       const d = await invoke('detect_environment');
       lastEnvDetection = d; // 向导的「将执行以下命令」预览用它兜底
-      // npm / dsh 程序路径没有输入框了：检测结果只用于日志与向导预览，不再回填界面
+      autodetectLast = d;
+      renderAutodetect();
       appendLog('launcher', t('log_detect_done',
         d.node_path || t('wiz_notfound'),
         d.node_version ? '(' + d.node_version + ')' : '',

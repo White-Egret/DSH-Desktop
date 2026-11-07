@@ -4020,6 +4020,16 @@ pub async fn check_port(app: AppHandle) -> Result<PortCheck, String> {
     Ok(PortCheck { port: cfg.port, in_use: port_in_use(cfg.port) })
 }
 
+/// 桌面端自身的版本号（首选项顶部的版本行使用）。
+/// 与 check_versions 的区别：那个查的是 DSH（npm 包）的版本 —— 右上角状态栏显示
+/// 的也是它；本程序自己的版本号此前在前端没有来源，这里从 Tauri 的 package_info
+/// 取（它来自 tauri.conf.json 的 version，与 package.json / Cargo.toml 由
+/// scripts/check-versions.js 强制保持一致）。纯读编译期常量，无 IO。
+#[tauri::command]
+pub fn desktop_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
 /// 完整环境检测（强制刷新缓存）：Node.js / npm / DSH / pnpm 的存在性、路径与版本
 #[tauri::command]
 pub async fn detect_environment(_app: AppHandle) -> Result<detect::EnvDetection, String> {

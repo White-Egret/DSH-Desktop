@@ -104,6 +104,8 @@ pub fn run(launched_by_autostart: bool) {
             process::was_launched_by_autostart,
             // 工具命令
             process::check_port,
+            // 桌面端自身版本号（首选项顶部的版本行；右上角那个「版本」是 DSH 的）
+            process::desktop_version,
             process::open_log_dir,
             process::open_in_browser,
             process::detect_environment,

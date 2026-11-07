@@ -74,7 +74,14 @@
     refreshing: '正在刷新...',
     // 设置弹窗
     set_title: '首选项',
+    // 桌面端版本行（首选项顶部；右上角状态栏那个「版本」是 DSH 的，两者不同）
+    lbl_desktop_version: 'DSH Desktop v{0}',
+    // 「自动检测」按钮已在「安装/卸载」弹窗顶部（2026-11-07 搬入），
+    // 首选项里的说明文字随之改指「安装/卸载」。
     btn_autodetect: '自动检测 Node / npm / DSH 路径',
+    // 检测结果行（点「自动检测」后显示在按钮正下方；未找到的项如实列出）
+    detect_result_line: '{0}：{1}',
+    detect_result_notfound: '未找到',
     // npm / dsh 的程序路径**没有**对应词条：这两个输入框已从首选项移除
     //（它们是会被执行的程序路径，由后端自动检测；见 index.html 里的说明）。
     lbl_home_dir: 'DSH 家目录（DSH 配置文件位置，默认 %USERPROFILE%\\.dsh）',
@@ -202,7 +209,7 @@
     ph_extra: '例如: --trusted-host example.com',
     lbl_pkg_name: 'DSH 的 npm 包名（用于查询 dist-tags 与拼装更新命令）',
     lbl_update_cmd_fixed: '更新命令固定为 npm install -g <包名>@<频道>；频道（latest / next）在点「更新 DSH」时选择，不再单独设置参数。',
-    set_hint_html: '配置保存于：<span id="set-config-path"></span><br />路径留空或失效时会自动检测本机的 Node / npm / DSH（npm / dsh 的程序路径不在此处提供修改入口 —— 它们会被<b>执行</b>，由程序自动检测更安全）；也可点上方「自动检测」。<br />家目录是 DSH 摆放配置文件的地方（通过 DSH_HOME 传给 DSH；只要它不是默认值，保存后就会自动写进你的用户环境变量，让你自己开的终端里的 dsh 也用同一个家目录，改回默认值则自动删掉）；进程工作目录自动取其上一级，DSH 的工作区在网页内随意指定。端口 / 参数修改在<b>下次启动 DSH</b> 时生效；语言切换即时生效，并同步写入 DSH 的 cordis.patch.yml（旧版 settings.yaml 一并写出；DSH 界面语言在其重启后变化）；外观同样写入（ui-theme.preference），旧版 DSH 页面<b>实时</b>跟随，新版 DSH 在其下次启动后生效。<br />Desktop 日志：同目录 desktop.log；DSH 输出日志：&lt;家目录&gt;\\logs\\dsh.log。',
+    set_hint_html: '配置保存于：<span id="set-config-path"></span><br />路径留空或失效时会自动检测本机的 Node / npm / DSH（npm / dsh 的程序路径不在此处提供修改入口 —— 它们会被<b>执行</b>，由程序自动检测更安全）；也可点「安装/卸载」顶部的「自动检测」。<br />家目录是 DSH 摆放配置文件的地方（通过 DSH_HOME 传给 DSH；只要它不是默认值，保存后就会自动写进你的用户环境变量，让你自己开的终端里的 dsh 也用同一个家目录，改回默认值则自动删掉）；进程工作目录自动取其上一级，DSH 的工作区在网页内随意指定。端口 / 参数修改在<b>下次启动 DSH</b> 时生效；语言切换即时生效，并同步写入 DSH 的 cordis.patch.yml（旧版 settings.yaml 一并写出；DSH 界面语言在其重启后变化）；外观同样写入（ui-theme.preference），旧版 DSH 页面<b>实时</b>跟随，新版 DSH 在其下次启动后生效。<br />Desktop 日志：同目录 desktop.log；DSH 输出日志：&lt;家目录&gt;\\logs\\dsh.log。',
     btn_detect_pkg: '检测全局包名（npm list -g）',
     btn_cancel: '取消', btn_save: '保存',
     flag_exists: '✔ 存在', flag_missing: '✘ 未找到',
@@ -571,7 +578,13 @@
     toast_copy_fail: 'Copy failed',
     refreshing: 'Refreshing...',
     set_title: 'Preferences',
+    // Desktop version line (top of Preferences; the "Version" in the toolbar is DSH's, not this)
+    lbl_desktop_version: 'DSH Desktop v{0}',
+    // The auto-detect button moved to the top of the (Un)install dialog (2026-11-07).
     btn_autodetect: 'Auto-detect Node / npm / DSH paths',
+    // Detection result line (shown right under the button after a click; missing items listed as-is)
+    detect_result_line: '{0}: {1}',
+    detect_result_notfound: 'not found',
     // npm / dsh program paths: no entries — those inputs were removed from Preferences
     // (they are EXECUTED program paths, auto-detected by the backend; see index.html).
     lbl_home_dir: 'DSH home directory (config location; defaults to %USERPROFILE%\\.dsh)',
@@ -701,7 +714,7 @@
     ph_extra: 'e.g. --trusted-host example.com',
     lbl_pkg_name: 'DSH npm package name (used for dist-tags queries and the update command)',
     lbl_update_cmd_fixed: 'The update command is fixed to npm install -g <package>@<channel>; pick the channel (latest / next) in the "Update DSH" dialog instead.',
-    set_hint_html: 'Configuration is saved to: <span id="set-config-path"></span><br />Empty or invalid paths are auto-detected on this machine (Node / npm / DSH); the npm / dsh program paths have no editing field here — they are <b>executed</b>, so letting the app detect them is safer. You can also click "Auto-detect" above.<br />The home dir is where DSH keeps its config (passed to DSH as DSH_HOME; while it is not the default, it is automatically written into your user environment variable on save so `dsh` in a terminal you open yourself follows it — changing it back to the default removes it again); the process working dir is its parent — the DSH workspace is chosen inside the web UI. Port / argument changes take effect on the <b>next DSH start</b>; language applies immediately and is also synced into DSH\'s cordis.patch.yml (the legacy settings.yaml is written too; DSH\'s own UI changes after DSH restarts); appearance is likewise written (ui-theme.preference) — older DSH follows it <b>live</b>, DSH 0.2.x applies it at its next start.<br />Desktop log: desktop.log in the same folder; DSH output log: &lt;home&gt;\\logs\\dsh.log.',
+    set_hint_html: 'Configuration is saved to: <span id="set-config-path"></span><br />Empty or invalid paths are auto-detected on this machine (Node / npm / DSH); the npm / dsh program paths have no editing field here — they are <b>executed</b>, so letting the app detect them is safer. You can also click "Auto-detect" at the top of the (Un)install dialog.<br />The home dir is where DSH keeps its config (passed to DSH as DSH_HOME; while it is not the default, it is automatically written into your user environment variable on save so `dsh` in a terminal you open yourself follows it — changing it back to the default removes it again); the process working dir is its parent — the DSH workspace is chosen inside the web UI. Port / argument changes take effect on the <b>next DSH start</b>; language applies immediately and is also synced into DSH\'s cordis.patch.yml (the legacy settings.yaml is written too; DSH\'s own UI changes after DSH restarts); appearance is likewise written (ui-theme.preference) — older DSH follows it <b>live</b>, DSH 0.2.x applies it at its next start.<br />Desktop log: desktop.log in the same folder; DSH output log: &lt;home&gt;\\logs\\dsh.log.',
     btn_detect_pkg: 'Detect global package (npm list -g)',
     btn_cancel: 'Cancel', btn_save: 'Save',
     flag_exists: '✔ found', flag_missing: '✘ not found',

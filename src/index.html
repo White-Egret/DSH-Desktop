@@ -109,9 +109,11 @@
     <div class="modal-box">
       <div class="modal-title" data-i18n="set_title">首选项</div>
       <div class="form">
-        <div class="row left">
-          <button id="btn-autodetect" class="btn small" data-i18n="btn_autodetect">自动检测 Node / npm / DSH 路径</button>
-        </div>
+        <!-- 首选项顶部的「自动检测」按钮已搬进「安装/卸载」弹窗顶部（用户要求 2026-11-07），
+             检测到的路径也显示在那里。这里换成桌面端自己的版本号 —— 右上角状态栏的
+             「版本」是 DSH 的，两处别混淆。id 由 main.js::openSettings 填充；
+             默认 hidden（版本号拿到才显示，避免后端异常时空一个灰框）。 -->
+        <div class="hint hidden" id="desktop-version-line"></div>
         <!-- npm / dsh 的**程序路径**不再出现在这里（用户不该改动它们）：这两个值由
              后端在加载配置时按本机环境自动检测并回填（config.rs::autofill_from_detection），
              保存时原样带回。别把输入框加回来 —— 它们是会被**执行**的程序路径。 -->
@@ -272,6 +274,16 @@
         <button id="btn-close-manage" class="btn small" data-i18n="btn_close_log">关闭</button>
       </div>
       <div class="form">
+        <!-- 「自动检测」从首选项顶部搬来（用户要求 2026-11-07）：它检测的是本机的
+             Node / npm / DSH 路径，与这里的安装/卸载是同一类「本机环境」操作。
+             点击后检测结果（含未找到的项）显示在正下方的 autodetect-result 行，
+             而不是只进日志 —— 路径本来就是要给用户看的。 -->
+        <div class="row left">
+          <button id="btn-autodetect" class="btn small" data-i18n="btn_autodetect">自动检测 Node / npm / DSH 路径</button>
+        </div>
+        <!-- 「自动检测」结果行是动态文案（main.js 拼装），刻意不挂 data-i18n；
+             切语言后的重绘见 applyLanguage 的 autodetectLast 分支。 -->
+        <div class="hint hidden" id="autodetect-result"></div>
         <div class="field python-block">
           <span class="py-head" data-i18n="lbl_python_env">Python 环境（办公文档读写 / 数据分析）</span>
           <div id="python-status" class="py-status" data-i18n="py_checking">正在检测本机 Python…</div>

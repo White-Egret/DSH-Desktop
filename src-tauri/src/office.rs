@@ -386,7 +386,14 @@ fn py_bridge_probe_profile(app: &AppHandle) -> Option<String> {
 }
 
 fn py_bridge_bundle_registered(profile: &str) -> bool {
-    crate::py_bridge::bundle_registered(profile)
+    // 不能复用 py_bridge 的 `bundle_registered()`：那个查的是 **python-bridge** 的
+    // node_modules 落点（py_bridge.rs 的 BUNDLE_PKG_NAME 写死的），office 装没装它
+    // 根本不知道。本机 python 桥一直装着 → 这里恒 true → `activate_pending` 的
+    // 「已注册且配置可用」分支提前返回，office-bridge 永远不会重新注册进 profile
+    // （真机 2026-11-07：重装后右边栏入口消失、六工具全无，profile 的
+    // cordis.patch.yml / package.json / node_modules 里都没有 office-bridge，
+    // 而 desktop.log 里 activate_pending 一直 registered=true）。
+    crate::py_bridge::bundle_registered_named(profile, BUNDLE_PKG_NAME)
 }
 
 // ---------- Document Server 安装探测 ----------

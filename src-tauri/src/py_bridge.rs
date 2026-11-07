@@ -1013,7 +1013,8 @@ fn dsh_argv_for(dsh: &str) -> Option<(String, Vec<String>)> {
 //  它是错的：`cmd /C` 后面分参数传时，CreateProcess 会自己转义一次，
 //  我们再加的引号会被 cmd 当成命令名的一部分。实测见 dsh_argv_for 的注释。）
 
-/// bundle 是否已装进 profile。
+/// bundle 是否已装进 profile（python 桥专用薄包装，包名参数化版本见
+/// [`bundle_registered_named`]）。
 ///
 /// 判定依据是 profile 的 `node_modules` 下有没有 `@local/dsh-desktop-python-bridge`
 /// —— 那是 reconcile 之后 bundle 的落点。只读，不调 pnpm（快得多，也不会触发任何副作用）。
@@ -1023,6 +1024,14 @@ fn dsh_argv_for(dsh: &str) -> Option<(String, Vec<String>)> {
 /// 刻意不缓存 —— 环境变量可能在运行期变（安全模式会换 home），缓存会把上一次
 /// 的结论带到下一次状态查询里，而界面上的「已激活」必须对应当下。
 pub(crate) fn bundle_registered(profile: &str) -> bool {
+    bundle_registered_named(profile, BUNDLE_PKG_NAME)
+}
+
+/// [`bundle_registered`] 的包名参数化版本：office 的 bundle 是
+/// `@local/dsh-desktop-office-bridge`，落点与 python 的不是同一个目录 ——
+/// 复用 python 版会把「python 装着」当成「office 装着」（真机 2026-11-07）。
+/// `package` 传**带 scope 的包名**（`@local/xxx`），按 `/` 拆成路径段。
+pub(crate) fn bundle_registered_named(profile: &str, package: &str) -> bool {
     let dir = match profile_dir_from_env() {
         Some(d) => d,
         None => match std::env::var("DSH_HOME").ok().filter(|s| !s.trim().is_empty()) {
@@ -1030,11 +1039,11 @@ pub(crate) fn bundle_registered(profile: &str) -> bool {
             None => return false,
         },
     };
-    dir.join("node_modules")
-        .join("@local")
-        .join("dsh-desktop-python-bridge")
-        .join("package.json")
-        .is_file()
+    let mut path = dir.join("node_modules");
+    for seg in package.split('/') {
+        path = path.join(seg);
+    }
+    path.join("package.json").is_file()
 }
 
 /// `DSH_PROFILE_DIR` 直接给的就是 profile 目录本身（`<home>\profiles\<name>`），

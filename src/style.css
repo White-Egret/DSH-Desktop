@@ -481,6 +481,16 @@ body.tb-auto .refresh-overlay { top: 0; }
 .row.two { display: flex; gap: 12px; }
 .row.two .field { flex: 1; }
 
+/* 首选项「家目录 | 用户环境变量」两列组合（2026-11-07 从各占一整行改来）：
+   右半是只读的 .hint 状态行，让它与左边输入框**底边**对齐（hint 没有自己的
+   标题行，顶对齐会悬空半行），文字窄列里换行也挤，行高放宽一点。 */
+.home-duo .hint {
+  flex: 1;
+  align-self: flex-end;
+  margin-bottom: 2px;
+  line-height: 1.5;
+}
+
 .hidden { display: none !important; }
 
 /* ---------- 模态框 ---------- */

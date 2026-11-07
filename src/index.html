@@ -117,20 +117,24 @@
         <!-- npm / dsh 的**程序路径**不再出现在这里（用户不该改动它们）：这两个值由
              后端在加载配置时按本机环境自动检测并回填（config.rs::autofill_from_detection），
              保存时原样带回。别把输入框加回来 —— 它们是会被**执行**的程序路径。 -->
-        <label class="field">
-          <span><span data-i18n="lbl_home_dir">DSH 家目录（DSH 配置文件位置，默认 %USERPROFILE%\.dsh）</span><em id="home-exists-flag" class="flag"></em></span>
-          <div class="row">
-            <input id="set-home-dir" type="text" spellcheck="false" />
-            <button class="btn small" data-pick="folder" data-kind="home" data-target="set-home-dir" data-i18n="btn_browse">浏览</button>
-          </div>
-        </label>
-        <!-- 用户环境变量 DSH_HOME：**没有开关**（早期版本是个勾选框，已按用户要求改成
-             自动规则）—— 家目录不是默认值，保存后就自动写进 HKCU\Environment；改回默认值
-             则按归属规则删值（process.rs::apply_dsh_home_env → detect::plan_home_env，
-             只删本程序写过的值）。它只影响**用户另外打开的终端**：本程序启动 DSH（日常与
-             安全模式都是）时始终显式注入 DSH_HOME 覆盖继承值，所以自动写入改变不了本程序
-             自己的行为。下面那行只读显示注册表里的持久值 —— 用户仍要知道新终端会拿到什么。 -->
-        <div class="hint" id="home-env-now"></div>
+        <!-- 家目录 + 用户环境变量 DSH_HOME 两列并排（用户要求 2026-11-07：原来各占一整行太占地方）。
+             家目录输入框缩为半宽放左边；右边是只读的「当前用户环境变量」行。
+             DSH_HOME **没有开关**（早期版本是个勾选框，已按用户要求改成自动规则）——
+             家目录不是默认值，保存后就自动写进 HKCU\Environment；改回默认值则按归属规则
+             删值（process.rs::apply_dsh_home_env → detect::plan_home_env，只删本程序写过的值）。
+             它只影响**用户另外打开的终端**：本程序启动 DSH（日常与安全模式都是）时始终显式
+             注入 DSH_HOME 覆盖继承值，所以自动写入改变不了本程序自己的行为。
+             右边那行只读显示注册表里的持久值 —— 用户仍要知道新终端会拿到什么。 -->
+        <div class="row two home-duo">
+          <label class="field">
+            <span><span data-i18n="lbl_home_dir">DSH 家目录（DSH 配置文件位置，默认 %USERPROFILE%\.dsh）</span><em id="home-exists-flag" class="flag"></em></span>
+            <div class="row">
+              <input id="set-home-dir" type="text" spellcheck="false" />
+              <button class="btn small" data-pick="folder" data-kind="home" data-target="set-home-dir" data-i18n="btn_browse">浏览</button>
+            </div>
+          </label>
+          <div class="hint" id="home-env-now"></div>
+        </div>
         <!-- 搬家警告：**只在「这一格里的家目录与已保存的不同」时露出**（main.js::refreshHomeMoveWarn）。
              为什么要有它：家目录里的 profiles\node_modules 不是普通文件，而是一棵指回安装目录的
              **Windows 目录联接（junction）**。常规拷贝工具（资源管理器拖拽、xcopy、不带 /SL 的

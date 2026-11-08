@@ -491,6 +491,12 @@ body.tb-auto .refresh-overlay { top: 0; }
   line-height: 1.5;
 }
 
+/* 「自动检测」结果行：Node / npm / DSH 各占一行（main.js 用 \n 拼接，
+   HTML 默认会把换行折叠成空格 —— 截图里挤成一行的原因 —— 声明 pre-line 才生效）。 */
+#autodetect-result {
+  white-space: pre-line;
+}
+
 .hidden { display: none !important; }
 
 /* ---------- 模态框 ---------- */

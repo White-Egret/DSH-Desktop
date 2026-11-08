@@ -23,7 +23,7 @@ use tauri::{
 /// 启动入口：
 /// - `launched_by_autostart` 由 main.rs 检测 `--autostart` 参数后传入。
 ///   为 true 时窗口保持隐藏（tauri.conf.json visible: false），DSH 由
-///   process::start_internal 在延迟 12 秒后静默拉起；用户点托盘图标恢复窗口。
+///   process::start_internal 在延迟 15 秒后静默拉起；用户点托盘图标恢复窗口。
 ///   为 false（用户手动双击）时 setup 中立即 show 主窗口，行为与旧版一致。
 pub fn run(launched_by_autostart: bool) {
     // 启动期只判定一次：安全模式专用入口（`--safe` / `--safe-mode` / `DSH_SAFE_MODE=1`）下

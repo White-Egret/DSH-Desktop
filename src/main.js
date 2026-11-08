@@ -1564,7 +1564,7 @@ async function init() {
 async function postInit() {
   await refreshAutostartToggle();
 
-  // 本次是否由「开机自启」触发（决定静默窗口 + 12 秒延迟启动）
+  // 本次是否由「开机自启」触发（决定静默窗口 + 15 秒延迟启动）
   try {
     launchedByAutostart = await invoke('was_launched_by_autostart');
   } catch (_) { /* 保持 false */ }
@@ -1573,7 +1573,7 @@ async function postInit() {
   }
 
   // 自动启动：DSH 路径有效时，程序启动即拉起服务（含上次超时失败的 error 状态）；
-  // 若为开机自启，Rust 端 start_internal 会先延迟 12 秒
+  // 若为开机自启，Rust 端 start_internal 会先延迟 15 秒
   if (config && config.dsh_exists && ['idle', 'error'].includes(status)) {
     appendLog('launcher', t('log_prog_started'));
     try {
@@ -1593,7 +1593,7 @@ async function postInit() {
   // 程序启动/重启时自动检查 DSH 版本，结果显示在右上角状态栏
   // （原工具栏「检查版本」按钮已移除；服务随后进入运行态时 onStatus 还会再触发一次，
   //   由 autoCheckVersions 的 60 秒冷却保证不会重复请求 npm registry）。
-  // 开机自启时同样要错开系统冷启动高峰（与 Rust 端「DSH 延迟 12 秒启动」同一考量）：
+  // 开机自启时同样要错开系统冷启动高峰（与 Rust 端「DSH 延迟 15 秒启动」同一考量）：
   // 这里把版本查询推迟 30 秒，避免开机瞬间和系统抢 CPU / 网络。
   if (launchedByAutostart) {
     setTimeout(() => autoCheckVersions(), 30_000);

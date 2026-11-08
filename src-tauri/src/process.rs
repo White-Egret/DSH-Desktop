@@ -1937,9 +1937,9 @@ pub(crate) fn start_internal(app: &AppHandle) -> Result<(), String> {
         return Err(i18n::t("err_safe_active_op").to_string());
     }
 
-    // 开机自启触发：先延迟 12 秒错开系统冷启动高峰（IO 拥堵、Node/网络未就绪极易超时）
+    // 开机自启触发：先延迟 15 秒错开系统冷启动高峰（IO 拥堵、Node/网络未就绪极易超时）
     if state.launched_by_autostart.swap(false, Ordering::SeqCst) {
-        const AUTOSTART_DELAY_SECS: u64 = 12;
+        const AUTOSTART_DELAY_SECS: u64 = 15;
         emit_log(
             app,
             "launcher",

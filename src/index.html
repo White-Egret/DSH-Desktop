@@ -30,7 +30,7 @@
            自动拉起 DSH，日常根本用不到它们；而卡在 error 状态时需要的「停止」逃生口
            改到了**托盘菜单**（见 lib.rs 的 start_dsh / stop_dsh 菜单项）。
            别把这两颗加回来 —— 工具栏要留给真正高频的入口。 -->
-      <button id="btn-restart" class="btn" data-i18n="btn_restart">⟳ 重启</button>
+      <button id="btn-settings" class="btn" data-i18n="btn_settings">⚙ 首选项</button>
       <button id="btn-update" class="btn" data-i18n="btn_update">⤓ 更新 DSH</button>
       <!-- 安全模式：进入（停日常→归档→借凭据→起 3081）/ 退出（kill 安全实例→重启日常）。
            文案由 main.js renderSafeButton() 动态切换，故不挂 data-i18n -->
@@ -40,7 +40,7 @@
            文案由 i18n 给：中文「安装/卸载」，英文 "(Un)install"。 -->
       <button id="btn-manage" class="btn" data-i18n="btn_manage">安装/卸载</button>
       <button id="btn-log" class="btn" data-i18n="btn_log">日志</button>
-      <button id="btn-settings" class="btn" data-i18n="btn_settings">⚙ 首选项</button>
+      <button id="btn-restart" class="btn" data-i18n="btn_restart">⟳ 重启</button>
     </div>
     <div class="tb-right">
       <!-- 安全模式徽标：进入后常显（点击可重新打开引导弹窗）；工具栏同时整体切换琥珀色 -->
@@ -195,7 +195,7 @@
           <input type="checkbox" id="set-toolbar-auto" />
         </label>
         <label class="field field-switch">
-          <span data-i18n="lbl_autostart">开机自动启动（系统登录后静默拉起，可在托盘恢复窗口；首启先延迟 12 秒错开冷启动高峰）</span>
+          <span data-i18n="lbl_autostart">开机自动启动（系统登录后静默拉起，可在托盘恢复窗口；首启先延迟 15 秒错开冷启动高峰）</span>
           <input type="checkbox" id="set-autostart" />
         </label>
         <!-- 「启动音乐」块：与上面的开关型设置不同，这里是**一组**

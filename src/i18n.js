@@ -124,7 +124,7 @@
     lbl_close_action: '点击窗口 X 时',
     opt_close_tray: '隐藏到托盘（后台继续运行，可从托盘恢复）',
     opt_close_quit: '退出程序（停止本次启动的 DSH 进程）',
-    lbl_autostart: '开机自动启动（系统登录后静默拉起，可在托盘恢复窗口；首启先延迟 12 秒错开冷启动高峰）',
+    lbl_autostart: '开机自动启动（系统登录后静默拉起，可在托盘恢复窗口；首启先延迟 15 秒错开冷启动高峰）',
     // ---- 首选项：Python 建议安装块（状态行 + 基本安装 / 数据分析扩展包两个按钮） ----
     lbl_python_env: 'Python 环境（办公文档读写 / 数据分析）',
     py_checking: '正在检测本机 Python…',
@@ -372,7 +372,7 @@
     log_auto_start_fail: '[launcher] 自动启动失败: {0}',
     log_dsh_missing: '[launcher] 未找到 DSH（{0}）。{1}',
     msg_install_dsh: '请先安装：npm install -g {0} ，或在首选项中手动选择路径。',
-    log_autostart_silent: '[launcher] 本次由开机自启触发：窗口保持隐藏，DSH 将延迟 12 秒启动（错开系统冷启动高峰）。点击托盘图标可显示窗口。',
+    log_autostart_silent: '[launcher] 本次由开机自启触发：窗口保持隐藏，DSH 将延迟 15 秒启动（错开系统冷启动高峰）。点击托盘图标可显示窗口。',
     init_fail: '初始化失败: {0}',
     // 首次运行向导
     wiz_title: '欢迎使用 DSH Desktop —— 环境检查',
@@ -629,7 +629,7 @@
     lbl_close_action: 'When clicking the window X',
     opt_close_tray: 'Hide to tray (keeps running; restore from tray)',
     opt_close_quit: 'Quit the app (stops the DSH process started this session)',
-    lbl_autostart: 'Start with Windows (silent tray launch after login; restore the window from the tray; a 12 s delay avoids the boot spike)',
+    lbl_autostart: 'Start with Windows (silent tray launch after login; restore the window from the tray; a 15 s delay avoids the boot spike)',
     // ---- Preferences: suggested Python install block (status line + two install buttons) ----
     lbl_python_env: 'Python environment (office documents / data analysis)',
     py_checking: 'Detecting the local Python…',
@@ -866,7 +866,7 @@
     log_auto_start_fail: '[launcher] Auto-start failed: {0}',
     log_dsh_missing: '[launcher] DSH not found ({0}). {1}',
     msg_install_dsh: 'Install it first: npm install -g {0}, or pick the path in Preferences.',
-    log_autostart_silent: '[launcher] Launched by autostart: the window stays hidden and DSH starts after a 12 s delay (to avoid the boot spike). Click the tray icon to show the window.',
+    log_autostart_silent: '[launcher] Launched by autostart: the window stays hidden and DSH starts after a 15 s delay (to avoid the boot spike). Click the tray icon to show the window.',
     init_fail: 'Initialization failed: {0}',
     wiz_title: 'Welcome to DSH Desktop — Environment Check',
     wiz_desc_html: 'This app does <b>not</b> bundle Node.js or DSH — all three must be installed on this machine:<br />① <b>Node.js</b> (with npm; LTS recommended) ② <b>pnpm</b> (<b>10 or newer required</b>: used to install DSH plugins later; if it is missing or too old the wizard shows its own step and "Done" stays disabled until it is fixed)<br />③ <b>DSH</b> (npm package <code>@deepseek-ai/dsh</code>)<br />If everything is installed just click "Done"; missing Node / npm / DSH can be installed via the guided buttons below, or skipped and installed yourself later.',

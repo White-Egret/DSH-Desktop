@@ -24,6 +24,7 @@ pub fn t(key: &str) -> &'static str {
     let en = is_en();
     match key {
         // ---------- 启动 / 状态 ----------
+        // 开机自启的等待秒数来自 process.rs 的 AUTOSTART_DELAY_SECS（现为 15），文案不写死数字
         "err_status_locked" => if en { "Cannot start: current DSH status is \"{0}\"" } else { "当前 DSH 状态为「{0}」，无法重复启动" },
         "log_autostart_wait" => if en { "[launcher] Autostart triggered: waiting {0} s first to avoid the boot-time IO spike..." } else { "[launcher] 检测到开机自启触发，先等待 {0} 秒错开系统冷启动高峰..." },
         "status_autostart_delay" => if en { "Autostart: DSH will start in {0} s (avoids the boot spike; click Stop to cancel)" } else { "开机自启：等待 {0} 秒后启动 DSH（错开系统冷启动高峰，可点「停止」取消）" },

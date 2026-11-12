@@ -247,6 +247,37 @@ def _xlsx_to_markdown(src: Path) -> str:
     return "\n".join(parts).strip()
 
 
+# ---------- 连字归一化（U+FB00–FB06，2026-11 路由修复 D） ----------
+#
+# bake-off 实证：markitdown 的 PDF 路径留下未展开的兼容连字 —— 第7页.pdf 一页
+# 就有 8 个（oﬃce / suﬀ. / ﬂag / ﬁrst），下游检索与词频会**静默漏词**
+# （搜 "office" 搜不到 "oﬃce"，两边看着都是「读得通」）。
+#
+# 为什么是定向 translate 而不是全量 NFKC：NFKC 会把 CJK 全角标点/数字/拉丁
+# （，！？；１２３ＡＢＣ）一并折叠成半角 —— 对中文文档是不可接受的副作用；
+# 而下面这 7 个码位在正常 CJK / Office 文本里根本不出现，定向映射零副作用、O(n)。
+_LIGATURE_TABLE = str.maketrans(
+    {
+        "\ufb00": "ff",   # ﬀ
+        "\ufb01": "fi",   # ﬁ
+        "\ufb02": "fl",   # ﬂ
+        "\ufb03": "ffi",  # ﬃ
+        "\ufb04": "ffl",  # ﬄ
+        "\ufb05": "st",   # ﬅ（长 s + t）
+        "\ufb06": "st",   # ﬆ
+    }
+)
+
+
+def normalize_ligatures(text: str) -> str:
+    """把 Unicode 兼容连字（U+FB00–FB06）展开成 ASCII 字母组合。
+
+    只动这 7 个码位：全角标点、全角数字、CJK 一概不受影响（刻意不用 NFKC，
+    理由见 _LIGATURE_TABLE 处注释）。
+    """
+    return (text or "").translate(_LIGATURE_TABLE)
+
+
 def convert_local_to_markdown(src: Path) -> str:
     """**本地**转换的唯一入口：任意本机文档 → Markdown，不联网、不上传。
 
@@ -282,6 +313,10 @@ def convert_local_to_markdown(src: Path) -> str:
     if text is None:
         raise ToolError("markitdown 没有返回内容（可能是不支持的格式）。")
     text = str(text)
+    # 连字归一化（2026-11 修复 D）：markitdown 的 PDF 路径会留下 U+FB0x
+    # （oﬃce 这类），下游按 ASCII 检索/数词会静默漏词。只走 markitdown 的分支：
+    # xlsx 走 openpyxl 原生路径，没有这个已实证的问题，不顺手扩大范围。
+    text = normalize_ligatures(text)
     diag("convert.markitdown.done", f"{len(text)} chars")
     return text
 
@@ -303,11 +338,12 @@ def convert_local_to_markdown(src: Path) -> str:
         "（台湾/大陆译名差异大，勿按常识「纠正」）、漏字（句子仍通顺但少了字）、"
         "形近字（彫/膨、兒/尼）、数字与日期都可能出错；需要逐字准确时用 "
         "prefer=\"accuracy\" 对照原图核对。"
-        "双栏/多栏论文、带公式的试卷、发票等版面敏感文档传 prefer=\"layout\"；"
-        "**竖排文字（竖排中文/日文、古籍）、版面异常（字序错乱、文字被拆成散列）的 PDF 也传 "
-        "prefer=\"layout\"** —— auto 只看「每页字数」，字多就判成本地，但竖排页面的每个字"
-        "会被按横排坐标抽成独立一列，结果是「字数很多但完全乱序」；这类文档 auto 救不了，"
-        "必须声明 layout。"
+        "双栏/多栏论文、带公式的试卷、发票等版面敏感文档传 prefer=\"layout\""
+        "（auto 不做通用多栏检测——页眉/通栏标题会破坏判据，误判率高于收益）；"
+        "**竖排文字（竖排中文/日文、古籍）与 OCR 藏字文本层（扫描后套了隐藏识别层）"
+        "的 PDF auto 已能识别**（字符坐标行列比 + 字体名两个信号，2026-11 修复），"
+        "命中时自动走云端版面模型 OXR、禁走本地，无需再声明 layout；"
+        "只有字序错乱等侦察信号抓不到的版面异常仍需手动传 layout。"
         "离线或只要纯文本传 prefer=\"fast\"。"
         "只接受本机绝对路径，不接受 URL。"
         "返回 {ok, engine, route, source, path, chars, preview}"
@@ -328,11 +364,12 @@ def convert_local_to_markdown(src: Path) -> str:
                     "引擎偏好，默认 auto（按侦察结果自动选）。"
                     "auto = 自动判；fast = 只用本地（离线/批量/只要纯文本）；"
                     "layout = 强制云端版面模型 OXR（双栏论文、公式试卷、发票，"
-                    "以及**竖排文字/版面异常**的 PDF）；"
-                    "accuracy = 把页面渲染成图交给你自己读（多音标小语种、手写、逐字引用；"
-                    "仅对图片与扫描件生效，有干净文本层的 PDF 仍走本地）。"
-                    "⚠ 竖排中文/日文、古籍、字序错乱的 PDF 请用 layout：auto 按每页字数判断，"
-                    "会把竖排页误判成「干净文本层」并产出乱序结果。"
+                    "以及侦察信号抓不到的版面异常）；"
+                    "accuracy = 把页面渲染成图交给你自己读（多音标小语种、手写、逐字引用、"
+                    "竖排/OCR 藏字文本层；真正的干净文本层 PDF 仍走本地）。"
+                    "竖排中文/日文与 OCR 藏字文本层的 PDF auto 已能自动识别并走云端"
+                    "（字符坐标行列比 + 字体名两个信号，2026-11 修复）；"
+                    "只有字序错乱等抓不到的版面异常仍请传 layout。"
                 ),
             },
             "output_path": {
@@ -529,11 +566,16 @@ def markitdown_capabilities() -> dict:
                 "structural": "云端版面模型 OXR：有表格/复杂版面/扫描件的 PDF，以及独立图片",
                 "accuracy": "渲染页面图交回 Agent 自己读：多音标小语种、手写、需逐字准确（仅图片与扫描件）",
                 "prefer": "auto（默认）/ fast / layout / accuracy —— 见 convert_file_to_markdown",
+                "untrusted_text_layer": (
+                    "竖排文字与 OCR 藏字文本层（GlyphLessFont / Hidden*OCR 字体）的 PDF "
+                    "auto 已能识别（字符坐标行列比 + 字体名两个信号，2026-11 路由修复），"
+                    "命中即走云端 OXR、禁走 fast —— 字多不再等于文本层可信。"
+                    "此时强制 prefer=\"fast\" 仍走本地，但结果会带明确的不可信提示。"
+                ),
                 "layout_required": (
-                    "竖排文字（竖排中文/日文、古籍）与字序错乱的 PDF **必须**传 layout："
-                    "auto 只按每页字数判断，竖排页会被误判成「干净文本层」，"
-                    "结果是「字数很多但完全乱序」——实测一份竖排繁体扫描件，"
-                    "auto 产出 9269 字符的乱序表格，layout 产出 1254 字符的正确正文。"
+                    "双栏/多栏（auto 不做通用多栏检测——页眉/通栏标题会破坏判据）"
+                    "与字序错乱等侦察信号抓不到的版面异常，仍需**显式**传 layout；"
+                    "竖排与 OCR 藏字层不再需要（auto 已能识别，2026-11 修复）。"
                 ),
                 "ocr_is_draft": (
                     "OXR 与本地产出的都是 OCR 草稿，**通顺不等于正确**。实测同一份竖排扫描件，"
@@ -542,6 +584,8 @@ def markitdown_capabilities() -> dict:
                     "错误集中在四类：专名与译名（勿按常识纠正，台湾/大陆译名差异大）、"
                     "漏字（句子仍通顺，最难发现）、形近字、数字与日期。"
                     "需要逐字准确时用 prefer=\"accuracy\" 对照原图核对。"
+                    "另：云端结果的**结尾**可能幻觉出原文没有的收尾句、或丢掉最后一条（实测），"
+                    "引用级用途请对照页面末尾核对。"
                 ),
             },
             "note": (
@@ -622,3 +666,53 @@ def _cloud_capabilities() -> dict:
         )
     out["oxr"] = oxr
     return out
+
+
+# ---------- 自测（无网络、不 import markitdown） ----------
+
+
+def self_test() -> list[str]:
+    """纯函数自测，返回失败清单（空 = 全绿）。供 doc_route.py --self-test 调用。
+
+    刻意只测纯函数（连字归一化）：不触发 `_converter()`，也就不会
+    import markitdown / numpy —— 断网、裸环境照样全绿。
+    """
+    failures: list[str] = []
+
+    def check(name: str, got, want) -> None:
+        if got != want:
+            failures.append(f"md.{name}: 期望 {want!r}，实际 {got!r}")
+
+    # bake-off 第7页.pdf 实测出现过的四个词
+    check("连字 oﬃce", normalize_ligatures("oﬃce"), "office")
+    check("连字 suﬀ.", normalize_ligatures("suﬀ."), "suff.")
+    check("连字 ﬂag", normalize_ligatures("ﬂag"), "flag")
+    check("连字 ﬁrst", normalize_ligatures("ﬁrst"), "first")
+    # 七个码位逐个展开（不用拼接大字面量，避免肉眼对错）
+    for src_ch, want in (
+        ("\ufb00", "ff"),
+        ("\ufb01", "fi"),
+        ("\ufb02", "fl"),
+        ("\ufb03", "ffi"),
+        ("\ufb04", "ffl"),
+        ("\ufb05", "st"),
+        ("\ufb06", "st"),
+    ):
+        check(f"连字 U+{ord(src_ch):04X}", normalize_ligatures(src_ch), want)
+    # 归一化后 U+FB0x 计数必须为 0
+    sample = "oﬃce suﬀ. ﬂag ﬁrst ﬀﬁﬂﬃﬄﬅﬆ"
+    normalized = normalize_ligatures(sample)
+    check(
+        "连字 计数归零",
+        sum(normalized.count(ch) for ch in "\ufb00\ufb01\ufb02\ufb03\ufb04\ufb05\ufb06"),
+        0,
+    )
+    # 边界与 CJK 安全：全角标点/数字/拉丁一概不动（NFKC 会动，这里不许动）
+    check("连字 空串", normalize_ligatures(""), "")
+    check(
+        "连字 中文无副作用",
+        normalize_ligatures("中文，标点！；１２３ＡＢＣ"),
+        "中文，标点！；１２３ＡＢＣ",
+    )
+
+    return failures

@@ -33,6 +33,9 @@
 **为什么不做「自动识别多栏」**：多栏判断靠抽样页字符坐标，页眉、通栏标题、图注
 都会破坏判据，误判代价是「左右栏串行交错」。所以只提供可声明的 `prefer="layout"`，
 交给懂语境的 Agent 声明（方案 §3）。
+但「文本层不可信」的两类脏文本层**有可靠信号**，不在其列（2026-11 路由修复）：
+竖排（字符按列堆叠，distinct_y/distinct_x 比值极高）与 OCR 藏字层（文本层字体是
+GlyphLessFont / Hidden*OCR）—— 两者命中即禁走本地 fast；通用多栏依旧不判。
 """
 
 from __future__ import annotations
@@ -60,6 +63,32 @@ LOCAL_SUFFIXES = frozenset(
 SCANNED_AVG_CHARS = 80
 # 有图且文本层薄到这个程度，同样按扫描件处理（图文混排的封面页 / 盖章页）
 SCANNED_WITH_IMAGES_AVG_CHARS = 300
+
+# —— 「文本层不可信」判据（2026-11 路由修复，bake-off 实测标定）——
+#
+# 原判据「avg_chars ≥ 80 且 tables == 0 → 干净文本层 → fast」把**有文本层**当成了
+# **文本层正确**。两个最脏的样本都有文本层，却被送进 fast，markitdown 产出整页假表格：
+#   · 中文竖排件：文本层 1155 字/页 → 176 行假表格，关键串命中 0/30；
+#   · 双栏拉丁词典（Souter）：文本层 3881 字 → 52 行假表格，左右栏逐行合并、列序全错。
+# 所以补两个**可靠**信号（probe_pdf 计算，decide_route 命中即降级、禁走 fast）：
+#
+#   · vertical：竖排时字符按列堆叠 —— 每列共享同一 x0 → distinct_x（列数）少、
+#     distinct_y（每列字数）多。本机实测（x0/top 按 ~2pt 归并）：竖排件比值
+#     5.4~5.5，横排干净件 0.05~0.57，阈值 3.0 两侧各有近 2 倍余量。
+#     通用「多栏」依旧不判（页眉/通栏标题会破坏判据，见模块 docstring），
+#     只判「字符按列堆叠」这一种结构。
+#   · ocr_font：文本层字体名是 OCR 藏字 → 文本层是识别引擎贴上去的，不是排版
+#     软件写上去的，坐标序与列序都不可信。实测命中 GlyphLessFont（Souter）、
+#     HiddenHorzOCR / HiddenVertOCR（竖排件）；干净件是 MBaskerville /
+#     NimbusRomNo9L / CMR / Noto-Sans-SC 等真实排版字体。
+VERTICAL_RATIO = 3.0
+# 列数下限：≥50 字符且比值 ≥3 的横排页面根本不存在（横排字符 x0 必然铺满页宽），
+# 这个下限只为挡住「所有字符挤在同一 x」之类的退化抽取，不承担正常判别。
+VERTICAL_MIN_COLUMNS = 2
+# 页面字符数下限：字符太少的页面不做行列统计（噪声占主导，判不出也判不准）
+VERTICAL_MIN_PAGE_CHARS = 50
+# OCR 藏字体的名字片段（统一小写后子串匹配）
+OCR_FONT_MARKERS = ("glyphless", "hidden", "ocr")
 
 # 升级规则 2 的判据：超过三成字母属「第三类文字」，就附上原图让 Agent 自己看（方案 §4）
 NON_LATIN_CJK_RATIO = 0.30
@@ -136,6 +165,10 @@ class PdfProbe:
     images: int
     tables: int
     sample_text: str = ""
+    # 「文本层不可信」两个信号（2026-11 路由修复）。**必须给默认值 False**：
+    # 自测与旧调用点的四参 PdfProbe(...) 构造不受影响，probe 拿不到 chars 时也置 False。
+    vertical: bool = False   # 竖排：字符按列堆叠（distinct_x 少、distinct_y 多）
+    ocr_font: bool = False   # 文本层字体是 OCR 藏字（GlyphLessFont / Hidden*OCR 等）
 
 
 @dataclass
@@ -192,7 +225,9 @@ def decide_route(
     """`decide` 的带理由版本 —— 理由会进结果里的 `route.reason`，给 Agent 解释用。
 
     判据逐条对应方案 §4，**顺序就是优先级**，改任何一条都要连带看注释：
-    显式档 > 图片 > 原生格式 > 非 PDF > layout > accuracy 的三段判断 > 自动判据。
+    显式档 > 图片 > 原生格式 > 非 PDF > layout > accuracy 的三段判断 > 自动判据；
+    自动判据里，**「文本层不可信」信号（竖排 / OCR 藏字）压在「干净文本层 → fast」
+    之前** —— 字多不等于字对，2026-11 路由修复（见 VERTICAL_RATIO 处的标定注释）。
     """
     suffix = (suffix or "").lower()
 
@@ -211,17 +246,27 @@ def decide_route(
     if prefer == "layout":
         return "structural", "prefer-layout"
     if prefer == "accuracy":
-        # `prefer="accuracy"` 的语义是「我要逐字准确」。三条判断，按代价从低到高：
+        # `prefer="accuracy"` 的语义是「我要逐字准确」。判断按代价从低到高：
         #
         # ① 侦察失败 → 只能走本地（不为了猜而多跑一次）
-        # ② 文本层含大量非拉丁字母 → **即使文本层干净也渲染**：这类文档的文本层
+        # ② 「文本层不可信」信号（竖排 / OCR 藏字层）→ **直接渲染**：这类文本层的
+        #    坐标序本身就是错的，字再多也不能交给按顺序抽取的本地引擎
+        #    （2026-11 修复，判据标定见 VERTICAL_RATIO 处的注释）。
+        # ③ 文本层含大量非拉丁字母 → **即使文本层干净也渲染**：这类文档的文本层
         #    常常「字多但不对」（实测 test.pdf 的希腊文：文本层 4335 字/页很干净，
         #    但长音符在提取时就丢了）。原生文本对拉丁文可信，对多音标文字不可信，
         #    所以这里不看字数看**书写系统**。
-        # ③ 其余干净文本层（真正的原生文本，如英文合同、中文公文）→ 走本地：
+        # ④ 其余干净文本层（真正的原生文本，如英文合同、中文公文）→ 走本地：
         #    渲染成图再让 Agent 读只会更慢更贵，还可能看错。
         if probe is None:
             return "fast", "accuracy-probe-failed"
+        # 「文本层不可信」信号优先于一切字数判断：竖排 / OCR 藏字层的**坐标序**
+        # 本身就是错的，字再多也不能交给按顺序抽取的本地引擎。声明了 accuracy
+        # 就是要逐字准确 → 直接渲染页面图，理由用与 auto 相同的两个码。
+        if probe.vertical:
+            return "accuracy", "vertical-layout"
+        if probe.ocr_font:
+            return "accuracy", "ocr-hidden-text-layer"
         if probe.avg_chars >= SCANNED_AVG_CHARS and has_diacritics(probe.sample_text):
             return "accuracy", "accuracy-diacritic-text-layer"
         if probe.avg_chars >= SCANNED_AVG_CHARS and probe.tables == 0:
@@ -241,6 +286,13 @@ def decide_route(
         return "structural", "tables" if probe.tables > 0 else "scanned"
     if probe.tables > 0:
         return "structural", "tables"
+    # 「文本层不可信」的两个信号（2026-11 修复）：命中任何一个都不许判
+    # 「干净文本层 → fast」—— 那正是把竖排件与 OCR 藏字件送进本地、产出整页
+    # 假表格的原判据漏洞。宁可白花一次云端上传，不可交一份乱序表格。
+    if probe.vertical:
+        return "structural", "vertical-layout"
+    if probe.ocr_font:
+        return "structural", "ocr-hidden-text-layer"
     return "fast", "clean-text-layer"
 
 
@@ -524,8 +576,42 @@ def render_pages(
 # ---------- 侦察（唯一会碰文件的函数） ----------
 
 
+def _column_ratio(chars: list) -> "float | None":
+    """一页字符的 distinct_y / distinct_x（坐标按 ~2pt 归并，消亚点级抖动）。
+
+    竖排时字符按列堆叠：每列共享同一个 x0 → distinct_x（列数）少、
+    distinct_y（每列字数）多，比值极高；横排相反（字符 x0 铺满页宽）。
+    字符太少或 distinct_x 退化时返回 None —— 样本不足以支撑「列结构」
+    的判断时宁可放过（走错本地才是大代价，但拿噪声当证据同样危险）。
+    """
+    if len(chars) < VERTICAL_MIN_PAGE_CHARS:
+        return None
+    xs = {round((c.get("x0") or 0) / 2) for c in chars}
+    ys = {round((c.get("top") or 0) / 2) for c in chars}
+    if len(xs) < VERTICAL_MIN_COLUMNS:
+        return None
+    return len(ys) / len(xs)
+
+
+def _ocr_font_hit(chars: list) -> bool:
+    """这页字符里是否出现过 OCR 藏字体的名字（见 OCR_FONT_MARKERS）。
+
+    子串匹配是有意为之：藏字体的命名没有统一规范，实测见过的三种
+    （GlyphLessFont / HiddenHorzOCR / HiddenVertOCR）分别命中三个片段。
+    代价是理论上可能误伤名为 *OCR* 的真实字体（如 OCR-B），但误伤的代价
+    只是「多走一次云端 OXR」（structural 本来就更适合它），漏放的代价是
+    整页假表格 —— 两害相权取其轻。
+    """
+    for c in chars:
+        name = (c.get("fontname") or "").lower()
+        if any(marker in name for marker in OCR_FONT_MARKERS):
+            return True
+    return False
+
+
 def probe_pdf(path: Path) -> "PdfProbe | None":
-    """抽样侦察一个 PDF：页数、前 3 页均字数、图片数、前 2 页表格数。
+    """抽样侦察一个 PDF：页数、前 3 页均字数、图片数、前 2 页表格数，
+    以及「文本层不可信」两个信号（竖排 / OCR 藏字层，见 VERTICAL_RATIO 处注释）。
 
     只读、不落盘，实测四份样本 0.04~0.21 s（方案 §1.3）。
     **任何失败都返回 None 而不是抛错** —— 侦察失败只说明「判不了」，
@@ -554,6 +640,23 @@ def probe_pdf(path: Path) -> "PdfProbe | None":
                     tables += len(p.find_tables())
                 except Exception:  # noqa: BLE001 — 探测失败不算有表格
                     pass
+            # 「文本层不可信」两个信号：与 texts 同一批抽样页（前 3 页）。
+            # 拿不到 chars 就保持 False —— 新信号只加分不减分，绝不抛错、
+            # 绝不影响既有判据（probe 失败仍走优雅退化为 None）。
+            vertical = False
+            ocr_font = False
+            for p in sample:
+                try:
+                    chars = p.chars or []
+                except Exception:  # noqa: BLE001 — 单页字符表坏了不影响其它页
+                    continue
+                if not chars:
+                    continue
+                ratio = _column_ratio(chars)
+                if ratio is not None and ratio >= VERTICAL_RATIO:
+                    vertical = True
+                if _ocr_font_hit(chars):
+                    ocr_font = True
     except Exception as exc:  # noqa: BLE001 — 加密 / 损坏 / 根本不是 PDF
         diag("probe.fail", f"{type(exc).__name__}: {str(exc)[:160]}")
         return None
@@ -564,6 +667,8 @@ def probe_pdf(path: Path) -> "PdfProbe | None":
         tables=tables,
         # 只留前 4000 字符：判断书写系统够用了，再多只是白占内存
         sample_text="\n".join(texts)[:4000],
+        vertical=vertical,
+        ocr_font=ocr_font,
     )
 
 
@@ -612,6 +717,30 @@ def _describe_failure(exc: BaseException) -> str:
     return f"{head}：{msg}" if msg else head
 
 
+def _forced_fast_warning(probe: "PdfProbe | None") -> str:
+    """prefer="fast" 命中「文本层不可信」信号时的风险说明；无信号返回空串。
+
+    prefer="fast" 是显式「只用本地」覆盖：**保留语义**（判据层照常返回 fast），
+    但不得**静默**交出可能乱序的假表格 —— 把风险写成 note 讲明白。
+    刻意不按失败处理：声明了 fast 的用户往往就是不能/不想上传（离线、隐私），
+    硬失败等于把唯一可用的路也关掉；而「空输出」那种毫无用处的结果，
+    另由 `_run_fast` 的护栏按失败处理。
+    """
+    if probe is None:
+        return ""
+    flags = []
+    if probe.vertical:
+        flags.append("竖排版面")
+    if probe.ocr_font:
+        flags.append("OCR 隐藏文本层")
+    if not flags:
+        return ""
+    return (
+        f"该 PDF 的文本层不可信（{'、'.join(flags)}），本地输出可能整页乱序或混入假表格；"
+        "你声明了 prefer=\"fast\" 已照办走本地，需要正确版面请改用 prefer=\"layout\""
+    )
+
+
 def convert_any(src: Path, *, prefer: str = "auto", local_convert) -> RouteOutcome:
     """按路由把 `src` 转成 Markdown。
 
@@ -638,8 +767,17 @@ def convert_any(src: Path, *, prefer: str = "auto", local_convert) -> RouteOutco
         f"{suffix or '（无扩展名）'} prefer={prefer} -> {kind}/{reason}"
         f" probe={probe_ms}ms"
         + (f" pages={probe.pages} avg={probe.avg_chars:.0f} tables={probe.tables}" if probe else "")
+        + (f" vertical={probe.vertical} ocr_font={probe.ocr_font}" if probe else "")
     )
     diag("route.decide", detail)
+
+    # prefer="fast" 的非静默护栏：命中不可信文本层时把风险写进 notes（见
+    # _forced_fast_warning 的说明），kind/reason 不变 —— 判据层的语义保持纯粹。
+    if kind == "fast" and prefer == "fast":
+        warning = _forced_fast_warning(probe)
+        if warning:
+            out.notes.append(warning)
+            diag("route.fast.untrusted-text-layer", detail)
 
     if kind == "fast":
         return _run_fast(out, src, local_convert)
@@ -656,6 +794,17 @@ def _run_fast(out: RouteOutcome, src: Path, local_convert) -> RouteOutcome:
         text = local_convert(src)
     except Exception as exc:  # noqa: BLE001 — 本地自己报错就是最终错误
         out.error = f"{exc}" if isinstance(exc, ToolError) else f"{type(exc).__name__}: {exc}"
+        return out
+    if not (text or "").strip():
+        # 「成功但 0 字符」必须当失败（bake-off 实证）：markitdown 对扫描件/图片
+        # 返回 status=ok + 空正文，当成功返回等于骗下游「这份文档是空的」，
+        # 后面所有推理都建立在假事实上。
+        out.ok = False
+        out.error = (
+            "本地引擎没有提取到任何内容（空输出）：文件很可能是扫描件/纯图片 PDF，"
+            "或确实没有可提取的文本。请改用 prefer=\"layout\"（云端版面模型）"
+            "或 prefer=\"accuracy\"（渲染页面图自己读）。"
+        )
         return out
     out.ok = True
     out.engine = "markitdown"
@@ -711,6 +860,13 @@ def _run_structural(
             "OCR 结果仅供草稿：专名、译名、数字、日期、以及看起来「读得通但可疑」的字，"
             "请传 prefer=\"accuracy\" 用原图核对 —— 通顺不等于正确，漏字与形近字"
             "（如「軍事家」→「軍家」）在文本上依然通顺，只有对照原图才能发现"
+        )
+        # 尾部保守提示（bake-off 实证）：OXR 会幻觉整句收尾并丢末条 —— Souter 页尾
+        # 多出一句页面里没有的英文、末条 Ǎbrăhǎm 被丢掉。可靠的尾部自动检测需要
+        # 视觉对比原图，第一步刻意不做（不可靠的启发式会误删正文），只把风险讲清楚。
+        out.notes.append(
+            "云端结果的结尾可能不可靠：实测会幻觉出原文没有的收尾句、或丢掉最后一条；"
+            "需要引用原文（尤其中文/日文）时，请对照页面末尾核对"
         )
     return out
 
@@ -930,6 +1086,61 @@ def _self_test() -> int:
     )
     check("理由 图文混排无表格", decide_route(".pdf", thick_with_images, "auto")[1], "scanned")
 
+    # —— 「文本层不可信」两个信号（2026-11 路由修复）——
+    # 竖排件与 OCR 藏字件都有文本层、字都不少，原判据把它们送进了 fast；
+    # 现在命中任何一个信号都必须降级，禁走 fast。
+    vertical = PdfProbe(pages=2, avg_chars=1155, images=2, tables=0, vertical=True)
+    souter = PdfProbe(pages=1, avg_chars=3881, images=2, tables=0, ocr_font=True)
+    check("auto+竖排", decide(".pdf", vertical, "auto"), "structural")
+    check("理由 auto+竖排", decide_route(".pdf", vertical, "auto")[1], "vertical-layout")
+    check("auto+OCR 藏字", decide(".pdf", souter, "auto"), "structural")
+    check("理由 auto+OCR 藏字", decide_route(".pdf", souter, "auto")[1], "ocr-hidden-text-layer")
+    check("accuracy+竖排", decide(".pdf", vertical, "accuracy"), "accuracy")
+    check("理由 accuracy+竖排", decide_route(".pdf", vertical, "accuracy")[1], "vertical-layout")
+    check("accuracy+OCR 藏字", decide(".pdf", souter, "accuracy"), "accuracy")
+    check("理由 accuracy+OCR 藏字", decide_route(".pdf", souter, "accuracy")[1], "ocr-hidden-text-layer")
+    # 新字段有默认值：不给信号的旧构造，行为一个都不能变（回归）
+    check("默认字段 干净文本层仍 fast", decide(".pdf", clean, "auto"), "fast")
+    check("默认字段 表格仍 structural", decide(".pdf", table, "auto"), "structural")
+    # prefer="fast" 显式覆盖保留：判据层照常返回 fast（风险说明在编排层写成 note）
+    check("prefer=fast 覆盖竖排", decide(".pdf", vertical, "fast"), "fast")
+    # 编排层纯函数：强制 fast 命中信号时必须给出非空风险说明，无信号时不打扰
+    check_true("强制fast 竖排有提示", bool(_forced_fast_warning(vertical)))
+    check_true("强制fast OCR 藏字有提示", bool(_forced_fast_warning(souter)))
+    check_true("强制fast 提示写明 layout", "layout" in _forced_fast_warning(souter))
+    check("强制fast 干净文本层无提示", _forced_fast_warning(clean), "")
+    check("强制fast 无侦察", _forced_fast_warning(None), "")
+
+    # _column_ratio：竖排比值高、横排比值低、样本不足/退化返回 None
+    def _char(x, top):
+        return {"x0": x, "top": top}
+
+    # 竖排：4 列，每列 20 字，列内共享 x0
+    vert_chars = [_char(100.0 + (i // 20) * 30.0, 50.0 + (i % 20) * 12.0) for i in range(80)]
+    check_true("_column_ratio 竖排命中阈值", _column_ratio(vert_chars) >= VERTICAL_RATIO)
+    # 横排：字符 x0 铺满页宽，distinct_y 只有几行
+    horiz_chars = [_char(50.0 + (i % 60) * 9.0, 100.0 + (i // 60) * 14.0) for i in range(120)]
+    check_true("_column_ratio 横排低于阈值", _column_ratio(horiz_chars) < VERTICAL_RATIO)
+    check("_column_ratio 字符太少", _column_ratio([_char(1.0, 1.0)]), None)
+    single_col = [_char(100.0, 50.0 + i * 12.0) for i in range(60)]
+    check("_column_ratio 单列退化", _column_ratio(single_col), None)
+    # _ocr_font_hit：藏字字体命中、真实排版字体不命中
+    check_true("_ocr_font_hit GlyphLessFont", _ocr_font_hit([_char(1, 1), {"x0": 2, "top": 2, "fontname": "GlyphLessFont"}]))
+    check_true("_ocr_font_hit HiddenVertOCR", _ocr_font_hit([{"x0": 1, "top": 1, "fontname": "HiddenVertOCR"}]))
+    check("_ocr_font_hit 真实字体", _ocr_font_hit([{"x0": 1, "top": 1, "fontname": "MBaskerville"}, {"x0": 2, "top": 2, "fontname": "Noto-Sans-SC"}]), False)
+    check("_ocr_font_hit 空字符表", _ocr_font_hit([]), False)
+
+    # fast 路空输出护栏（bake-off 实证：markitdown 对扫描件/图片返回 ok + 0 字符）
+    res_empty = _run_fast(RouteOutcome(ok=False, kind="fast"), Path("_stub_.pdf"), lambda p: "")
+    check("fast 空输出当失败", res_empty.ok, False)
+    check_true("fast 空输出提示扫描件", "扫描件" in (res_empty.error or ""))
+    check("fast 纯空白也当失败",
+          _run_fast(RouteOutcome(ok=False, kind="fast"), Path("_stub_.pdf"), lambda p: "  \n\t ").ok,
+          False)
+    res_ok = _run_fast(RouteOutcome(ok=False, kind="fast"), Path("_stub_.pdf"), lambda p: "有内容")
+    check("fast 有内容仍成功", res_ok.ok, True)
+    check("fast 有内容引擎", res_ok.engine, "markitdown")
+
     # normalize_prefer
     check("prefer 大小写", normalize_prefer("  ACCURACY "), "accuracy")
     check("prefer 空值", normalize_prefer(None), "auto")
@@ -1016,8 +1227,9 @@ def _self_test() -> int:
     except OSError as exc:  # 桥接目录不可写时跳过（不该让纯函数自测因此变红）
         diag("selftest.page-pics.skip", str(exc)[:120])
 
-    # 兄弟模块的纯函数（同样是断网可跑的自测）
-    for module_name in ("oxr_client",):
+    # 兄弟模块的纯函数（同样是断网可跑的自测；markitdown_tools 只测纯函数，
+    # 不会触发 import markitdown / numpy —— import 发生在 _converter() 里）
+    for module_name in ("oxr_client", "markitdown_tools"):
         try:
             mod = __import__(module_name)
         except Exception as exc:  # noqa: BLE001
@@ -1038,7 +1250,7 @@ def _self_test() -> int:
         for f in failures:
             print(f"     {f}")
         return 1
-    print("OK   doc_route / oxr_client 纯函数自测全部通过（含页面图 TTL 清理）")
+    print("OK   doc_route / oxr_client / markitdown_tools 纯函数自测全部通过（含页面图 TTL 清理）")
     return 0
 
 

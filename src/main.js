@@ -2718,7 +2718,16 @@ async function refreshKbStatus() {
   const el = $('kb-status');
   if (!el) return;
   // 安装进行中不去打扰后端（它正忙着），状态行由进度区负责
-  if (!kbTask.active) el.textContent = t('kb_checking');
+  if (!kbTask.active) {
+    el.textContent = t('kb_checking');
+    // 无任务在跑：清掉上一次任务残留的进度区与日志。否则安装完成（尤其「DSH
+    // 在跑 → 留 pending」那次）后，「DSH 正在运行…下次进入自动注册」那段进度
+    // 文字和黑日志框会一直赖到重启/重开弹窗之后——状态行已更新成「已就绪」，
+    // 进度区却停在旧任务。进度区是 transient 的任务反馈，重开弹窗该回干净状态。
+    setKbProgress(false);
+    const log = $('kb-log');
+    if (log) { log.textContent = ''; log.classList.add('hidden'); }
+  }
   try {
     renderKbStatus(await invoke('kb_status'));
   } catch (e) {
@@ -2804,14 +2813,15 @@ async function runKbInstall() {
 function onKbResult(p) {
   kbTask.active = false;
   renderKbButtons();
+  // 先重问状态：refreshKbStatus 在无任务时会清掉残留进度区；放在显示本次结果
+  // 之前，避免刚清掉又被盖回。成败都重问：装完按钮变「卸载…」，失败如实报阶段。
+  refreshKbStatus();
   // p.message 由后端生成：部分失败会点名是哪一个包没装上（绝不笼统报成功）
   const msg = p.message || (p.success ? t('kb_done') : t('kb_fail'));
   setKbProgress(true, msg);
   setKbSpinner(false);
   appendKbLog(msg);
   toast(msg, !p.success);
-  // 成败都重问状态：装完按钮要变成「卸载…」，失败要如实报出阶段
-  refreshKbStatus();
 }
 
 async function saveSettings() {

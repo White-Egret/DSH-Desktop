@@ -69,9 +69,40 @@ function lineOf(src, idx) {
   return src.slice(0, idx).split('\n').length;
 }
 
+/**
+ * 找出「本身就是引用」的循环变量名，例如 `for p in &paths { … }` 里的 `p`。
+ *
+ * 为什么需要这条豁免（真实误报，2026-11-10）：`office.rs` 里有一处
+ * `for p in &paths { i18n::fmt("…", &[p]) }`，`p` 的类型是 `&String` —— 已经是引用，
+ * 而 `String: Sized`，所以 `&String → &dyn Display` 是一步合法转换，`cargo check` 通过。
+ * 扫描器只按「是否以 & 开头」判断，于是把这种正确写法报成了裸参数。
+ *
+ * 真正会触发 E0277 的是 `&str` 这类**指向 unsized 类型**的引用，它们通常来自
+ * 函数参数（`fn f(dir: &str)`）而不是「遍历引用的循环变量」——
+ * `for x in &expr` 拿到的永远是 `&T`（T 在这里必然是 Sized 元素）。
+ *
+ * 这条豁免**只覆盖循环变量**，不覆盖函数参数，所以原来的自测样本仍会被报出来。
+ */
+function referenceBindings(raw) {
+  const src = blankOut(raw);
+  const safe = new Set();
+  // for p in &paths / for p in paths.iter() / for p in paths.iter().rev()
+  const re = /for\s+([A-Za-z_]\w*)\s+in\s+([^{;]*)/g;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    const name = m[1];
+    const iter = m[2];
+    if (/^\s*&/.test(iter) || /\.iter(?:_mut)?\s*\(\s*\)/.test(iter)) {
+      safe.add(name);
+    }
+  }
+  return safe;
+}
+
 /** 找出所有裸参数，返回 [{ line, arg }] */
 function findBareArgs(raw) {
   const src = blankOut(raw);
+  const safeRefs = referenceBindings(raw);
   const found = [];
   // 只认 `i18n::fmt(` / `i18n::t(` 的**开头**；键名之后允许出现「键名本身、逗号、空白」，
   // 出现别的字符就说明这不是我们要找的调用。这样既能容忍键名里带括号，又不会像
@@ -114,6 +145,8 @@ function findBareArgs(raw) {
     for (const p of parts) {
       const t = p.trim();
       if (t === '' || t.startsWith('&')) continue;
+      // 循环变量本身就是引用（`for p in &paths`）→ 不是裸参数，见 referenceBindings
+      if (safeRefs.has(t)) continue;
       found.push({ line: lineOf(raw, m.index), arg: t });
     }
   }
@@ -127,15 +160,30 @@ fn sample(dir: &str, pkg: &str, eff: String) {
     let _ = i18n::fmt("b", &[&eff, dir, &pkg]);  // 期望：报 dir
     let _ = i18n::fmt("c", &[&dir, &pkg]);       // 正确：不该报
     let _ = i18n::t("d");                        // 无参数表：不该报
+    // 循环变量已是引用（office.rs 的真实形状）：不该报
+    for p in &paths {
+        let _ = i18n::fmt("e", &[p]);
+    }
+    for q in paths.iter() {
+        let _ = i18n::fmt("f", &[q]);
+    }
+    // 但**函数参数**即便名字像循环变量也必须照报（豁免不能扩大成「凡标识符都放过」）
+    let _ = i18n::fmt("g", &[eff]);
 }
 `;
 const selfFound = findBareArgs(SELF_TEST);
-if (selfFound.length !== 3) {
-  console.log(`FAIL 扫描器自测：期望 3 处裸参数，实际 ${selfFound.length} 处`);
+if (selfFound.length !== 4) {
+  console.log(`FAIL 扫描器自测：期望 4 处裸参数，实际 ${selfFound.length} 处`);
   for (const h of selfFound) console.log(`     L${h.line}: ${h.arg}`);
   process.exit(1);
 }
-console.log('OK   扫描器自测通过（已知错误样本被正确报出，不是假绿）');
+// 确认报出来的确实是 dir/pkgs 那几处，而不是循环变量
+const leak = selfFound.filter((h) => h.arg === 'p' || h.arg === 'q');
+if (leak.length > 0) {
+  console.log(`FAIL 扫描器自测：循环变量被误报（${leak.map((h) => h.arg).join(',')}）`);
+  process.exit(1);
+}
+console.log('OK   扫描器自测通过（已知错误样本被正确报出，循环变量豁免不越界）');
 
 // ---- 目标文件：给了参数就扫参数，否则自动扫 src-tauri/src/*.rs ----
 let files = process.argv.slice(2);

@@ -353,6 +353,39 @@
             <pre id="office-log" class="update-progress-log hidden"></pre>
           </div>
         </div>
+        <!-- 记忆，技能与知识库（kb.rs）：一颗按钮一次装两个 DSH 插件
+             （dsh-kb 知识层 + dsh-memory2skill 记忆/技能层）。
+             与 Python 桥接的区别：桥接是「装完库自动部署」，本块装的是**从未装过**的
+             可选插件，没有前置动作能触发，所以入口必须存在；但装完这颗按钮就变成
+             「卸载…」，刻意**不提供「重新部署」**—— 注册失败由「进入 DSH 时自愈」重试，
+             让人再点一次只会多出「到底该点哪个」的负担（见 README 里被删掉的那颗按钮）。
+             状态行一句人话由后端拼好（kb_status 的 message），前端只显示、不拼句子。
+             动态文案刻意不挂 data-i18n（会被 applyDom 打回默认，见 i18n.js 头注）。 -->
+        <div class="field kb-block">
+          <span class="py-head" data-i18n="lbl_kb">记忆，技能与知识库</span>
+          <!-- 说明放在状态行之前：先讲清这三件事是什么、装到哪儿去，再给现状与按钮。 -->
+          <div class="hint" data-i18n-html="kb_hint_html">
+            包含三部分：<b>记忆</b> 逐字记录你对 AI 的纠正并找出重复模式；<b>技能</b>
+            把这些模式起草成 SKILL.md，经回放验证后由你确认写入；<b>知识库</b> 让 AI
+            读写你的 Obsidian 笔记与本地词典。一次装齐两个插件（dsh-kb +
+            dsh-memory2skill），注册进当前 DSH profile，<b>下次进入 DSH 生效</b>；
+            本体零 Python 依赖，不装「基本安装」也能用。也可在 DSH 侧边栏「插件」页单独管理。
+          </div>
+          <div id="kb-status" class="py-status" data-i18n="kb_checking">正在检测记忆与知识库状态…</div>
+          <div class="row gap">
+            <!-- 这颗按钮**刻意不挂 data-i18n**：它的文字随状态在两态间切换
+                 （安装… ⇄ 卸载…），由 renderKbButtons 用词典写；挂了 data-i18n 反而会被
+                 applyDom 打回「安装…」，切语言时把已装状态说反（与 python / office 那两颗同款）。 -->
+            <button id="btn-kb-install" class="btn primary" type="button">安装记忆与知识库…</button>
+          </div>
+          <div id="kb-progress" class="py-progress hidden">
+            <div class="py-progress-head">
+              <div class="spinner small"></div>
+              <div id="kb-progress-text" class="py-progress-text"></div>
+            </div>
+            <pre id="kb-log" class="update-progress-log hidden"></pre>
+          </div>
+        </div>
         <div class="field uninstall-block">
           <span data-i18n="lbl_node_pnpm_dsh">Node.js，pnpm与DSH</span>
           <div id="toolchain-versions" class="toolchain-versions">正在读取版本号…</div>

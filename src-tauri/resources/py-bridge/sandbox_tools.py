@@ -43,6 +43,12 @@ ALLOWED_MODULES: frozenset[str] = frozenset(
         # 文档转换的格式后端（2026-10-17 收窄依赖边界后由基本清单显式安装，
         # 不再由 markitdown[all] 的 extras 带入 —— 但沙箱里仍应放行它们）
         "pdfminer", "pdfplumber", "mammoth", "olefile",
+        # PDF 页面栅格化（2026-11-10）：`prefer="accuracy"` 那条路就是靠它把页面
+        # 渲染成 PNG 的（pdfplumber → pypdfium2 → PDFium）。放行是因为它在沙箱里
+        # 确实有用（拼缩略图、取页面尺寸、抽取单页图），且**风险面与已放行的
+        # PIL / pdfplumber 同级**：它们都能按路径打开本地文件，沙箱挡的是
+        # os / io / pathlib / 网络，而不是「任何能读文件的库」。
+        "pypdfium2",
         # 旧版 Office 格式（装了才可用；xls 在转换工具里被主动拒绝，见其说明）
         "xlrd", "xlwt", "odf",
         # —— 数据分析（装了即用） ——

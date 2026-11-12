@@ -7,6 +7,10 @@ src-tauri/.cargo/
 src-tauri/gen/schemas/
 *.log
 *.tgz
+# 例外：kb 块用 include_bytes! 在构建期嵌入的成品插件包（src-tauri/src/kb.rs）。
+# 上面的 *.tgz 忽略的是 npm pack 临时产物；这两个是**源码级资源**，必须随仓库走，
+# 否则克隆/CI 缺文件、include_bytes! 编译失败。只放行 kb-bundle 这一个目录。
+!src-tauri/resources/kb-bundle/*.tgz
 .DS_Store
 Thumbs.db
 

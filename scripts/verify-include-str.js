@@ -28,18 +28,25 @@ function readBridgeSource() {
   return fs.readFileSync(file, 'utf8');
 }
 
+/** 读 kb.rs：它是 kb-bundle 那两个 include_bytes!（成品 tgz）声明的唯一来源 */
+function readKbSource() {
+  const file = path.join(ROOT, 'src-tauri', 'src', 'kb.rs');
+  return fs.readFileSync(file, 'utf8');
+}
+
 /**
  * 比对一组声明与磁盘文件。返回 true = 一一对应。
  *
  * `resSub` 是 `src-tauri/resources/` 下的子目录名；`pattern` 必须带一个捕获组，
- * 捕获的就是文件名（不含目录）。
+ * 捕获的就是文件名（不含目录）。`extRe` 是「哪些磁盘文件算数」—— 默认只认脚本与
+ * 配置；kb-bundle 那条要认 `.tgz`，否则磁盘上的安装包会被全部滤掉、比对空转。
  */
-function check(rs, resSub, pattern, note) {
+function check(rs, resSub, pattern, note, extRe = /\.(py|json|yml|js)$/) {
   const declared = [...rs.matchAll(pattern)].map((m) => m[1]);
   const dir = path.join(ROOT, 'src-tauri', 'resources', resSub);
   let onDisk;
   try {
-    onDisk = fs.readdirSync(dir).filter((f) => /\.(py|json|yml|js)$/.test(f));
+    onDisk = fs.readdirSync(dir).filter((f) => extRe.test(f));
   } catch (_) {
     console.log(`FAIL ${note}：目录读不出来 ${dir}`);
     return false;
@@ -62,12 +69,22 @@ function check(rs, resSub, pattern, note) {
 (function selfTest(rs) {
   const pyPattern = /include_str!\("\.\.\/resources\/py-bridge\/([\w.]+)"\)/g;
   const bundlePattern = /include_str!\("\.\.\/resources\/py-bridge-bundle\/([\w.\-]+)"\)/g;
+  const kbPattern = /include_bytes!\("\.\.\/resources\/kb-bundle\/([\w.\-]+\.tgz)"\)/g;
   const pyHits = [...rs.matchAll(pyPattern)];
   const bundleHits = [...rs.matchAll(bundlePattern)];
+  const kbHits = [...readKbSource().matchAll(kbPattern)];
   if (pyHits.length === 0 || bundleHits.length === 0) {
     console.log(
       `FAIL 自测：正则没匹配到任何声明（py-bridge ${pyHits.length} / bundle ${bundleHits.length}）` +
         ' —— 多半是 py_bridge.rs 里的 include_str! 写法变了，先修正则再信结果',
+    );
+    process.exit(1);
+  }
+  // kb-bundle 嵌的是两个成品 tgz（知识层 + 记忆/技能层），少一条就是少装一个插件
+  if (kbHits.length !== 2) {
+    console.log(
+      `FAIL 自测：kb.rs 的 include_bytes! 声明数不对（${kbHits.length}，应为 2）` +
+        ' —— 写法变了就先修正则，别让它空转报 OK',
     );
     process.exit(1);
   }
@@ -87,9 +104,20 @@ const b = check(
   /include_str!\("\.\.\/resources\/py-bridge-bundle\/([\w.\-]+)"\)/g,
   'bundle 注册文件',
 );
+// 「记忆，技能与知识库」嵌的是**成品 tgz**（不跑 npm pack），所以这条比对尤其要紧：
+// 换新版安装包 = 往 resources/kb-bundle 丢新 tgz + 改 kb.rs 的 include_bytes! 路径。
+// 只丢文件不改声明时，**编译照样通过**、装出来的 Desktop 会继续安装旧版本，而且没有任何
+// 报错 —— 正是本文件头注说的第二个静默失效方向，只有「比对声明与磁盘」能提前拦住。
+const c = check(
+  readKbSource(),
+  'kb-bundle',
+  /include_bytes!\("\.\.\/resources\/kb-bundle\/([\w.\-]+\.tgz)"\)/g,
+  'kb 安装包（tgz）',
+  /\.tgz$/,
+);
 
-if (a && b) {
-  console.log('\n所有 include_str! 都与磁盘一一对应 —— 打出来的包不是空壳。');
+if (a && b && c) {
+  console.log('\n所有 include_str! / include_bytes! 都与磁盘一一对应 —— 打出来的包不是空壳。');
   process.exit(0);
 }
 process.exit(1);

@@ -1081,6 +1081,9 @@ function onStatus(p) {
     // 只在弹窗**可见**时才问 —— 关着的时候 openManage() 本来就会拉一次，
     // 没必要为每次启动多起一个 Python 探测进程。
     if (!$('manage-modal').classList.contains('hidden')) refreshPythonStatus();
+    // 同一条理由适用于「记忆，技能与知识库」：kb::activate_pending 也挂在
+    // set_status("running") 上，此刻可能刚把两个包补注册进 profile。
+    if (!$('manage-modal').classList.contains('hidden')) refreshKbStatus();
   }
 
   // 工具栏显示模式重新结算：它依赖「DSH 页面是否已就绪」（见 syncToolbarForStatus）
@@ -1672,6 +1675,13 @@ function applyLanguage(lang) {
   // 切语言后按新词典重绘。注意：那两颗按钮的文案**无论如何**都要重绘（见下），
   // 因为它们不挂 data-i18n，applyDom 管不到。
   if (!$('manage-modal').classList.contains('hidden')) refreshPythonStatus();
+  // 「记忆，技能与知识库」的状态行与那颗按钮同样是动态文案（合并状态由后端按
+  // 当前语言拼好，按钮随 installed 两态切换）：切语言后要重问一次 + 重绘按钮。
+  if (!$('manage-modal').classList.contains('hidden')) {
+    refreshKbStatus();
+  } else {
+    renderKbButtons();
+  }
   // 「自动检测」结果行（同在安装/卸载弹窗）：由动态文案拼成，切语言后按缓存重绘；
   // 没有缓存（本次还没点过）就保持隐藏 —— 占位行没有存在的意义。
   if (!$('manage-modal').classList.contains('hidden')) renderAutodetect();
@@ -1770,6 +1780,8 @@ function openManage() {
   if (adEl) adEl.classList.add('hidden');
   // OnlyOffice 状态（Document Server / 插件 phase）—— 顺带刷新文档桥接状态行
   refreshOfficeStatus();
+  // 记忆，技能与知识库（dsh-kb + dsh-memory2skill 两个包的合并状态）
+  refreshKbStatus();
   // 一键安装还在后台跑（弹窗曾被关掉）：先把进度区按最后的消息摆回来
   if (manageInstall.active) {
     setManageInstallProgress(true, manageInstall.message || t('ver_line_checking'));
@@ -2197,6 +2209,13 @@ const officeState = { installed: false };
 /// 卸载成功后置位：官方卸载器必留残余（~33MB + %ProgramData%\ONLYOFFICE），
 /// 「清扫残余」按钮只在卸载过一次的会话里露出（§6 的两段式）。
 let officeCleanupOffered = false;
+
+/// 「记忆，技能与知识库」安装任务的会话内状态（与 officeTask 同一分流纪律：
+/// setup-status / setup-result 是全局通道，靠这个标志决定进度落到哪个进度区）。
+const kbTask = { active: false };
+/// 最近一次 kb_status 的快照：按钮两态（安装 ⇄ 卸载）的依据。
+/// 「知识层就绪」即算已装 —— 记忆层缺失是降级，不是不可用。
+const kbState = { installed: false };
 
 /// 最近一次 `python_status` 的快照，只给按钮高亮用。
 /// 初始按「什么都没装」处理 —— 与 index.html 里两个按钮的初始 class（基本安装 = 蓝、
@@ -2687,6 +2706,112 @@ async function refreshOfficeBridgeStatus() {
   // 插件行不用单独探测：office_status 一次就带回了 plugin_message
   // （refreshOfficeStatus 已写入）。这个函数保留为空实现是为了让调用点
   // 与 Python 块的 refreshBridgeStatus 形状一致，将来拆分探测时不用改调用点。
+}
+
+// ============ 记忆，技能与知识库（kb.rs） ============
+// 一颗按钮一次装两个插件（dsh-kb 知识层 + dsh-memory2skill 记忆/技能层）。
+// 与 office / Python 块同一条纪律：**状态文案由后端拼好，前端只显示、不拼句子**
+// （判定条件只有一处定义，避免出现「界面说已激活、其实一个工具都没注册」）。
+// 装/卸共用 setup-status / setup-result 通道，target = "kb"。
+
+async function refreshKbStatus() {
+  const el = $('kb-status');
+  if (!el) return;
+  // 安装进行中不去打扰后端（它正忙着），状态行由进度区负责
+  if (!kbTask.active) el.textContent = t('kb_checking');
+  try {
+    renderKbStatus(await invoke('kb_status'));
+  } catch (e) {
+    el.textContent = t('kb_status_fail', e);
+  }
+}
+
+function renderKbStatus(s) {
+  const el = $('kb-status');
+  if (!el || !s) return;
+  // 知识层就绪（已注册或已写入待注册）即算「已装」：记忆层缺失是降级，
+  // 不是整块不可用 —— 按钮该变「卸载…」，而不是让人以为什么都没装。
+  kbState.installed = s.kb_phase === 'active' || s.kb_phase === 'pending-activate';
+  // message 是后端按当前语言拼好的合并状态行（部分失败会点名是哪一个包）
+  el.textContent = s.message || '';
+  renderKbButtons();
+}
+
+function renderKbButtons() {
+  const b = $('btn-kb-install');
+  if (!b) return;
+  if (kbState.installed) {
+    b.textContent = t('btn_kb_uninstall');
+    b.classList.remove('primary');
+    b.classList.add('subtle');
+  } else {
+    b.textContent = t('btn_kb_install');
+    b.classList.add('primary');
+    b.classList.remove('subtle');
+  }
+  // 没有「重新部署」那颗按钮：注册失败由进入 DSH 时的自愈链重试（见 kb.rs 头注）
+  b.disabled = kbTask.active;
+}
+
+function setKbProgress(show, text) {
+  const el = $('kb-progress');
+  if (!el) return;
+  el.classList.toggle('hidden', !show);
+  if (text) $('kb-progress-text').textContent = text;
+}
+
+function setKbSpinner(show) {
+  const sp = document.querySelector('#kb-progress .spinner');
+  if (sp) sp.classList.toggle('hidden', !show);
+}
+
+function appendKbLog(line) {
+  const pre = $('kb-log');
+  if (!pre) return;
+  pre.classList.remove('hidden');
+  pre.textContent += (pre.textContent ? '\n' : '') + line;
+  // 300 行封顶（与 python-log / office-log 同一条纪律）
+  const lines = pre.textContent.split('\n');
+  if (lines.length > 300) pre.textContent = lines.slice(-300).join('\n');
+  pre.scrollTop = pre.scrollHeight;
+}
+
+async function runKbInstall() {
+  if (kbTask.active) {
+    toast(t('kb_busy'), true);
+    return;
+  }
+  kbTask.active = true;
+  renderKbButtons();
+  const log = $('kb-log');
+  if (log) { log.textContent = ''; log.classList.add('hidden'); }
+  setKbProgress(true, t(kbState.installed ? 'kb_progress_uninstall' : 'kb_progress_install'));
+  setKbSpinner(true);
+  try {
+    // 同一颗按钮承担装/卸：按当前状态分派，后端内部顺序装两个包，前端不关心几个
+    await invoke(kbState.installed ? 'kb_uninstall' : 'kb_install');
+    // 之后由 setup-status / setup-result（target = "kb"）事件接手
+  } catch (e) {
+    kbTask.active = false;
+    renderKbButtons();
+    setKbSpinner(false);
+    setKbProgress(true, String(e));
+    appendKbLog(String(e));
+    toast(String(e), true);
+  }
+}
+
+function onKbResult(p) {
+  kbTask.active = false;
+  renderKbButtons();
+  // p.message 由后端生成：部分失败会点名是哪一个包没装上（绝不笼统报成功）
+  const msg = p.message || (p.success ? t('kb_done') : t('kb_fail'));
+  setKbProgress(true, msg);
+  setKbSpinner(false);
+  appendKbLog(msg);
+  toast(msg, !p.success);
+  // 成败都重问状态：装完按钮要变成「卸载…」，失败要如实报出阶段
+  refreshKbStatus();
 }
 
 async function saveSettings() {
@@ -3753,6 +3878,13 @@ function setWizProgress(show, text) {
 }
 
 function onSetupStatus(p) {
+  // 首选项的「记忆，技能与知识库」任务在跑时，进度归它（三块共用后端 setup_busy，
+  // 同一时刻只有一个任务在跑，所以按 active 标志分流是安全的）
+  if (kbTask.active) {
+    setKbProgress(true, p.message);
+    appendKbLog(p.message);
+    return;
+  }
   // 首选项的 OnlyOffice 安装任务在跑时，进度归它（与 Python 共用后端 setup_busy，
   // 同一时刻只有一个任务；office 的 phase 集合多了 config / deploy 两档）
   if (officeTask.active) {
@@ -3783,6 +3915,11 @@ function onSetupStatus(p) {
 }
 
 function onSetupResult(p) {
+  // 「安装/卸载」里发起的记忆/知识库安装/卸载：进度区在本弹窗的 kb-block 里
+  if (p.target === 'kb') {
+    onKbResult(p);
+    return;
+  }
   // 首选项里发起的 OnlyOffice 安装/卸载/清扫：进度区在设置页里，与向导无关
   if (p.target === 'office') {
     onOfficeResult(p);
@@ -4061,6 +4198,9 @@ function bindUI() {
     hideModal('office-uninstall-modal');
     startOfficeUninstall();
   };
+  // 记忆，技能与知识库：一颗按钮装两个插件（装/卸在函数内按 kbState.installed 分派）。
+  // 刻意没有第二颗「重新部署」—— 注册失败由进入 DSH 时的自愈链重试（见 kb.rs 头注）。
+  $('btn-kb-install').onclick = runKbInstall;
 
   // 检测全局包名
   $('btn-detect-package').onclick = async () => {

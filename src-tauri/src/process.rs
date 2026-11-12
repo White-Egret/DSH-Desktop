@@ -499,6 +499,24 @@ pub(crate) fn set_status(app: &AppHandle, status: &str, message: Option<String>)
                     &format!("[office-bridge] activate_pending panicked: {detail}"),
                 );
             }
+            // 记忆，技能与知识库（dsh-kb + dsh-memory2skill）走同一扇门，但**单独
+            // 包一层 catch_unwind**：上面那条链里 office 一旦 panic，跳过它就没有
+            // 人接手了 —— 两条链各自兜底，一个插件的安装失败不该带走另一个的自愈。
+            let kb_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::kb::cleanup_stale_kb_dirs(&app2);
+                crate::kb::activate_pending(&app2);
+            }));
+            if let Err(payload) = kb_result {
+                let detail = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "non-string panic payload".to_string());
+                logger::append_line(
+                    &logger::desktop_log_path(&app2),
+                    &format!("[kb] activate_pending panicked: {detail}"),
+                );
+            }
         });
     }
 }
@@ -3088,6 +3106,12 @@ pub fn save_config(app: AppHandle, config: Config) -> Result<ConfigReport, Strin
     {
         config.office_docserver_url = old_cfg.office_docserver_url.clone();
     }
+    // 「记忆，技能与知识库」的待注册标记：同样不是设置页字段（前端提交的那份 Config
+    // 里根本没有它），缺了必须沿用磁盘值 —— 否则用户点一次「保存首选项」，
+    // 「等下次进入 DSH 再注册」的标记就被抹掉（真机教训见 Config::kb_pending 注释）。
+    if config.kb_pending.trim().is_empty() && !old_cfg.kb_pending.trim().is_empty() {
+        config.kb_pending = old_cfg.kb_pending.clone();
+    }
     config::save(&app, &config)?;
     // 固定显示模式下「收起」没有意义：顺手清掉，免得前端漏同步时内容区仍按 0 偏移
     if config.toolbar_mode != "auto" {
@@ -4388,7 +4412,18 @@ const PY_EXTRA_PKGS: [&str; 4] = ["numpy", "pandas", "python-dateutil", "tzdata"
 /// 它缺席时工具不报错、只是 >20 页的 PDF 会给出「请点一次基本安装」的提示，
 /// 状态行不查它就等于让用户永远看不到该点哪颗按钮。`requests` 同样只进这一串
 /// （它是 markitdown 的传递依赖，进 PY_BASIC_PKGS 只会让 pip 多打一行）。
-const PY_BASIC_MODULES: &str = "markitdown dsh_bridge docx pptx openpyxl xlsxwriter lxml PIL et_xmlfile pdfminer pdfplumber mammoth olefile pypdf requests";
+///
+/// `pypdfium2`（2026-11-10）：**页面图渲染的实际执行者**。`prefer="accuracy"` 把页面
+/// 转成 PNG 交给 Agent 读，底层是 `pdfplumber.display` → `pypdfium2` → PDFium
+/// （Chrome 的 PDF 引擎）。它是 `pdfplumber` 的**硬依赖**（`pypdfium2>=5.9.0`），
+/// 装 pdfplumber 必然带上，所以**不进 PY_BASIC_PKGS**；但必须在状态行可见，原因是：
+///
+///   `import pdfplumber` 成功 ≠ 能渲染 —— `pdfplumber/__init__.py` 不 import
+///   `display`，而 `Page.to_image()` 是在函数内部惰性 import 它的。
+///   实测：屏蔽 `pypdfium2` 后 `import pdfplumber` 仍然 OK，只有
+///   `import pdfplumber.display` 才失败。于是「pypdfium2 损坏/被单独卸载」会让
+///   状态行一片绿、渲染却静默失败（降级到 OXR 并写 note，但用户看不出根因）。
+const PY_BASIC_MODULES: &str = "markitdown dsh_bridge docx pptx openpyxl xlsxwriter lxml PIL et_xmlfile pdfminer pdfplumber pypdfium2 mammoth olefile pypdf requests";
 const PY_EXTRA_MODULES: &str = "numpy pandas dateutil tzdata";
 
 /// 基本安装实际要装的那一组包（办公库 + 桥接运行时），供 pip 与文案共用。

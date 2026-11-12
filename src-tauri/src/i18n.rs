@@ -617,6 +617,47 @@ pub fn t(key: &str) -> &'static str {
         "setup_office_result_line" => if en { "[setup] Office setup {0}: {1}" } else { "[setup] OnlyOffice 安装任务{0}：{1}" },
         "setup_office_panicked" => if en { "The OnlyOffice setup task terminated abnormally (see desktop.log)." } else { "OnlyOffice 安装任务异常终止（详情见 desktop.log）。" },
 
+        // ---------- 记忆，技能与知识库（dsh-kb + dsh-memory2skill，kb.rs） ----------
+        // 状态行：两个包各有一句短语，合并成一行由后端拼（前端只显示、不拼句子）
+        "kb_not_installed" => if en { "not installed" } else { "未安装" },
+        "kb_needs_release" => if en { "Registered, but the bundled files were removed; they are re-released automatically the next time DSH starts." } else { "已注册进 profile，但随程序分发的安装包被清掉了，下次进入 DSH 会自动补释放。" },
+        "kb_pending_activate" => if en { "written, waiting to be registered" } else { "已写入，待注册" },
+        // ⚠ Active 分支的诚实口径（照 office_bridge_registered_pending）：
+        // 「写进 profile」≠「DSH 已加载工具」，绝不说「已激活」
+        "kb_registered_pending" => if en { "Registered into profile \"{0}\"; the tools appear after DSH restarts." } else { "已注册进 profile「{0}」，进入 DSH 后生效" },
+        "kb_active" => if en { "Registered into profile \"{0}\"" } else { "已注册进 profile「{0}」" },
+        // 合并状态行的四种主组合 + 逐包点名（部分失败必须点得出是哪一个）
+        "kb_msg_both_ready" => if en { "Memory and knowledge base are ready (profile \"{0}\"): restart DSH to load the kb_* and memory2skill_* tools." } else { "记忆与知识库已就绪（profile「{0}」）：重启 DSH 后 AI 即可调用 kb_* 与 memory2skill_* 工具。" },
+        "kb_msg_pending_activate" => if en { "Written to profile \"{0}\"; it takes effect the next time DSH starts." } else { "已写入（profile「{0}」），进入 DSH 后生效。" },
+        "kb_msg_kb_only" => if en { "Knowledge base ready (profile \"{0}\"); the memory & skills layer is not installed." } else { "知识库已就绪（profile「{0}」）；记忆与技能层未安装。" },
+        "kb_msg_memory_only" => if en { "Memory layer ready; the knowledge base is not installed (profile \"{0}\")." } else { "记忆层已就绪；知识库未安装（profile「{0}」）。" },
+        "kb_msg_none" => if en { "Not installed" } else { "未安装" },
+        // 异常 / 部分失败的兜底行：按包名各说一句（{0}{2} 是包名，{1}{3} 是各自状态）
+        "kb_msg_each" => if en { "{0}: {1}; {2}: {3}" } else { "{0}：{1}；{2}：{3}" },
+        // 安装 / 卸载 / 自愈的过程文案
+        "kb_released" => if en { "[setup] Released the plugin packages to {0}" } else { "[setup] 已把安装包（dsh-kb / dsh-memory2skill）释放到 {0}" },
+        "kb_registered" => if en { "[setup] {0} registered into profile \"{1}\"" } else { "[setup] {0} 已注册进 profile「{1}」" },
+        "kb_register_fail" => if en { "[setup] Failed to register {0}: {1}. It will be retried the next time DSH starts." } else { "[setup] 注册 {0} 失败：{1}。将在下次进入 DSH 时自动重试。" },
+        "kb_deferred" => if en { "DSH is running: both plugins were written and will be registered automatically the next time DSH starts (profile \"{0}\")." } else { "DSH 正在运行：已写入，两个插件将在下次进入 DSH 时自动注册（profile「{0}」）。" },
+        "kb_install_done" => if en { "Memory, skills and knowledge base installed (profile \"{0}\"). Restart DSH to load the tools." } else { "记忆，技能与知识库已装好（profile「{0}」）。重启 DSH 后 AI 即可调用。" },
+        "kb_activate_done" => if en { "[kb] Registered on DSH entry: {0} (profile \"{1}\")" } else { "[kb] 进入 DSH 时补注册完成：{0}（profile「{1}」）" },
+        "kb_removed" => if en { "{0} removed from profile \"{1}\"" } else { "已从 profile「{1}」移除 {0}" },
+        "kb_remove_fail" => if en { "Could not remove {0} from profile \"{1}\": {2}" } else { "从 profile「{1}」移除 {0} 失败：{2}" },
+        "kb_no_profile" => if en { "Could not detect the DSH profile; neither plugin was removed." } else { "未能探测到 DSH 的 profile，两个插件都未被移除。" },
+        "kb_dir_removed" => if en { "Deleted {0}" } else { "已删除 {0}" },
+        "kb_dir_remove_locked" => if en { "Could not delete {0} ({1}); the empty folder will be cleaned up the next time DSH starts." } else { "无法删除 {0}（{1}）—— 空目录会在下次启动 DSH 时清掉。" },
+        "kb_dir_remove_fail" => if en { "Could not delete {0}: {1}" } else { "无法删除 {0}：{1}" },
+        // 目录被占住时补删 tgz 的结果行：留着 tgz = 留着「下次进入 DSH 把刚卸载的插件装回来」的开关
+        "kb_files_removed_after_lock" => if en { "The folder itself is locked, but the packages inside were deleted ({0}) — the auto-activation will not reinstall them; the empty folder is cleaned up on the next DSH start." } else { "{0} 目录本身被占用删不掉，但里面的安装包已删光 —— 自愈链不会再把它们装回来；空目录会在下次进入 DSH 时清掉。" },
+        "kb_stale_dir_removed" => if en { "Cleaned up the leftover empty kb-bundle folder: {0}" } else { "已清理残留的空 kb-bundle 目录：{0}" },
+        "kb_write_fail" => if en { "Cannot write {0}: {1}" } else { "无法写入 {0}：{1}" },
+        "kb_bad_profile" => if en { "Invalid profile name: {0}" } else { "profile 名不合法：{0}" },
+        "kb_no_dsh" => if en { "No usable dsh command found ({0}); the plugins could not be registered." } else { "找不到可用的 dsh 命令（{0}），无法注册插件。" },
+        "kb_missing_tgz" => if en { "The packaged file is missing: {0}" } else { "随程序分发的安装包文件缺失：{0}" },
+        "kb_unknown_pkg" => if en { "Unknown plugin package: {0}" } else { "未知的插件包名：{0}" },
+        "setup_kb_result_line" => if en { "[setup] Memory/knowledge-base task {0}: {1}" } else { "[setup] 记忆与知识库安装任务{0}：{1}" },
+        "setup_kb_panicked" => if en { "The memory/knowledge-base task terminated abnormally (see desktop.log)." } else { "记忆与知识库安装任务异常终止（详情见 desktop.log）。" },
+
         // ---------- 安全模式（独立纯净家目录 %USERPROFILE%\.dsh-safe，端口 3081） ----------
         // 门禁 / 预检
         "err_safe_busy" => if en { "A safe-mode task is already running; please wait" } else { "已有安全模式任务正在进行，请等待完成" },

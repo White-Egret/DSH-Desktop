@@ -3,6 +3,7 @@ mod detect;
 mod elevate;
 mod exit_guard;
 mod i18n;
+mod kb;
 mod logger;
 mod office;
 mod process;
@@ -137,6 +138,13 @@ pub fn run(launched_by_autostart: bool) {
             office::setup_install_office,
             office::setup_uninstall_office,
             office::setup_office_cleanup,
+            // 记忆，技能与知识库（dsh-kb + dsh-memory2skill）：一颗按钮一次装两个包。
+            // 与 Python 桥接不同，这里**必须**提供安装/卸载命令 —— 它装的是两个从未
+            // 装过的可选插件，没有任何前置动作能触发；但同样不提供「重新部署」：
+            // 注册失败由 kb::activate_pending 在下次进入 DSH 时重试（见 kb.rs 头注）。
+            kb::kb_status,
+            kb::kb_install,
+            kb::kb_uninstall,
             process::finish_setup,
             process::set_language,
             // 首次运行向导的「Node 版本过低」告警：保留旧版本并继续（只写 node_min_ack 一个键）

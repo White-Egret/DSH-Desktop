@@ -165,6 +165,15 @@ pub struct Config {
     /// save_config 的「缺字段沿用磁盘值」兜底 + activate_pending 自愈三选一，
     /// 否则任何一次「load → 整体写回」都会把它当未知键抹掉（详见那个字段的注释）。
     pub office_bridge_pending: String,
+    /// 「记忆，技能与知识库」（dsh-kb + dsh-memory2skill）的待注册标记。
+    /// 值是**还差注册的包名**逗号列表：`"dsh-kb,dsh-memory2skill"` / `"dsh-memory2skill"` /
+    /// `""`（空 = 没有 pending）。用列表而不是一个布尔，是为了支持**部分失败**：
+    /// 只装成一个时，pending 里只剩没装上的那一个，下次进入 DSH 只重试它。
+    ///
+    /// ⚠ 同样必须走三条防线（照上面两个 pending 字段的真机教训，缺一不可）：
+    /// ①本字段（load/save 往返不丢）；②save_config 的「缺字段沿用磁盘值」兜底；
+    /// ③`kb::activate_pending` 的自愈进门（标记丢了，只要 tgz 已释放就照样补注册）。
+    pub kb_pending: String,
 }
 
 impl Default for Config {
@@ -220,6 +229,8 @@ impl Default for Config {
             office_docserver_url: String::new(),
             office_install_dir: String::new(),
             office_bridge_pending: String::new(),
+            // 空 = 没有「待注册」的插件包（见该字段注释；值是逗号分隔的包名列表）
+            kb_pending: String::new(),
         }
     }
 }
@@ -2029,6 +2040,35 @@ mod tests {
         assert_eq!(c.office_docserver_port, 8080);
         assert_eq!(c.office_doc_port, 3310);
         assert!(c.office_bridge_pending.is_empty());
+    }
+
+    /// 验收第 9 条（三根柱子之一）：`kb_pending` 必须是 Config 正式字段。
+    /// 真机教训（2026-10-11，python_bridge_pending）：这个键当初只走单键写入、
+    /// 结构体里没有对应字段，于是任何一次「load → 整体写回」都把它当未知键丢弃 ——
+    /// 装完即被抹，激活链永远不跑，而且一行日志都没有。
+    #[test]
+    fn kb_pending_survives_serialize_roundtrip() {
+        let mut c = Config::default();
+        assert!(c.kb_pending.is_empty(), "默认值必须是「没有 pending」");
+        // 部分失败的形状：列表里只剩没装上的那一个
+        c.kb_pending = "dsh-memory2skill".to_string();
+        let text = serde_json::to_string(&c).expect("serialize Config");
+        let back: Config = serde_json::from_str(&text).expect("deserialize Config");
+        assert_eq!(back.kb_pending, "dsh-memory2skill", "pending 必须在整体写盘往返中存活");
+        // 两个都没装上的形状
+        c.kb_pending = "dsh-kb,dsh-memory2skill".to_string();
+        let back2: Config =
+            serde_json::from_str(&serde_json::to_string(&c).unwrap()).expect("roundtrip 2");
+        assert_eq!(back2.kb_pending, "dsh-kb,dsh-memory2skill");
+    }
+
+    #[test]
+    fn legacy_config_without_kb_pending_falls_back_to_empty() {
+        // 老版本 config.json 没有 kb_pending 键：serde(default) 必须兜住，
+        // 且回落值是「没有 pending」而不是某个脏包名。
+        let legacy = r#"{"port": 3080, "language": "zh"}"#;
+        let c: Config = serde_json::from_str(legacy).expect("legacy config must parse");
+        assert!(c.kb_pending.is_empty());
     }
 
     // 依赖 Windows 路径语义（盘符 / 反斜杠 / Program Files 环境变量）：

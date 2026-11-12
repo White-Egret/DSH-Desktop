@@ -2,8 +2,8 @@
 
 本次给「安装/卸载」弹窗（`manage-modal`）加了一个块，一颗按钮、一行合并状态，一次装齐两个 DSH 插件：
 
-- **dsh-kb 0.4.1**（知识层：`kb_scan/extract/write/status/search` + 词典 `dict_lookup/dict_search` + 页面图谱）
-- **dsh-memory2skill 0.4.6**（记忆/技能层：逐字记录纠正 → 雷达 → 起草 SKILL.md → 门禁 → 人工 commit）
+- **dsh-kb 0.4.2**（知识层：`kb_scan/extract/write/status/search` + 词典 `dict_lookup/dict_search` + 页面图谱；0.4.2 = inject 修复 + vault 默认 `D:/KB-Vault`）
+- **dsh-memory2skill 0.4.9**（记忆/技能层：逐字记录纠正 → 雷达 → 起草 SKILL.md → 门禁 → 人工 commit；0.4.9 = inject 修复发布版，另含 0.4.7/0.4.8 以来新增的 `memory2skill_recall`）
 
 设计依据是 `D:\DSH\Workspace\plugins\dsh-kb-plan.md` 第八章。**后端模板是 `office.rs`**（`py_bridge` 刻意没有安装命令），前端三件套照 office 那套，事件走 `target="kb"`。
 
@@ -99,3 +99,19 @@ tgz 是 `include_bytes!` 在构建期嵌进二进制的，文件名带版本号 
 - `dsh plugin add file:` 这条路我只按 office 的既有实现照抄（office 在你机器上是跑通过的），差别是少一步 `npm pack`。
 
 **已知边界**：状态判据是文件系统 + pending，问不到运行中的宿主，所以「已就绪」始终意味着「重启 DSH 后生效」；要收窄这个缝隙就上文那条 HTTP 查 `listBundles` 的可选增强。
+
+---
+
+## 2026-11-12 第二轮：inject 修复随 Desktop 分发
+
+真机抓出的 inject bug（`inject=['tools']` 却访问 `ctx.systemPrompt` → 激活失败 / persona 静默跳过）已在两个插件源码修好，本轮让修复随 Desktop 分发：
+
+- **dsh-kb 0.4.1 → 0.4.2**（inject 修复 + vault 默认 `D:/KB-Vault` + 去 Obsidian 措辞；Node 134 / Python 52 全绿），从 `plugins/dsh-kb/dist-snapshots/` 拷入。
+- **dsh-memory2skill 0.4.6 → 0.4.9**（源码早已是 0.4.8 并新增 `memory2skill_recall`；本轮 bump 0.4.9 标记 inject 修复发布并重建）。
+- `src-tauri/src/kb.rs`：`KB_TGZ` / `MEMORY_TGZ` 两个常量 + 两处 `include_bytes!` 路径一起改（`KB_PACKAGES` 走常量自动跟随）。
+- resources 换包：删 0.4.1 / 0.4.6，放入 0.4.2（164,404 B）与 0.4.9（187,151 B）。
+- 验证：四个护栏脚本全绿；`cargo test --lib` 223 passed（`embedded_bundles_match_package_table` 校验的已是新字节）；`node --check` 前端两文件通过。
+
+**memory2skill 的 `npm run check` 有一处既有漂移**（与本次无关、未修）：`scripts/host-check.mjs:70` 期望 **8** 个工具，但源码在 0.4.8 打包之后新增了 `memory2skill_recall`（现注册 **9** 个），host-check 因此报「应注册 8 个工具，实际 9」。0.4.8 的成品包里确实只有 8 个 —— 漂移在仓库里早于本轮。本轮按约定跳过该子步骤（typecheck / build / test 145 例 / verify-skills 全绿）；下次动插件仓库时把 host-check 的期望改成 9 即可（`scripts/` 不进 tgz，改它不影响成品）。
+
+**推送提醒**：拷贝 DSH-Desktop 到本地仓库后，`resources/kb-bundle/` 的两个**新** tgz（`dsh-kb-0.4.2.tgz`、`dsh-memory2skill-0.4.9.tgz`）必须入库 —— `.gitignore` 的例外已放行，普通 `git add .` 即可；旧 tgz（0.4.1 / 0.4.6）已删，别再把它们加回来。`src-tauri/.cargo/` 仍被忽略（里面是本机绝对路径的 target-dir 配置，别提交）。

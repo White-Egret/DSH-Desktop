@@ -52,16 +52,16 @@ const MEMORY_PKG: &str = "dsh-memory2skill";
 
 /// 两个成品 tgz 的文件名（带版本号；升级 = 换 resources 里的文件 + 改这两行
 /// + 改下面 include_bytes! 的路径，三处必须一起改，有单测守住）
-const KB_TGZ: &str = "dsh-kb-0.4.1.tgz";
-const MEMORY_TGZ: &str = "dsh-memory2skill-0.4.6.tgz";
+const KB_TGZ: &str = "dsh-kb-0.4.2.tgz";
+const MEMORY_TGZ: &str = "dsh-memory2skill-0.4.9.tgz";
 
 /// 释放进 `<应用配置目录>\kb-bundle\` 的两个包（与 `resources/kb-bundle/` 一一对应）。
 /// 少一条就等于那个插件永远装不上，构建期就会报路径错。
 const KB_BUNDLE_FILES: &[(&str, &[u8])] = &[
-    (KB_TGZ, include_bytes!("../resources/kb-bundle/dsh-kb-0.4.1.tgz")),
+    (KB_TGZ, include_bytes!("../resources/kb-bundle/dsh-kb-0.4.2.tgz")),
     (
         MEMORY_TGZ,
-        include_bytes!("../resources/kb-bundle/dsh-memory2skill-0.4.6.tgz"),
+        include_bytes!("../resources/kb-bundle/dsh-memory2skill-0.4.9.tgz"),
     ),
 ];
 

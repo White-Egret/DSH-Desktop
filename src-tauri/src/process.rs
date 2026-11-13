@@ -4347,7 +4347,14 @@ pub async fn setup_install_pnpm(app: AppHandle) -> Result<(), String> {
 /// 不进扩展包：`PY_EXTRA_PKGS` 是**数据分析扩展包**，且有一条测试把它钉死在 4 项。
 /// 代码仍要能在**没装**时优雅退化（旧版基本安装里没有它）：>20 页时给出
 /// 「请点一次基本安装」的可操作提示，抽不出页内图时回落云端版面模型。
-const PY_BASIC_PKGS: [&str; 13] = [
+/// **`firecrawl-anydoc` 为什么进基本安装**（2026-11-12 第二步，bake-off go/no-go §9）：
+/// fast 路的 DOCX / CSV / 干净文本层 PDF / LaTeX PDF 改由 anydoc（Rust 引擎）首选，
+/// 标题层级与表格保真更好、比 markitdown 快 38–52 倍、失败会说话（NeedsOcrError/
+/// UnsupportedError）。**钉版 ==0.2.4**：0.2.x 行为随小版本变化（连字丢失在
+/// 0.2.3→0.2.4 之间被修复），升级必须重跑 bake-off（anydoc-bakeoff-report.md）。
+/// 零 Python 运行时依赖（`Requires` 为空）的 abi3 wheel，pip 装 = 解包，无编译。
+/// 缺席时 fast 路整体回落 markitdown（桥接侧已优雅退化，状态行单独可见它）。
+const PY_BASIC_PKGS: [&str; 14] = [
     "markitdown",
     "pdfminer-six",
     "pdfplumber",
@@ -4361,6 +4368,7 @@ const PY_BASIC_PKGS: [&str; 13] = [
     "lxml",
     "Pillow",
     "et_xmlfile",
+    "firecrawl-anydoc==0.2.4",
 ];
 
 /// `typing_extensions` 曾经单列在基本清单里，但它是**纯传递依赖**
@@ -4423,7 +4431,12 @@ const PY_EXTRA_PKGS: [&str; 4] = ["numpy", "pandas", "python-dateutil", "tzdata"
 ///   实测：屏蔽 `pypdfium2` 后 `import pdfplumber` 仍然 OK，只有
 ///   `import pdfplumber.display` 才失败。于是「pypdfium2 损坏/被单独卸载」会让
 ///   状态行一片绿、渲染却静默失败（降级到 OXR 并写 note，但用户看不出根因）。
-const PY_BASIC_MODULES: &str = "markitdown dsh_bridge docx pptx openpyxl xlsxwriter lxml PIL et_xmlfile pdfminer pdfplumber pypdfium2 mammoth olefile pypdf requests";
+///
+/// `anydoc`（2026-11-12 第二步）：fast 路首选引擎（firecrawl-anydoc 的导入名）。
+/// **必须在这里可见** —— 它缺席时 DOCX/CSV/PDF 的 fast 路会静默回落 markitdown
+/// （功能不坏但用户拿不到 anydoc 的结构保真），状态行不查它，用户就永远不知道
+/// 差了哪颗按钮。
+const PY_BASIC_MODULES: &str = "markitdown dsh_bridge docx pptx openpyxl xlsxwriter lxml PIL et_xmlfile pdfminer pdfplumber pypdfium2 mammoth olefile pypdf requests anydoc";
 const PY_EXTRA_MODULES: &str = "numpy pandas dateutil tzdata";
 
 /// 基本安装实际要装的那一组包（办公库 + 桥接运行时），供 pip 与文案共用。

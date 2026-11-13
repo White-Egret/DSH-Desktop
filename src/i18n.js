@@ -151,7 +151,7 @@
     py_uninstall_body_extra:
       '将卸载本机 Python 里的数据分析库（numpy / pandas 等）。AI 调用能力桥接与 12 个工具**不受影响**，仍然可用。',
     py_uninstall_cmd_basic:
-      'dsh plugin --profile web remove @local/dsh-desktop-python-bridge\npython -m pip uninstall -y markitdown pdfminer-six pdfplumber pypdf mammoth olefile python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile dsh-python-bridge',
+      'dsh plugin --profile web remove @local/dsh-desktop-python-bridge\npython -m pip uninstall -y markitdown pdfminer-six pdfplumber pypdf mammoth olefile python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile firecrawl-anydoc dsh-python-bridge',
     py_uninstall_cmd_extra:
       'python -m pip uninstall -y numpy pandas python-dateutil tzdata',
     py_uninstall_keeps_basic:
@@ -165,7 +165,7 @@
     btn_py_uninstall_extra_first: '先卸载扩展包，再卸办公包',
     py_uninstall_progress_basic: '正在卸载办公包与能力桥接…',
     py_uninstall_progress_extra: '正在卸载数据分析扩展包…',
-    py_packages_html: '基本安装：先安装最新稳定版 Python（系统已装 ≥ 3.10 则跳过本体），再安装 markitdown / pdfminer-six / pdfplumber / pypdf / mammoth / olefile / python-docx / python-pptx / openpyxl / XlsxWriter / lxml / Pillow / et_xmlfile，以及把这些库挂成 AI 工具的桥接运行时 dsh-python-bridge；需要数据分析的，可在基本安装完成后再点「数据分析扩展包」安装 numpy / pandas / python-dateutil / tzdata。',
+    py_packages_html: '基本安装：先安装最新稳定版 Python（系统已装 ≥ 3.10 则跳过本体），再安装 markitdown / pdfminer-six / pdfplumber / pypdf / mammoth / olefile / python-docx / python-pptx / openpyxl / XlsxWriter / lxml / Pillow / et_xmlfile / firecrawl-anydoc（钉版 0.2.4，fast 路首选引擎），以及把这些库挂成 AI 工具的桥接运行时 dsh-python-bridge；需要数据分析的，可在基本安装完成后再点「数据分析扩展包」安装 numpy / pandas / python-dateutil / tzdata。',
     py_busy: 'Python 安装任务正在进行，请等待完成…',
     py_progress_start: '正在准备 Python 安装…',
     toast_py_ok: 'Python 安装任务已完成',
@@ -203,7 +203,7 @@
     kb_status_fail: '检测记忆与知识库状态失败: {0}',
     btn_kb_install: '安装记忆与知识库…',
     btn_kb_uninstall: '卸载记忆与知识库…',
-    kb_hint_html: '包含三部分：<b>记忆</b> 逐字记录你对 AI 的纠正与工具/运行错误，找出重复模式；并按对话留存情景记忆（连同 AI 自己总结的经验教训），跨对话召回相关上下文。<b>技能</b> 把重复模式起草成 SKILL.md，经回放验证后由你确认写入。<b>知识库</b> 让 AI 读写你的笔记（一个普通目录，可选用 Obsidian 打开）与本地词典（词典存于 SQLite，精确查词 + 全文检索）。一次装齐两个插件（dsh-kb + dsh-memory2skill），注册进当前 DSH profile，<b>下次进入 DSH 生效</b>；本体零 Python 依赖，不装「基本安装」也能用。也可在 DSH 侧边栏「插件」页单独管理。',
+    kb_hint_html: '包含三部分：<b>记忆</b> 逐字记录你对 AI 的纠正与工具/运行错误，找出重复模式；并按对话留存情景记忆（连同 AI 自己总结的经验教训），跨对话召回相关上下文。<b>技能</b> 把重复模式起草成 SKILL.md，经回放验证后由你确认写入。<b>知识库</b> 让 AI 读写你的笔记（一个带 wiki 双链的分层目录，可选用 Obsidian 打开）与本地词典（词典存于 SQLite，精确查词 + 全文检索）。一次装齐两个插件（dsh-kb + dsh-memory2skill），注册进当前 DSH profile，<b>下次进入 DSH 生效</b>；本体零 Python 依赖，不装「基本安装」也能用。也可在 DSH 侧边栏「插件」页单独管理。',
     kb_busy: '记忆与知识库任务正在进行，请等待完成…',
     kb_progress_install: '正在安装记忆与知识库（释放安装包 → 注册 dsh-kb → 注册 dsh-memory2skill）…',
     kb_progress_uninstall: '正在卸载记忆与知识库（从 profile 摘掉两个插件 → 清标记 → 清安装包）…',
@@ -669,7 +669,7 @@
     py_uninstall_body_extra:
       'Removes the data-analysis libraries (numpy / pandas …) from this machine\'s Python. The AI capability bridge and its 12 tools are **not** affected and stay usable.',
     py_uninstall_cmd_basic:
-      'dsh plugin --profile web remove @local/dsh-desktop-python-bridge\npython -m pip uninstall -y markitdown pdfminer-six pdfplumber pypdf mammoth olefile python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile dsh-python-bridge',
+      'dsh plugin --profile web remove @local/dsh-desktop-python-bridge\npython -m pip uninstall -y markitdown pdfminer-six pdfplumber pypdf mammoth olefile python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile firecrawl-anydoc dsh-python-bridge',
     py_uninstall_cmd_extra:
       'python -m pip uninstall -y numpy pandas python-dateutil tzdata',
     py_uninstall_keeps_basic:
@@ -683,7 +683,7 @@
     btn_py_uninstall_extra_first: 'Uninstall extras first, then office packages',
     py_uninstall_progress_basic: 'Removing the office packages and the capability bridge…',
     py_uninstall_progress_extra: 'Removing the data-analysis extras…',
-    py_packages_html: 'Basic install: installs the latest stable Python first (skipped when one of ≥ 3.10 is already present), then markitdown / pdfminer-six / pdfplumber / pypdf / mammoth / olefile / python-docx / python-pptx / openpyxl / XlsxWriter / lxml / Pillow / et_xmlfile, plus dsh-python-bridge — the bridge runtime that exposes those libraries as AI tools. For data analysis, click “Data-analysis extras” afterwards to add numpy / pandas / python-dateutil / tzdata.',
+    py_packages_html: 'Basic install: installs the latest stable Python first (skipped when one of ≥ 3.10 is already present), then markitdown / pdfminer-six / pdfplumber / pypdf / mammoth / olefile / python-docx / python-pptx / openpyxl / XlsxWriter / lxml / Pillow / et_xmlfile / firecrawl-anydoc (pinned at 0.2.4, the preferred fast-route engine), plus dsh-python-bridge — the bridge runtime that exposes those libraries as AI tools. For data analysis, click “Data-analysis extras” afterwards to add numpy / pandas / python-dateutil / tzdata.',
     py_busy: 'A Python install task is already running; please wait for it to finish…',
     py_progress_start: 'Preparing the Python install…',
     toast_py_ok: 'The Python install task finished',
@@ -721,7 +721,7 @@
     kb_status_fail: 'Failed to detect memory and knowledge-base status: {0}',
     btn_kb_install: 'Install memory & knowledge base…',
     btn_kb_uninstall: 'Uninstall memory & knowledge base…',
-    kb_hint_html: 'Three parts: <b>memory</b> records your corrections to the AI verbatim, plus tool and runtime errors, and finds repeated patterns; it also keeps per-conversation episodic memory (including the AI’s own lessons learned) and recalls relevant context across conversations. <b>skills</b> drafts repeated patterns into SKILL.md files, verified by replay before you confirm each write. <b>knowledge base</b> gives the AI read/write access to your notes (a plain folder; you can optionally open it as an Obsidian vault) and local dictionaries (stored in SQLite, with exact lookup and full-text search). One click installs both plugins (dsh-kb + dsh-memory2skill) into the current DSH profile; they <b>take effect the next time DSH starts</b>. The plugins need no Python at all — notes work without the “Basic install” above. You can also manage each plugin separately on the DSH sidebar’s Plugins page.',
+    kb_hint_html: 'Three parts: <b>memory</b> records your corrections to the AI verbatim, plus tool and runtime errors, and finds repeated patterns; it also keeps per-conversation episodic memory (including the AI’s own lessons learned) and recalls relevant context across conversations. <b>skills</b> drafts repeated patterns into SKILL.md files, verified by replay before you confirm each write. <b>knowledge base</b> gives the AI read/write access to your notes (a layered folder with wiki-style links; you can optionally open it as an Obsidian vault) and local dictionaries (stored in SQLite, with exact lookup and full-text search). One click installs both plugins (dsh-kb + dsh-memory2skill) into the current DSH profile; they <b>take effect the next time DSH starts</b>. The plugins need no Python at all — notes work without the “Basic install” above. You can also manage each plugin separately on the DSH sidebar’s Plugins page.',
     kb_busy: 'A memory / knowledge-base task is already running; please wait for it to finish…',
     kb_progress_install: 'Installing memory & knowledge base (release packages → register dsh-kb → register dsh-memory2skill)…',
     kb_progress_uninstall: 'Uninstalling memory & knowledge base (remove both plugins from the profile → clear marker → delete packages)…',

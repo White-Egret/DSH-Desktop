@@ -279,12 +279,13 @@ def normalize_ligatures(text: str) -> str:
 
 
 def convert_local_to_markdown(src: Path) -> str:
-    """**本地**转换的唯一入口：任意本机文档 → Markdown，不联网、不上传。
+    """**本地 markitdown/openpyxl** 转换入口：任意本机文档 → Markdown，不联网、不上传。
 
-    三路路由里它是所有路线的最后一级兜底（`doc_route.convert_any` 把本函数注入），
-    也是 `prefer="fast"` 与 Office/HTML/CSV 的**唯一**执行者 —— 所以它必须
-    自给自足：不依赖 doc_route 的任何状态，也不吞异常（抛 ToolError 由上层判断
-    这次失败算不算「还能交付」）。
+    三路路由里它是所有路线的最后一级兜底（`doc_route.convert_any` 把本函数注入）；
+    2026-11-12 第二步起，fast 路的 DOCX/CSV/PDF 先经 `convert_fast_anydoc_first`
+    （anydoc 优先），本函数是它们的**兜底**与 HTML/PPTX/JSON/XML/epub/邮件的
+    **唯一**执行者 —— 所以它必须自给自足：不依赖 doc_route 的任何状态，也不吞异常
+    （抛 ToolError 由上层判断这次失败算不算「还能交付」）。
 
     xlsx/xlsm 走 openpyxl 原生路径，其余走 markitdown；`.xls` 明确拒绝
     （读它要 pandas+xlrd，而 pandas 会拖入本机会挂死的 numpy C 扩展）。
@@ -321,12 +322,97 @@ def convert_local_to_markdown(src: Path) -> str:
     return text
 
 
+# ---------- anydoc：fast 路首选引擎（2026-11-12 第二步） ----------
+#
+# firecrawl-anydoc（import 名 anydoc）：Rust 实现的本地文档 → Markdown 引擎，
+# 零 Python 依赖的 abi3 wheel，不受坑 A（numpy）/坑 B（magika→onnxruntime）影响。
+# bake-off（anydoc-bakeoff-report.md §7/§9）结论：DOCX/CSV/干净文本层 PDF/LaTeX
+# 用它首选（标题层级与表格保真更好、快 38–52 倍、失败会说话）；PPTX/HTML 刻意
+# 不给它（乱序/丢边界、不支持），XLSX 不给它（15 位有效数字截断）。
+# 版本锁定 0.2.4：0.2.x 行为随小版本变化（连字丢失在 0.2.3→0.2.4 被修复），
+# 升级须重跑 bake-off（见 PY_BASIC_PKGS 的 ==0.2.4 钉版）。
+
+_ANYDOC = None
+_ANYDOC_ERROR: str | None = None
+
+
+def _anydoc():
+    """惰性 import anydoc。装不上/损坏时返回 None 并记录原因 ——
+    fast 路据此整体回落 markitdown，行为与第一步完全一致。"""
+    global _ANYDOC, _ANYDOC_ERROR
+    if _ANYDOC is not None or _ANYDOC_ERROR is not None:
+        return _ANYDOC
+    try:
+        import anydoc
+    except Exception as exc:  # noqa: BLE001
+        diag("anydoc.import-fail", f"{type(exc).__name__}: {str(exc)[:160]}")
+        _ANYDOC_ERROR = f"anydoc 不可用：{type(exc).__name__}: {exc}"
+        return None
+    _ANYDOC = anydoc
+    return _ANYDOC
+
+
+# 只有这三个后缀允许进 anydoc（bake-off §7 的硬约束）：
+#   .docx  标题层级/表格保真更好（synth_docx：5/5 标题 + 真表头 vs markitdown 6 行假表）
+#   .csv   输出等价且更快；CSV 无魔数，必须 to_markdown_bytes(data, "csv")
+#   .pdf   干净文本层/LaTeX（花括号保真抽检与 NeedsOcr 降级见 doc_route）
+# .pptx（乱序/丢边界）、.html（UnsupportedError）、.xlsx（15 位截断）**不进**。
+_ANYDOC_FAST_SUFFIXES = frozenset({".docx", ".csv", ".pdf"})
+
+
+def convert_fast_anydoc_first(src: Path) -> "tuple[str, str]":
+    """fast 路的 anydoc 优先入口：返回 `(engine, text)`。
+
+    分流（engine 词表：anydoc / markitdown / openpyxl）：
+      · .docx / .csv / .pdf → 先试 anydoc；anydoc 报错（Unsupported/Malformed/…）
+        → 回落 markitdown；.pdf 且报 NeedsOcrError → 抛 `doc_route.NeedsOcrSignal`
+        （**降级信号不是错误**，由 doc_route 决定转 structural/accuracy；
+        .docx/.csv 的 NeedsOcrError 与其它错误同权处理 —— OXR 不收 Office，
+        升级没有意义，直接 markitdown 兜底）。
+      · 其余后缀 → 原样走 convert_local_to_markdown（HTML/PPTX 归 markitdown，
+        xlsx/xlsm 归 openpyxl，.xls 明确拒绝）。
+    anydoc 不可用（未装/损坏）→ 整体回落 markitdown，行为与第一步一致。
+    连字归一化对 anydoc 输出统一生效（0.2.4 已自展开，这里是不变式兜底）。
+    """
+    suffix = src.suffix.lower()
+    if suffix not in _ANYDOC_FAST_SUFFIXES:
+        engine = "openpyxl" if suffix in _XLSX_SUFFIXES else "markitdown"
+        return (engine, convert_local_to_markdown(src))
+
+    ad = _anydoc()
+    if ad is None:
+        diag("anydoc.missing", f"{src.name} 回落 markitdown")
+        return ("markitdown", convert_local_to_markdown(src))
+    try:
+        if suffix == ".csv":
+            # CSV 无魔数：显式传格式名（bake-off §7 实测的调用方式）
+            text = ad.to_markdown_bytes(src.read_bytes(), "csv")
+        else:
+            text = ad.to_markdown(str(src))
+    except ad.NeedsOcrError as exc:
+        pages = list(getattr(exc, "pages", []) or [])
+        raise doc_route.NeedsOcrSignal(
+            f"anydoc NeedsOcrError（pages={pages[:5]}，其解析器拿不到可用文本）"
+        ) from exc
+    except Exception:  # noqa: BLE001 — Unsupported/Malformed/Encrypted/… → markitdown 兜底
+        diag("anydoc.fail-fallback", f"{src.name} → markitdown")
+        return ("markitdown", convert_local_to_markdown(src))
+    text = normalize_ligatures(str(text))
+    diag("convert.anydoc.done", f"{src.name} {len(text)} chars")
+    return ("anydoc", text)
+
+
 @dsh_bridge.tool(
     name="convert_file_to_markdown",
     description=(
         "把一个本机文档转成 Markdown，自动选引擎（三路路由）："
-        "Office（docx/pptx/xlsx）/ HTML / CSV / JSON / XML / epub / Outlook 邮件，"
-        "以及**文本层干净、无表格的 PDF** 走本地 markitdown（不联网、0.1 秒级）；"
+        "**fast 路本地引擎 anydoc 优先**（Rust，不联网）：DOCX / CSV / 干净文本层 PDF / "
+        "LaTeX PDF 由 anydoc 首选（标题层级与表格保真更好、比 markitdown 快 38–52 倍），"
+        "HTML 与 PPTX 仍由 markitdown 转换（anydoc 不支持 HTML、PPTX 会乱序丢边界），"
+        "XLSX/XLSM 走 openpyxl 原生（浮点全精度）；anydoc 对 PDF 报 NeedsOcrError"
+        "（其解析器拿不到文本）时是**降级信号**——自动转交 structural/accuracy，不报错；"
+        "anydoc 已知会静默丢 LaTeX 花括号，故 PDF 另有花括号保真抽检：文本层有花括号"
+        "而 anydoc 输出丢了一半以上 → 自动回退 markitdown 并在 note 说明。"
         "**含表格或复杂版面的 PDF、扫描件 PDF、以及独立图片** 走云端版面模型 OXR"
         "（会把文件上传到 SoMark 免费服务，单次 ≤10MB/≤20 页，无 key、免费）；"
         "**当版面模型不够好时（多音标小语种、手写、极小字号、需要逐字准确引用），"
@@ -347,7 +433,8 @@ def convert_local_to_markdown(src: Path) -> str:
         "离线或只要纯文本传 prefer=\"fast\"。"
         "只接受本机绝对路径，不接受 URL。"
         "返回 {ok, engine, route, source, path, chars, preview}"
-        "（engine 是 markitdown / oxr / page-images / markitdown-fallback；"
+        "（engine 是 anydoc / markitdown / openpyxl / oxr / page-images / "
+        "markitdown-fallback；"
         "page-images 时另给 page_images 路径数组与 need_agent_vision=true）。"
     ),
     parameters={
@@ -396,7 +483,10 @@ def convert_file_to_markdown(
         diag("convert.begin", f"{src} ({src.stat().st_size} bytes) prefer={prefer}")
 
         outcome = doc_route.convert_any(
-            src, prefer=prefer, local_convert=convert_local_to_markdown
+            src,
+            prefer=prefer,
+            local_convert=convert_local_to_markdown,
+            fast_convert=convert_fast_anydoc_first,
         )
         diag(
             "convert.done",
@@ -554,15 +644,17 @@ def markitdown_capabilities() -> dict:
         info: dict = {
             "mode": "in-process",
             "routes": {
-                "xlsx/xlsm": "openpyxl 原生转换（不经 markitdown，不需要 pandas）",
-                "docx": "markitdown（mammoth）",
-                "pptx": "markitdown（python-pptx）",
-                "pdf": "markitdown（pdfminer.six + pdfplumber）",
-                "html/csv/json/xml/epub/Outlook 邮件/zip": "markitdown",
+                "xlsx/xlsm": "openpyxl 原生转换（不经 markitdown/anydoc，不需要 pandas，浮点全精度）",
+                "docx": "anydoc 优先（Rust 本地；markitdown/mammoth 兜底）",
+                "pptx": "markitdown（python-pptx）—— anydoc 会乱序、丢 slide 边界，刻意不换",
+                "csv": "anydoc 优先（to_markdown_bytes 显式格式；markitdown 兜底，输出等价）",
+                "pdf": "anydoc 优先（干净文本层/LaTeX；花括号保真抽检，NeedsOcrError 降级云端）；markitdown 兜底",
+                "html": "markitdown（anydoc 不支持 HTML，实测 UnsupportedError）",
+                "json/xml/epub/Outlook 邮件/zip": "markitdown",
                 "xls": "不支持（旧版格式，读它要 pandas+xlrd；请另存为 .xlsx）",
             },
             "router": {
-                "fast": "本地 markitdown：Office/HTML/CSV，以及文本层干净、无表格的 PDF（不联网）",
+                "fast": "本地引擎：DOCX/CSV/干净文本层 PDF/LaTeX 由 anydoc 优先（Rust 本地、快 38–52 倍），HTML/PPTX 由 markitdown，XLSX 由 openpyxl（不联网）",
                 "structural": "云端版面模型 OXR：有表格/复杂版面/扫描件的 PDF，以及独立图片",
                 "accuracy": "渲染页面图交回 Agent 自己读：多音标小语种、手写、需逐字准确（仅图片与扫描件）",
                 "prefer": "auto（默认）/ fast / layout / accuracy —— 见 convert_file_to_markdown",
@@ -597,11 +689,50 @@ def markitdown_capabilities() -> dict:
         }
         info["cloud"] = _cloud_capabilities()
         info["agent_vision"] = _agent_vision_capabilities()
+        info["anydoc"] = _anydoc_capabilities()
         if _CONVERTER_ERROR:
             info["error"] = _CONVERTER_ERROR
         return info
 
     return run_tool(work)
+
+
+def _anydoc_capabilities() -> dict:
+    """anydoc（firecrawl-anydoc）的能力与可用性。
+
+    **不 import 模块本体**：find_spec 只查存在性，版本从 dist-info 元数据取 ——
+    「capabilities 是纯静态报告」的纪律不破（它曾是 ~600 秒挂死的受害者）。
+    """
+    import importlib.metadata
+    import importlib.util
+
+    out: dict = {
+        "enabled": False,
+        "engine": "anydoc",
+        "formats": "docx / csv / 干净文本层 PDF / LaTeX PDF（fast 路首选）",
+        "note": "未安装时 fast 路自动整体回落 markitdown（行为与 2026-11 第一步一致）。",
+    }
+    try:
+        if importlib.util.find_spec("anydoc") is not None:
+            out["enabled"] = True
+            try:
+                out["version"] = importlib.metadata.version("firecrawl-anydoc")
+            except Exception:  # noqa: BLE001 — 元数据缺失不影响可用性报告
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+    out["brace_check"] = (
+        "已知缺陷：anydoc 会静默丢 LaTeX 花括号（arxiv_lora 实测文本层 20 个 → 输出 0 个，"
+        "`{edwardhu`→`fedwardhu`、`}` 直接消失）。缓解：PDF 文本层（前 3 页）花括号 ≥ "
+        f"{doc_route.BRACE_MIN_TEXT_LAYER} 个时做保真抽检，anydoc 输出不足一半 → "
+        "自动回退 markitdown（它保留花括号）并写明 note；轻微差异不触发，避免误报。"
+    )
+    out["needs_ocr"] = (
+        "anydoc 对 PDF 报 NeedsOcrError（其解析器拿不到文本，比「有无文本层」严格）"
+        "时是降级信号：auto 自动转 structural(OXR)、accuracy 转 accuracy、"
+        "fast 尊重覆盖回落 markitdown。"
+    )
+    return out
 
 
 def _agent_vision_capabilities() -> dict:
@@ -714,5 +845,12 @@ def self_test() -> list[str]:
         normalize_ligatures("中文，标点！；１２３ＡＢＣ"),
         "中文，标点！；１２３ＡＢＣ",
     )
+
+    # anydoc 分流表（2026-11-12 第二步）：只允许这三个后缀进 anydoc；
+    # HTML/PPTX/XLSX 是 bake-off §7 的硬约束，必须在排除集里。
+    for s in (".docx", ".csv", ".pdf"):
+        check(f"anydoc 优先 {s}", s in _ANYDOC_FAST_SUFFIXES, True)
+    for s in (".pptx", ".html", ".htm", ".xlsx", ".xlsm", ".json", ".xml", ".xls"):
+        check(f"不走 anydoc {s}", s in _ANYDOC_FAST_SUFFIXES, False)
 
     return failures

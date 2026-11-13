@@ -6,7 +6,7 @@
 
 | 路线 | 强项 | 弱项 |
 |---|---|---|
-| 本地 markitdown | Office / HTML / CSV；文本层完整的 PDF；0.1 s | 图片不做 OCR（实测 0 字符）；表格拉平成散行 |
+| 本地（anydoc 优先，markitdown 兜底） | Office / HTML / CSV；干净文本层 PDF（DOCX/CSV/PDF 文本层归 anydoc，HTML/PPTX 归 markitdown，XLSX 归 openpyxl）；0.1 s 级 | 图片不做 OCR（实测 0 字符）；表格拉平成散行；anydoc 会静默丢 LaTeX 花括号（抽检兜住） |
 | OXR（1.3B 版面模型） | 版面顺序、表格、公式、中英扫描件 | 小语种字形混淆（希腊文实测 10% 字母错） |
 | **Agent 亲自看** | 最准：真读像素，签名/日期/手写都能看见 | 每页一张图，上下文有限，只适合少量页 |
 
@@ -90,6 +90,24 @@ VERTICAL_MIN_PAGE_CHARS = 50
 # OCR 藏字体的名字片段（统一小写后子串匹配）
 OCR_FONT_MARKERS = ("glyphless", "hidden", "ocr")
 
+# —— fast 路符号保真抽检（2026-11-12 第二步：anydoc 引入）——
+#
+# bake-off §6.1 实证：anydoc 对 LaTeX 文本层的花括号**静默丢失/变形**
+# （arxiv_lora：文本层 {×10、}×10，anydoc 输出 0/0；`{edwardhu` → `fedwardhu`、
+# `wzchen}` → `wzchen`）；markitdown 全部保留（10/10）。输出看着正常、
+# 代码块/BibTeX/集合记号全坏 —— 「静默丢符号」是路由系统里最危险的一类缺陷。
+#
+# 抽检设计（保守，聚焦这个已证实的缺陷）：
+#   · probe 在抽样页（前 3 页）字符里数 `{`/`}` 总数 → `PdfProbe.brace_count`；
+#   · 只在 brace_count ≥ BRACE_MIN_TEXT_LAYER 时武装（样本太少不做判断）；
+#   · anydoc 输出的花括号总数不足文本层一半 → 判定丢失 → 回退 markitdown
+#     （它保留花括号）并写明 note；轻微差异（丢一两个）不触发，避免误报。
+#   · 已标定（本机实测）：arxiv_lora 前 3 页 4 个、anydoc 全文 0 → 触发；
+#     arxiv_attention / 第7页 / Souter 文本层 0 个 → 不武装，零误触发。
+# 局限：花括号只出现在第 3 页之后时抽样看不到（实测 lora 的作者区在第 1-2 页，
+# 覆盖了已知缺陷场景）；全量统计要多开一遍 pdfplumber，第一步先不做，宁可少报。
+BRACE_MIN_TEXT_LAYER = 3
+
 # 升级规则 2 的判据：超过三成字母属「第三类文字」，就附上原图让 Agent 自己看（方案 §4）
 NON_LATIN_CJK_RATIO = 0.30
 
@@ -169,6 +187,9 @@ class PdfProbe:
     # 自测与旧调用点的四参 PdfProbe(...) 构造不受影响，probe 拿不到 chars 时也置 False。
     vertical: bool = False   # 竖排：字符按列堆叠（distinct_x 少、distinct_y 多）
     ocr_font: bool = False   # 文本层字体是 OCR 藏字（GlyphLessFont / Hidden*OCR 等）
+    # 抽样页里 `{`+`}` 的总数（符号保真抽检的武装判据，2026-11-12 第二步）。
+    # 给默认值 0：不打扰旧构造；0 = 不武装。
+    brace_count: int = 0
 
 
 @dataclass
@@ -182,7 +203,7 @@ class RouteOutcome:
     ok: bool
     kind: str = "fast"          # fast | structural | accuracy（与 decide() 的返回值同词表）
     reason: str = ""            # 为什么走这条：image / native-format / scanned / tables …
-    engine: str = ""            # markitdown | oxr | page-images | markitdown-fallback
+    engine: str = ""            # anydoc | markitdown | openpyxl | oxr | page-images | markitdown-fallback
     text: str = ""
     error: str = ""
     escalated: bool = False     # 仅当「自动体检」把结果补上了页面图供校对
@@ -611,7 +632,8 @@ def _ocr_font_hit(chars: list) -> bool:
 
 def probe_pdf(path: Path) -> "PdfProbe | None":
     """抽样侦察一个 PDF：页数、前 3 页均字数、图片数、前 2 页表格数，
-    以及「文本层不可信」两个信号（竖排 / OCR 藏字层，见 VERTICAL_RATIO 处注释）。
+    「文本层不可信」两个信号（竖排 / OCR 藏字层，见 VERTICAL_RATIO 处注释），
+    以及抽样页的花括号总数（符号保真抽检的武装判据，见 BRACE_MIN_TEXT_LAYER）。
 
     只读、不落盘，实测四份样本 0.04~0.21 s（方案 §1.3）。
     **任何失败都返回 None 而不是抛错** —— 侦察失败只说明「判不了」，
@@ -645,6 +667,7 @@ def probe_pdf(path: Path) -> "PdfProbe | None":
             # 绝不影响既有判据（probe 失败仍走优雅退化为 None）。
             vertical = False
             ocr_font = False
+            brace_count = 0
             for p in sample:
                 try:
                     chars = p.chars or []
@@ -657,6 +680,11 @@ def probe_pdf(path: Path) -> "PdfProbe | None":
                     vertical = True
                 if _ocr_font_hit(chars):
                     ocr_font = True
+                # 花括号计数与上面两信号共用同一趟 chars 遍历（pdfplumber 的
+                # 字符在 `text` 键里）。失败/缺失都保持 0 = 不武装抽检。
+                for c in chars:
+                    if c.get("text") in ("{", "}"):
+                        brace_count += 1
     except Exception as exc:  # noqa: BLE001 — 加密 / 损坏 / 根本不是 PDF
         diag("probe.fail", f"{type(exc).__name__}: {str(exc)[:160]}")
         return None
@@ -669,6 +697,7 @@ def probe_pdf(path: Path) -> "PdfProbe | None":
         sample_text="\n".join(texts)[:4000],
         vertical=vertical,
         ocr_font=ocr_font,
+        brace_count=brace_count,
     )
 
 
@@ -741,12 +770,35 @@ def _forced_fast_warning(probe: "PdfProbe | None") -> str:
     )
 
 
-def convert_any(src: Path, *, prefer: str = "auto", local_convert) -> RouteOutcome:
+class NeedsOcrSignal(ToolError):
+    """fast 路的**降级信号**：anydoc 的解析器拿不到可用文本（NeedsOcrError）。
+
+    这不是错误（bake-off §9 建议 2）：它是「该交给云端版面模型 / 视觉」的可靠
+    标记 —— anydoc 的判据是**自身解析器**能否拿到文本（Souter 剥掉图片仍触发），
+    比「有没有文本层」严格。编排层（`_run_fast_anydoc`）接住它后按 prefer 重派：
+    auto → structural，accuracy → accuracy，fast → 尊重覆盖、回落 markitdown。
+    继承 ToolError：万一在别处漏接，也会以一句可读的工具错误收口，不是裸 traceback。
+    """
+
+
+def convert_any(
+    src: Path,
+    *,
+    prefer: str = "auto",
+    local_convert,
+    fast_convert=None,
+) -> RouteOutcome:
     """按路由把 `src` 转成 Markdown。
 
     `local_convert` 由 markitdown_tools 注入（`convert_local_to_markdown`）——
     刻意不做成模块内 import：那会形成 markitdown_tools ↔ doc_route 的循环依赖，
     而把「本地怎么转」的知识留在一处也更好维护。
+
+    `fast_convert`（2026-11-12 第二步）是 fast 路的 anydoc 优先入口，返回
+    `(engine, text)`：DOCX/CSV/PDF 文本层先试 anydoc，HTML/PPTX/其余归 markitdown，
+    XLSX 归 openpyxl。引擎选择在 markitdown_tools（它知道怎么调 anydoc），
+    降级与花括号抽检的**决策**在这里（路由语义归 doc_route）。省略时 fast 路
+    退回 `local_convert`（纯 markitdown，行为与第一步一致）。
     """
     prefer = normalize_prefer(prefer)
     suffix = src.suffix.lower()
@@ -768,6 +820,7 @@ def convert_any(src: Path, *, prefer: str = "auto", local_convert) -> RouteOutco
         f" probe={probe_ms}ms"
         + (f" pages={probe.pages} avg={probe.avg_chars:.0f} tables={probe.tables}" if probe else "")
         + (f" vertical={probe.vertical} ocr_font={probe.ocr_font}" if probe else "")
+        + (f" brace={probe.brace_count}" if probe else "")
     )
     diag("route.decide", detail)
 
@@ -780,6 +833,8 @@ def convert_any(src: Path, *, prefer: str = "auto", local_convert) -> RouteOutco
             diag("route.fast.untrusted-text-layer", detail)
 
     if kind == "fast":
+        if fast_convert is not None:
+            return _run_fast_anydoc(out, src, fast_convert, local_convert, prefer, probe)
         return _run_fast(out, src, local_convert)
     if kind == "structural":
         return _run_structural(out, src, local_convert, prefer=prefer)
@@ -789,12 +844,12 @@ def convert_any(src: Path, *, prefer: str = "auto", local_convert) -> RouteOutco
 # ---- 路线一：本地 ----
 
 
-def _run_fast(out: RouteOutcome, src: Path, local_convert) -> RouteOutcome:
-    try:
-        text = local_convert(src)
-    except Exception as exc:  # noqa: BLE001 — 本地自己报错就是最终错误
-        out.error = f"{exc}" if isinstance(exc, ToolError) else f"{type(exc).__name__}: {exc}"
-        return out
+def _finish_fast(out: RouteOutcome, engine: str, text: str) -> RouteOutcome:
+    """fast 路成功出口的共用体检：空输出按失败（第一步护栏），否则交付。
+
+    `_run_fast` 与 `_run_fast_anydoc` 的收尾共用这一份 —— 「成功但 0 字符」
+    的判据与文案只有一处，改护栏不会改漏。
+    """
     if not (text or "").strip():
         # 「成功但 0 字符」必须当失败（bake-off 实证）：markitdown 对扫描件/图片
         # 返回 status=ok + 空正文，当成功返回等于骗下游「这份文档是空的」，
@@ -807,9 +862,105 @@ def _run_fast(out: RouteOutcome, src: Path, local_convert) -> RouteOutcome:
         )
         return out
     out.ok = True
-    out.engine = "markitdown"
+    out.engine = engine
     out.text = text
     return out
+
+
+def _run_fast(out: RouteOutcome, src: Path, local_convert) -> RouteOutcome:
+    """纯 markitdown 的 fast 路（第一步原样保留）。
+
+    现役调用点只剩两处：`_run_fast_anydoc` 里 NeedsOcrSignal + prefer="fast"
+    的回落分支，以及没注入 fast_convert 的旧调用方/自测。
+    """
+    try:
+        text = local_convert(src)
+    except Exception as exc:  # noqa: BLE001 — 本地自己报错就是最终错误
+        out.error = f"{exc}" if isinstance(exc, ToolError) else f"{type(exc).__name__}: {exc}"
+        return out
+    return _finish_fast(out, "markitdown", text)
+
+
+def _run_fast_anydoc(
+    out: RouteOutcome,
+    src: Path,
+    fast_convert,
+    local_convert,
+    prefer: str,
+    probe: "PdfProbe | None",
+) -> RouteOutcome:
+    """fast 路的 anydoc 优先编排（2026-11-12 第二步）。
+
+    引擎选择（哪个后缀试 anydoc、报错怎么兜）在 markitdown_tools.convert_fast_anydoc_first；
+    这里只做三件**路由语义**的事：
+      ① `NeedsOcrSignal` 按降级信号重派（auto→structural、accuracy→accuracy、
+         fast→尊重覆盖回落 markitdown），绝不把信号当错误抛回用户；
+      ② 花括号保真抽检：anydoc 产出且文本层有足够花括号而输出丢了一半以上
+         → 回退 markitdown（它保留花括号），并写明 note（见 BRACE_MIN_TEXT_LAYER）；
+      ③ 空输出护栏（第一步，_finish_fast）。
+    """
+    try:
+        engine, text = fast_convert(src)
+    except NeedsOcrSignal as exc:
+        diag("route.fast.needs-ocr", f"{src.name} | {str(exc)[:160]}")
+        if prefer == "fast":
+            # 显式「只用本地」覆盖：尊重语义不升级云端 —— markitdown 直读文本层
+            out.notes.append(
+                "anydoc 解析不到可用文本（NeedsOcrError）；你声明了 prefer=\"fast\"，"
+                "已改用 markitdown 直读文本层，结果可能不完整或乱序"
+            )
+            return _run_fast(out, src, local_convert)
+        # 降级重派：route 块必须如实反映**实际交付路径**（kind 停在 fast 会让
+        # Agent 读到「fast 路但 engine=oxr」的自相矛盾），reason 换成专用码，
+        # 原始路由上下文留在上面的 note 里。
+        out.kind = "accuracy" if prefer == "accuracy" else "structural"
+        out.reason = "needs-ocr-degrade"
+        out.notes.append(
+            "anydoc 解析不到可用文本（NeedsOcrError），已按降级信号转交"
+            + ("页面图渲染（accuracy）" if prefer == "accuracy" else "云端版面模型（structural）")
+        )
+        if prefer == "accuracy":
+            return _run_accuracy(out, src, local_convert)
+        return _run_structural(out, src, local_convert, prefer=prefer)
+    except Exception as exc:  # noqa: BLE001 — 转换失败就是失败（兜底已在 fast_convert 内部做过）
+        out.error = f"{exc}" if isinstance(exc, ToolError) else f"{type(exc).__name__}: {exc}"
+        return out
+
+    # 符号保真抽检：只对 anydoc 产出做（markitdown 保留花括号，无需检查）。
+    # 判据见 BRACE_MIN_TEXT_LAYER 处注释；不足一半才算「丢」，避免误报。
+    if engine == "anydoc" and probe is not None and probe.brace_count >= BRACE_MIN_TEXT_LAYER:
+        kept = text.count("{") + text.count("}")
+        if kept * 2 < probe.brace_count:
+            diag(
+                "route.fast.brace-loss",
+                f"{src.name} | 文本层={probe.brace_count} anydoc输出={kept} → 回退 markitdown",
+            )
+            try:
+                fb_text = local_convert(src)
+            except Exception as exc:  # noqa: BLE001 — 兜底失败要连着根因一起说
+                out.ok = False
+                out.error = (
+                    f"符号保真抽检：anydoc 丢失花括号（文本层 {probe.brace_count} 个 → "
+                    f"输出 {kept} 个），markitdown 兜底也失败：{exc}"
+                )
+                return out
+            if not (fb_text or "").strip():
+                out.ok = False
+                out.error = (
+                    f"符号保真抽检：anydoc 丢失花括号（文本层 {probe.brace_count} 个 → "
+                    f"输出 {kept} 个），markitdown 兜底输出也为空 —— 两路都不可用，"
+                    "拒绝静默丢符号。请改用 prefer=\"accuracy\" 对照原图。"
+                )
+                return out
+            out.notes.append(
+                f"符号保真抽检：anydoc 丢失花括号（文本层 {probe.brace_count} 个 → "
+                f"输出 {kept} 个），已回退 markitdown（保留符号，标题/表格结构可能较逊）；"
+                "引用级保真可用 prefer=\"accuracy\" 对照原图"
+            )
+            engine = "markitdown"
+            text = fb_text
+
+    return _finish_fast(out, engine, text)
 
 
 # ---- 路线二：structural（OXR；体检不过则附页面图给 Agent 校对） ----
@@ -1140,6 +1291,106 @@ def _self_test() -> int:
     res_ok = _run_fast(RouteOutcome(ok=False, kind="fast"), Path("_stub_.pdf"), lambda p: "有内容")
     check("fast 有内容仍成功", res_ok.ok, True)
     check("fast 有内容引擎", res_ok.engine, "markitdown")
+
+    # —— 第二步：anydoc 优先的 fast 路编排（_run_fast_anydoc，2026-11-12）——
+    # NeedsOcrSignal 是降级信号不是错误；花括号抽检回退 markitdown；空输出护栏不变。
+    check_true("NeedsOcrSignal 是 ToolError 子类", issubclass(NeedsOcrSignal, ToolError))
+    ok_probe = PdfProbe(pages=1, avg_chars=1000, images=0, tables=0)  # 默认字段 brace_count=0
+    braced = PdfProbe(pages=1, avg_chars=1000, images=0, tables=0, brace_count=10)
+
+    def _raise_needs_ocr(p):
+        raise NeedsOcrSignal("anydoc NeedsOcrError（pages=[1]，解析器拿不到可用文本）")
+
+    res = _run_fast_anydoc(
+        RouteOutcome(ok=False, kind="fast"), Path("_stub_.pdf"),
+        lambda p: ("anydoc", "anydoc 的正文"), lambda p: "markitdown 的正文", "auto", ok_probe,
+    )
+    check("anydoc 成功交付", (res.ok, res.engine), (True, "anydoc"))
+    check("anydoc 输出透传", res.text, "anydoc 的正文")
+    res = _run_fast_anydoc(
+        RouteOutcome(ok=False, kind="fast"), Path("_stub_.pdf"),
+        lambda p: ("markitdown", "md 正文"), lambda p: "x", "auto", ok_probe,
+    )
+    check("markitdown 产出引擎标注", (res.ok, res.engine), (True, "markitdown"))
+
+    # NeedsOcrSignal → auto 降级 structural：云端关闭时走 _local_fallback（离线可测）
+    old_mode = os.environ.get("DSH_OXR_MODE")
+    try:
+        os.environ["DSH_OXR_MODE"] = "off"
+        res = _run_fast_anydoc(
+            RouteOutcome(ok=False, kind="fast"), Path("_stub_.pdf"),
+            _raise_needs_ocr, lambda p: "云端不可用时的本地兜底正文" * 8, "auto", ok_probe,
+        )
+        check(
+            "NeedsOcr→structural 降级落地",
+            (res.ok, res.kind, res.reason, res.engine, res.degraded),
+            (True, "structural", "needs-ocr-degrade", "markitdown-fallback", True),
+        )
+        check_true("NeedsOcr 降级有说明", any("NeedsOcrError" in n for n in res.notes))
+        # NeedsOcrSignal → accuracy 降级：桩路径渲染必失败 + 云端关闭 → 本地兜底（全程离线）
+        res = _run_fast_anydoc(
+            RouteOutcome(ok=False, kind="fast"), Path("_stub_.pdf"),
+            _raise_needs_ocr, lambda p: "accuracy 降级后的本地兜底正文" * 8, "accuracy", ok_probe,
+        )
+        check(
+            "NeedsOcr→accuracy 降级落地",
+            (res.ok, res.kind, res.reason, res.engine, res.degraded),
+            (True, "accuracy", "needs-ocr-degrade", "markitdown-fallback", True),
+        )
+        check_true("NeedsOcr→accuracy 有说明", any("accuracy" in n for n in res.notes))
+    finally:
+        if old_mode is None:
+            os.environ.pop("DSH_OXR_MODE", None)
+        else:
+            os.environ["DSH_OXR_MODE"] = old_mode
+
+    # NeedsOcrSignal + prefer=fast：尊重「只用本地」覆盖，回落 markitdown（不升级云端）
+    res = _run_fast_anydoc(
+        RouteOutcome(ok=False, kind="fast"), Path("_stub_.pdf"),
+        _raise_needs_ocr, lambda p: "fast 覆盖下的 markitdown 正文", "fast", ok_probe,
+    )
+    check("NeedsOcr+fast 尊重覆盖", (res.ok, res.engine), (True, "markitdown"))
+    check_true("NeedsOcr+fast 有说明", any("fast" in n for n in res.notes))
+
+    # 花括号抽检：文本层 10 个、anydoc 输出 0 个 → 回退 markitdown（它保留花括号）
+    res = _run_fast_anydoc(
+        RouteOutcome(ok=False, kind="fast"), Path("_stub_.pdf"),
+        lambda p: ("anydoc", "fedwardhu 全文没有花括号，wzchen 也丢了收尾"),
+        lambda p: "markitdown 保留了 {edwardhu, wzchen}", "auto", braced,
+    )
+    check("花括号丢失回退 markitdown", (res.ok, res.engine), (True, "markitdown"))
+    check_true("花括号回退有说明", any("花括号" in n for n in res.notes))
+    check_true("花括号回退保留符号", "{" in (res.text or ""))
+    # 保守判据：只丢一小半（9/10 保留）不触发
+    res = _run_fast_anydoc(
+        RouteOutcome(ok=False, kind="fast"), Path("_stub_.pdf"),
+        lambda p: ("anydoc", "{" * 9), lambda p: "x", "auto", braced,
+    )
+    check("花括号轻微差异不触发", (res.ok, res.engine), (True, "anydoc"))
+    # 不武装：文本层 <3 个或 0 个时即使输出没花括号也不回退（样本不足不做判断）
+    res = _run_fast_anydoc(
+        RouteOutcome(ok=False, kind="fast"), Path("_stub_.pdf"),
+        lambda p: ("anydoc", "没有花括号"), lambda p: "x", "auto",
+        PdfProbe(pages=1, avg_chars=1000, images=0, tables=0, brace_count=2),
+    )
+    check("花括号样本不足不武装", (res.ok, res.engine), (True, "anydoc"))
+    # 抽检发现丢失但 markitdown 兜底也失败 → 明确失败，不静默交丢符号的输出
+    def _boom(p):
+        raise ToolError("markitdown 兜底失败桩")
+
+    res = _run_fast_anydoc(
+        RouteOutcome(ok=False, kind="fast"), Path("_stub_.pdf"),
+        lambda p: ("anydoc", "没有花括号"), _boom, "auto", braced,
+    )
+    check("花括号丢失+兜底失败", res.ok, False)
+    check_true("失败说明带根因", "花括号" in (res.error or "") and "markitdown 兜底" in (res.error or ""))
+    # 空输出护栏对 anydoc 路同样生效（第一步语义不变）
+    res = _run_fast_anydoc(
+        RouteOutcome(ok=False, kind="fast"), Path("_stub_.pdf"),
+        lambda p: ("anydoc", "  "), lambda p: "x", "auto", ok_probe,
+    )
+    check("anydoc 空输出当失败", res.ok, False)
+    check_true("anydoc 空输出提示扫描件", "扫描件" in (res.error or ""))
 
     # normalize_prefer
     check("prefer 大小写", normalize_prefer("  ACCURACY "), "accuracy")

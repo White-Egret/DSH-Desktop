@@ -34,6 +34,7 @@ xlsx/xlsm 改由 openpyxl **原生转换**（见 _xlsx_to_markdown，openpyxl �
 
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import types
@@ -278,6 +279,116 @@ def normalize_ligatures(text: str) -> str:
     return (text or "").translate(_LIGATURE_TABLE)
 
 
+# ---------- MHTML（.mhtml/.mht）：解 MIME 取主 HTML 再走 markitdown（2026-11-12 第三步） ----------
+#
+# 实证（Bacon.mhtml，Blink 保存，multipart/related + quoted-printable）：
+# markitdown 没有 MHTML 转换器（`UnsupportedFormatException: No converter
+# attempted… filetype not supported`）；直接改名 .html 也只会把 MIME 头和
+# `=XX` 转义当 HTML 解析出垃圾。MHTML 的正文是 MIME 包裹的 HTML —— 先用
+# **标准库 email** 解包（get_content() 自动解 quoted-printable/base64 并按
+# charset 转 str），再把主文档 HTML 交给 markitdown 既有 HTML 管线。
+# 全程本地、零新依赖；图片/CSS 资源部分不内嵌（本次只做正文）。
+
+_MHTML_SUFFIXES = frozenset({".mhtml", ".mht"})
+
+
+def _mhtml_main_html(data: bytes) -> str:
+    """从 MHTML 字节里解出**主文档** HTML（纯标准库 email，无副作用）。
+
+    多 HTML 部分（frame）时按优先级取主文档：
+      1. 顶层 `Snapshot-Content-Location`（Blink 保存头）匹配 `Content-Location`
+         的那份（忽略 #fragment）；
+      2. 没有快照头或匹配不到 → 取**最大**的 text/html（帧/小页几乎总是更小，
+         主文档几乎总是最大 —— 比「取第一个」稳健）。
+    解不出 text/html → ToolError（明确报错，不静默返回空 —— 与第一步
+    「0 字符当失败」同一纪律）。
+    """
+    import email
+    from email import policy
+
+    try:
+        msg = email.message_from_bytes(data, policy=policy.default)
+    except Exception as exc:  # noqa: BLE001 — 不是 MIME / 结构损坏
+        raise ToolError(f"MHTML 解析失败：{type(exc).__name__}: {exc}") from exc
+    snapshot = (msg.get("Snapshot-Content-Location") or "").strip()
+    html_parts: list[tuple[str, str]] = []  # (content_location, html)
+    for part in msg.walk():
+        if part.get_content_type() != "text/html":
+            continue
+        try:
+            content = part.get_content()  # 自动解 quoted-printable/base64 → str
+        except Exception:  # noqa: BLE001 — 单个部分坏不影响其它部分
+            continue
+        if isinstance(content, str) and content.strip():
+            html_parts.append(((part.get("Content-Location") or "").strip(), content))
+    if not html_parts:
+        raise ToolError(
+            "MHTML 里没有可用的 text/html 部分：文件可能不是标准 MHTML（或已损坏）。"
+        )
+    if snapshot:
+        snap_head = snapshot.split("#", 1)[0]
+        for loc, content in html_parts:
+            if loc and loc.split("#", 1)[0] == snap_head:
+                return content
+    return max(html_parts, key=lambda item: len(item[1]))[1]
+
+
+def _mhtml_reconstruct_initials(html: str) -> str:
+    """把「文件名即字母」的花体首字母图片还原成文本字母（用户反馈，2026-11-14）。
+
+    老数字化站点常把每章首字母做成图片字形，文件名就是字母本身：
+    Bacon.mhtml 实测 `q.gif` + 文本 "UID" = QUID、`m.gif` + "ETUUNT" = METUUNT
+    （培根《论死亡》——不还原的话读者读到的是断词）。规则刻意保守：
+
+      · `src` **紧贴斜杠后的基名**恰为 1–2 个字母（`/q.gif`、`/et.gif` 命中；
+        `bar.gif` 三字母、`grsqr01.gif` 带数字、`bluesquare.gif`——若无斜杠锚定
+        会被 `e.gif` 后缀误伤——等装饰图天然不命中，避免把分隔线换成 "AR" 的误报）；
+      · 图片后面（允许隔空白/标签）必须紧跟字母数字——首字母天然连着单词；
+      · 还原为大写（花体首字母即大写字形）。
+
+    已知局限（如实声明）：≥3 个字母的首字形（如 EST）不会被还原——宁可少报
+    也不冒 "BAR"→"AR" 误报的风险。
+    """
+    return _MHTML_INITIAL_RE.sub(lambda m: m.group(1).upper(), html)
+
+
+_MHTML_INITIAL_RE = re.compile(
+    r'<img\b[^>]*?src="[^"]*?/([A-Za-z]{1,2})\.(?:gif|png|jpe?g|bmp)"[^>]*>'  # 斜杠锚定基名=1–2字母
+    r"(?=(?:\s|<[^>]*>)*[A-Za-z0-9\u00c0-\u024f])",                            # 且紧跟单词字符
+    flags=re.I,
+)
+
+
+def _mhtml_to_markdown(src: Path) -> str:
+    """MHTML → Markdown：解 MIME 取主 HTML，还原花体首字母，落临时 .html 走
+    markitdown 的 HTML 管线（标题/表格/列表/pre 全部复用既有实现），不引入任何新依赖。"""
+    import os
+    import tempfile
+
+    html = _mhtml_reconstruct_initials(_mhtml_main_html(src.read_bytes()))
+    md = _converter()
+    if md is None:
+        raise ToolError(_CONVERTER_ERROR or "markitdown 不可用。")
+    fd, tmp = tempfile.mkstemp(prefix="dsh_mhtml_", suffix=".html")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(html)
+        result = md.convert_local(tmp)
+    except Exception as exc:  # noqa: BLE001 — HTML 管线自身失败
+        raise ToolError(f"MHTML 主文档转换失败：{type(exc).__name__}: {exc}") from exc
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    text = getattr(result, "markdown", None)
+    if text is None:
+        raise ToolError("markitdown 没有返回内容（MHTML 主文档可能为空）。")
+    text = normalize_ligatures(str(text))
+    diag("convert.mhtml.done", f"{src.name} {len(text)} chars")
+    return text
+
+
 def convert_local_to_markdown(src: Path) -> str:
     """**本地 markitdown/openpyxl** 转换入口：任意本机文档 → Markdown，不联网、不上传。
 
@@ -287,10 +398,15 @@ def convert_local_to_markdown(src: Path) -> str:
     **唯一**执行者 —— 所以它必须自给自足：不依赖 doc_route 的任何状态，也不吞异常
     （抛 ToolError 由上层判断这次失败算不算「还能交付」）。
 
-    xlsx/xlsm 走 openpyxl 原生路径，其余走 markitdown；`.xls` 明确拒绝
+    xlsx/xlsm 走 openpyxl 原生路径，MHTML 先解 MIME 取主 HTML（见
+    _mhtml_to_markdown），其余走 markitdown；`.xls` 明确拒绝
     （读它要 pandas+xlrd，而 pandas 会拖入本机会挂死的 numpy C 扩展）。
     """
     suffix = src.suffix.lower()
+    if suffix in _MHTML_SUFFIXES:
+        # MHTML 必须在 markitdown 通用路径**之前**分流：它没有对应转换器
+        # （实测 UnsupportedFormatException），且 MIME 头/=XX 转义不能当 HTML 解
+        return _mhtml_to_markdown(src)
     if suffix in _XLSX_SUFFIXES:
         text = _xlsx_to_markdown(src)
         diag("convert.xlsx.done", f"{len(text)} chars")
@@ -409,6 +525,7 @@ def convert_fast_anydoc_first(src: Path) -> "tuple[str, str]":
         "**fast 路本地引擎 anydoc 优先**（Rust，不联网）：DOCX / CSV / 干净文本层 PDF / "
         "LaTeX PDF 由 anydoc 首选（标题层级与表格保真更好、比 markitdown 快 38–52 倍），"
         "HTML 与 PPTX 仍由 markitdown 转换（anydoc 不支持 HTML、PPTX 会乱序丢边界），"
+        "MHTML（.mhtml/.mht）先解 MIME 取主文档 HTML 再走 markitdown（全程本地），"
         "XLSX/XLSM 走 openpyxl 原生（浮点全精度）；anydoc 对 PDF 报 NeedsOcrError"
         "（其解析器拿不到文本）时是**降级信号**——自动转交 structural/accuracy，不报错；"
         "anydoc 已知会静默丢 LaTeX 花括号，故 PDF 另有花括号保真抽检：文本层有花括号"
@@ -419,6 +536,9 @@ def convert_fast_anydoc_first(src: Path) -> "tuple[str, str]":
         "传 prefer=\"accuracy\"：工具会把页面渲染成 PNG 并把绝对路径交给你，"
         "由你**自己用 read_image 读图转写**——这条最准，因为不经任何 OCR，"
         "也不需要任何 API Key。**注意：这条路返回的是图片路径而不是正文**。"
+        "**早期印本（文本层含长 s ſ 或早期连字码点）auto 会自动转 accuracy** 并在 note "
+        "附专用转写规则（长 s 绝不认 f、连字/缩写展开、多音标希腊文、双栏语言-栏位逐页"
+        "按图判断）——OXR 对这类文献实证失效，不要给它。"
         "云端不可用时自动回落本地并在 degraded/note 里标注，不会返回一份空文件。"
         "**注意：OXR / 本地的结果都是 OCR 草稿，通顺不等于正确** —— 专名与译名"
         "（台湾/大陆译名差异大，勿按常识「纠正」）、漏字（句子仍通顺但少了字）、"
@@ -453,9 +573,11 @@ def convert_fast_anydoc_first(src: Path) -> "tuple[str, str]":
                     "layout = 强制云端版面模型 OXR（双栏论文、公式试卷、发票，"
                     "以及侦察信号抓不到的版面异常）；"
                     "accuracy = 把页面渲染成图交给你自己读（多音标小语种、手写、逐字引用、"
-                    "竖排/OCR 藏字文本层；真正的干净文本层 PDF 仍走本地）。"
+                    "竖排/OCR 藏字文本层、早期印本；真正的干净文本层 PDF 仍走本地）。"
                     "竖排中文/日文与 OCR 藏字文本层的 PDF auto 已能自动识别并走云端"
                     "（字符坐标行列比 + 字体名两个信号，2026-11 修复）；"
+                    "早期印本（文本层含长 s/早期连字）auto 自动转 accuracy 并附专用转写规则"
+                    "（2026-11-12 第三步）—— OXR 对早期印本实证失效；"
                     "只有字序错乱等抓不到的版面异常仍请传 layout。"
                 ),
             },
@@ -650,6 +772,7 @@ def markitdown_capabilities() -> dict:
                 "csv": "anydoc 优先（to_markdown_bytes 显式格式；markitdown 兜底，输出等价）",
                 "pdf": "anydoc 优先（干净文本层/LaTeX；花括号保真抽检，NeedsOcrError 降级云端）；markitdown 兜底",
                 "html": "markitdown（anydoc 不支持 HTML，实测 UnsupportedError）",
+                "mhtml/mht": "markitdown（先解 MIME 取主文档 HTML——标准库 email，全程本地；并把「文件名即字母」的花体首字母图片还原成文本（q.gif→QUID）；资源部分不内嵌）",
                 "json/xml/epub/Outlook 邮件/zip": "markitdown",
                 "xls": "不支持（旧版格式，读它要 pandas+xlrd；请另存为 .xlsx）",
             },
@@ -657,6 +780,15 @@ def markitdown_capabilities() -> dict:
                 "fast": "本地引擎：DOCX/CSV/干净文本层 PDF/LaTeX 由 anydoc 优先（Rust 本地、快 38–52 倍），HTML/PPTX 由 markitdown，XLSX 由 openpyxl（不联网）",
                 "structural": "云端版面模型 OXR：有表格/复杂版面/扫描件的 PDF，以及独立图片",
                 "accuracy": "渲染页面图交回 Agent 自己读：多音标小语种、手写、需逐字准确（仅图片与扫描件）",
+                "early_print": (
+                    "早期印本（16–18 世纪）：文本层含长 s（ſ，U+017F）或早期连字码点"
+                    "（U+FB00–FB06）即判为早期印本，auto/accuracy 自动转 accuracy 并附专用"
+                    "转写规则（长 s 绝不认 f、连字/缩写展开、多音标希腊文、双栏语言-栏位逐页"
+                    "按图判断）。依据：OXR 对 old-publication.pdf（波菲利《Isagoge》早期印本）"
+                    "实证失效——Ariſtoteli→Ariftoteli、PRÆFATIO→PRAFATIO、希腊文成乱码。"
+                    "局限：纯扫描（无文本层）的早期印本检不出，靠 Agent 看渲染图或显式 prefer。"
+                    "prefer=\"layout\" 仍可强制 OXR（会附风险提示）；prefer=\"fast\" 尊重覆盖。"
+                ),
                 "prefer": "auto（默认）/ fast / layout / accuracy —— 见 convert_file_to_markdown",
                 "untrusted_text_layer": (
                     "竖排文字与 OCR 藏字文本层（GlyphLessFont / Hidden*OCR 字体）的 PDF "
@@ -852,5 +984,87 @@ def self_test() -> list[str]:
         check(f"anydoc 优先 {s}", s in _ANYDOC_FAST_SUFFIXES, True)
     for s in (".pptx", ".html", ".htm", ".xlsx", ".xlsm", ".json", ".xml", ".xls"):
         check(f"不走 anydoc {s}", s in _ANYDOC_FAST_SUFFIXES, False)
+
+    # —— MHTML 解包（2026-11-12 第三步，纯标准库 email）——
+    # 构造一份带 quoted-printable 的 multipart/related：主 HTML + CSS 资源部分。
+    # =63='c'、=C3=B6='ö'（utf-8）、=73='s' —— 解码后不得残留任何 =XX 转义。
+    mhtml_bytes = (
+        b"From: <Saved by Blink>\r\n"
+        b"Snapshot-Content-Location: https://example.com/main\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b'Content-Type: multipart/related; boundary="----=_Part_1"\r\n'
+        b"\r\n"
+        b"------=_Part_1\r\n"
+        b"Content-Type: text/html; charset=utf-8\r\n"
+        b"Content-Transfer-Encoding: quoted-printable\r\n"
+        b"Content-Location: https://example.com/main\r\n"
+        b"\r\n"
+        b"<html><body><h1>Ba=63on</h1><p>s=C3=B6me nece=73=73e</p></body></html>\r\n"
+        b"------=_Part_1\r\n"
+        b"Content-Type: text/css\r\n"
+        b"Content-Transfer-Encoding: base64\r\n"
+        b"\r\n"
+        b"Ym9keSB7Y29sb3I6IHJlZH07\r\n"
+        b"------=_Part_1--\r\n"
+    )
+    main = _mhtml_main_html(mhtml_bytes)
+    check("MHTML qp 解码", ("Bacon" in main) and ("necesse" in main) and ("ö" in main), True)
+    check("MHTML 无 qp 转义", ("Ba=63on" not in main) and ("=73" not in main), True)
+    # 多 HTML 部分：快照头匹配的才是主文档（另一个更大但 Content-Location 不同）
+    mhtml_two = (
+        b"Snapshot-Content-Location: https://example.com/real\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b'Content-Type: multipart/related; boundary="----=_Part_2"\r\n'
+        b"\r\n"
+        b"------=_Part_2\r\n"
+        b"Content-Type: text/html\r\n"
+        b"Content-Location: https://example.com/frame\r\n"
+        b"\r\n"
+        b"<html>" + b"<p>frame filler</p>" * 20 + b"</html>\r\n"
+        b"------=_Part_2\r\n"
+        b"Content-Type: text/html\r\n"
+        b"Content-Location: https://example.com/real\r\n"
+        b"\r\n"
+        b"<html><body><p>main document</p></body></html>\r\n"
+        b"------=_Part_2--\r\n"
+    )
+    check(
+        "MHTML 快照头优先于大小",
+        ("main document" in _mhtml_main_html(mhtml_two))
+        and ("frame filler" not in _mhtml_main_html(mhtml_two)),
+        True,
+    )
+    # 无快照头 → 取最大的 text/html
+    mhtml_nosnap = mhtml_two.replace(b"Snapshot-Content-Location: https://example.com/real\r\n", b"")
+    check("MHTML 无快照头取最大", "frame filler" in _mhtml_main_html(mhtml_nosnap), True)
+    # 解不出 text/html → 明确报错（不静默返回空）
+    try:
+        _mhtml_main_html(
+            b"Content-Type: multipart/related; boundary=\"----=_B\"\r\n\r\n"
+            b"------=_B\r\nContent-Type: image/png\r\n\r\nAAAA\r\n------=_B--\r\n"
+        )
+    except ToolError:
+        pass
+    else:
+        failures.append("md.MHTML 无 text/html: 应当抛 ToolError")
+
+    # —— 花体首字母还原（2026-11-14 用户反馈）——
+    # 基名即字母的图片字形 → 文本字母；装饰图/分隔线不得误转。
+    html_q = '<p><img src="https://x.org/essays/q.gif" width="89">UID est veritas?</p>'
+    check("首字母 q.gif→Q", _mhtml_reconstruct_initials(html_q), "<p>QUID est veritas?</p>")
+    html_m = '<p><img src="https://x.org/essays/m.gif">ETUUNT homines mortem</p>'
+    check("首字母 m.gif→M", _mhtml_reconstruct_initials(html_m), "<p>METUUNT homines mortem</p>")
+    html_et = '<p><img src="https://x.org/essays/et.gif">jam</p>'
+    check("首字母 双字母 et.gif→ET", _mhtml_reconstruct_initials(html_et), "<p>ETjam</p>")
+    # 误报防线：三字母基名（分隔线 bar.gif）、带数字（grsqr01.gif）、单词基名
+    # （bluesquare.gif）都不命中；首字母后不紧跟单词字符也不命中。
+    for name, src, tail in (
+        ("bar.gif 不还原", "https://x.org/essays/bar.gif", "正文"),
+        ("grsqr01.gif 不还原", "https://x.org/essays/grsqr01.gif", "正文"),
+        ("bluesquare.gif 不还原", "https://x.org/essays/bluesquare.gif", "正文"),
+        ("后无单词字符不还原", "https://x.org/essays/q.gif", " <p>分隔用</p>"),
+    ):
+        tag = f'<p><img src="{src}">{tail}</p>'
+        check(f"首字母还原守卫 {name}", _mhtml_reconstruct_initials(tag), tag)
 
     return failures

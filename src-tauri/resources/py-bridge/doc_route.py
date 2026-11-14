@@ -55,6 +55,11 @@ LOCAL_SUFFIXES = frozenset(
     {
         ".docx", ".pptx", ".xlsx", ".xlsm", ".html", ".htm",
         ".csv", ".json", ".xml", ".epub", ".msg",
+        # MHTML（2026-11-12 第三步）：MIME multipart 包裹的 HTML，markitdown 没有
+        # 对应转换器（实测 UnsupportedFormatException），改名 .html 也只会把 MIME
+        # 头/=XX 转义当 HTML 解析出垃圾。由 markitdown_tools 先解 MIME 取主文档
+        # HTML 再走既有 HTML 管线 —— 本地专属，OXR/渲染都不收它。
+        ".mhtml", ".mht",
     }
 )
 
@@ -107,6 +112,45 @@ OCR_FONT_MARKERS = ("glyphless", "hidden", "ocr")
 # 局限：花括号只出现在第 3 页之后时抽样看不到（实测 lora 的作者区在第 1-2 页，
 # 覆盖了已知缺陷场景）；全量统计要多开一遍 pdfplumber，第一步先不做，宁可少报。
 BRACE_MIN_TEXT_LAYER = 3
+
+# —— 早期印本信号（2026-11-12 第三步）——
+#
+# 样本 old-publication.pdf（波菲利《Isagoge》16–17 世纪早期印本，Google 数字化，
+# 公版）实测：OXR 对这类文献**基本失效** —— 长 s 时不时认成 f（`Ariſtoteli`→
+# `Ariftoteli`、`noſse`→`nofle`、`CVM ſit neceſſe`→`V M fit neé fle`）、æ 连字
+# 丢失（PRÆFATIO→PRAFATIO）、希腊文成乱码（ΕΙΣΑΓΩΓΗ→EISAGΩGH 级错误）。
+# 这类文献的正确去处是 **accuracy（Agent 亲自看图）**，不是 OXR。
+#
+# 判据：抽样文本层含**长 s `ſ`(U+017F)** 或**早期连字码点 U+FB00–FB06**
+# （ﬀﬁﬂﬃﬄﬅﬆ）→ 早期印本强信号（本样本的 OCR 藏字层里就有 ſ/ﬅ）。
+#
+# ⚠ 局限（如实声明）：纯扫描、无文本层的早期印本**检不出** —— 此判据依赖
+# 文本层字符。检不出时靠 Agent 看渲染图判断（accuracy 的通用转写提示已覆盖
+# 专名/形近字核对），或用户显式 `prefer`。不做「字体年代学」之类的猜测判据。
+_EARLY_PRINT_RE = re.compile("[\u017f\ufb00-\ufb06]")
+
+# 早期印本的专用转写规则（accuracy 命中 early-print 时附进 note，交给读图的
+# Agent）。规则来自 bake-off 实证的失败模式（长 s→f、连字丢失、缩写展开、
+# 双栏语言-栏位因书而异）——逐字转写时最容易做错的就是这几件。
+_EARLY_PRINT_RULES_NOTE = (
+    "这是早期印刷品（可能 16–18 世纪），按以下规则逐字转写，不要按现代拼写「纠正」：\n"
+    "1. 长 s「ſ」转写为 s，绝不认成 f（ſit=sit 不是 fit；neceſſe=necesse；"
+    "Ariſtoteli=Aristoteli）。注意 ſ 与 f 字形相近：ſ 无完整横杠。圆体 s 仍作 s。\n"
+    "2. 连字：æ/œ 保留或展开为 ae/oe（注明约定）；ﬆ→st、ﬀ→ff、ﬁ→fi、ﬂ→fl、"
+    "ﬃ→ffi、ﬄ→ffl。\n"
+    "3. 抄本/早期缩写按规则展开并标注：ū=um、ō=on、q;=que、上标字母"
+    "（如 cōuenit=conuenit、Categorematū=Categorematum）；不确定的缩写标 [?]，不要臆造。\n"
+    "4. 多音标希腊文：保留送气符/重音/下标 iota（ᾳ ῃ ῳ），不要剥成单调希腊文。\n"
+    "5. 【双栏语言-栏位对应：因书而异，逐页按图判断】不同书籍编排不同："
+    "有的全书固定（如希腊左/拉丁右），有的相邻页交替，有的另有编排。"
+    "必须从每页图像实际判断哪侧是哪种语言——既不假设固定顺序，也不假设必然交替。"
+    "分栏输出并标明语言与栏位。\n"
+    "6. 花体首字母：装饰大字母 + 后续正文合读（如装饰 C + \"VM\" = CVM=Cum；"
+    "装饰 O + \"NTOS\" = ΟΝΤΟΣ）。\n"
+    "7. 旁注（marginalia）与正文分离，单独标出；页尾 catchword（接排词）与签名标记"
+    "（a/b/数字）注明但不混入正文；脚注上标序号保留。\n"
+    "8. 通顺≠正确：以原图字形为准，专名/译名不按常识改动；逐字核对长 s/连字/缩写/数字。"
+)
 
 # 升级规则 2 的判据：超过三成字母属「第三类文字」，就附上原图让 Agent 自己看（方案 §4）
 NON_LATIN_CJK_RATIO = 0.30
@@ -190,6 +234,10 @@ class PdfProbe:
     # 抽样页里 `{`+`}` 的总数（符号保真抽检的武装判据，2026-11-12 第二步）。
     # 给默认值 0：不打扰旧构造；0 = 不武装。
     brace_count: int = 0
+    # 早期印本信号（2026-11-12 第三步）：抽样文本层含长 s（ſ）或早期连字码点
+    # （U+FB00–FB06）。命中 → auto/accuracy 走 accuracy 并附专用转写规则。
+    # 局限：纯扫描（无文本层）检不出 —— 靠 Agent 看渲染图或显式 prefer。
+    early_print: bool = False
 
 
 @dataclass
@@ -270,17 +318,23 @@ def decide_route(
         # `prefer="accuracy"` 的语义是「我要逐字准确」。判断按代价从低到高：
         #
         # ① 侦察失败 → 只能走本地（不为了猜而多跑一次）
-        # ② 「文本层不可信」信号（竖排 / OCR 藏字层）→ **直接渲染**：这类文本层的
+        # ② 早期印本信号 → **渲染**：OXR 对早期印本实证失效（长 s→f、连字丢失、
+        #    希腊文错乱，见 phase3 报告对照表），只有 Agent 看图才逐字可靠。
+        # ③ 「文本层不可信」信号（竖排 / OCR 藏字层）→ **直接渲染**：这类文本层的
         #    坐标序本身就是错的，字再多也不能交给按顺序抽取的本地引擎
         #    （2026-11 修复，判据标定见 VERTICAL_RATIO 处的注释）。
-        # ③ 文本层含大量非拉丁字母 → **即使文本层干净也渲染**：这类文档的文本层
+        # ④ 文本层含大量非拉丁字母 → **即使文本层干净也渲染**：这类文档的文本层
         #    常常「字多但不对」（实测 test.pdf 的希腊文：文本层 4335 字/页很干净，
         #    但长音符在提取时就丢了）。原生文本对拉丁文可信，对多音标文字不可信，
         #    所以这里不看字数看**书写系统**。
-        # ④ 其余干净文本层（真正的原生文本，如英文合同、中文公文）→ 走本地：
+        # ⑤ 其余干净文本层（真正的原生文本，如英文合同、中文公文）→ 走本地：
         #    渲染成图再让 Agent 读只会更慢更贵，还可能看错。
         if probe is None:
             return "fast", "accuracy-probe-failed"
+        # 早期印本优先于「文本层不可信」检查：二者常同时命中（OCR 藏字层里就有
+        # ſ/连字），此时理由用更具体的 early-print，还会附专用转写规则。
+        if probe.early_print:
+            return "accuracy", "early-print"
         # 「文本层不可信」信号优先于一切字数判断：竖排 / OCR 藏字层的**坐标序**
         # 本身就是错的，字再多也不能交给按顺序抽取的本地引擎。声明了 accuracy
         # 就是要逐字准确 → 直接渲染页面图，理由用与 auto 相同的两个码。
@@ -298,6 +352,11 @@ def decide_route(
     if probe is None:
         # 侦察失败（文件损坏 / pdfplumber 缺失）不等于「该上传」，宁可本地
         return "fast", "probe-failed"
+    # 早期印本（2026-11-12 第三步）：文本层含长 s/早期连字 → OXR 实证失效
+    # （对照表见 phase3 报告），交给 Agent 视觉。放在 scanned/tables/竖排/OCR
+    # 检查**之前**：这些都是 structural(OXR) 路，而早期印本恰恰不能给 OXR。
+    if probe.early_print:
+        return "accuracy", "early-print"
     if probe.avg_chars < SCANNED_AVG_CHARS or (
         probe.images > 0 and probe.avg_chars < SCANNED_WITH_IMAGES_AVG_CHARS
     ):
@@ -698,6 +757,8 @@ def probe_pdf(path: Path) -> "PdfProbe | None":
         vertical=vertical,
         ocr_font=ocr_font,
         brace_count=brace_count,
+        # 早期印本信号在**截断前**的抽样全文上找（长 s/连字可能落在第 3 页末尾）
+        early_print=bool(_EARLY_PRINT_RE.search("\n".join(texts))),
     )
 
 
@@ -762,6 +823,8 @@ def _forced_fast_warning(probe: "PdfProbe | None") -> str:
         flags.append("竖排版面")
     if probe.ocr_font:
         flags.append("OCR 隐藏文本层")
+    if probe.early_print:
+        flags.append("早期印本（长 s/早期连字信号，文本层是 OCR 藏字）")
     if not flags:
         return ""
     return (
@@ -831,6 +894,23 @@ def convert_any(
         if warning:
             out.notes.append(warning)
             diag("route.fast.untrusted-text-layer", detail)
+
+    # MHTML（2026-11-12 第三步）：本地专属格式。note 说明「解 MIME 取主 HTML」
+    # 的处理，让 Agent 知道输出经过了 MIME 解包（资源部分未内嵌）。
+    if kind == "fast" and suffix in (".mhtml", ".mht"):
+        out.notes.append(
+            "MHTML 已解 MIME（标准库 email）取主文档 HTML 再转 Markdown；"
+            "图片/CSS 资源部分未内嵌"
+        )
+
+    # prefer="layout" 显式 OXR 撞上早期印本：尊重覆盖，但把实证风险讲清楚 ——
+    # 这类文献 OXR 输出「读着通顺但长 s/连字/希腊文全错」，比失败更危险。
+    if kind == "structural" and prefer == "layout" and probe is not None and probe.early_print:
+        out.notes.append(
+            "该 PDF 命中早期印本信号（文本层含长 s/早期连字）：OXR 对此类文献实证失效"
+            "（长 s 认成 f、æ 丢失、希腊文错乱）；你显式声明了 prefer=\"layout\" 已照办，"
+            "需要逐字准确请改用 prefer=\"accuracy\"（会附专用转写规则）"
+        )
 
     if kind == "fast":
         if fast_convert is not None:
@@ -1072,6 +1152,12 @@ def _run_accuracy(out: RouteOutcome, src: Path, local_convert) -> RouteOutcome:
     （多音标小语种、手写、极小字号），这时省 token 就是省错了地方。
     实测 150 DPI 会把长音符糊成普通字母，而 300 DPI 全部可辨。
     """
+    # 早期印本（2026-11-12 第三步）：附专用转写规则。放在函数最前面 ——
+    # 即使后续渲染失败走了 OXR 兜底，规则也已随 note 交付（那条兜底路对
+    # 早期印本同样是坏结局，规则能让 Agent 知道该去对照原图）。
+    # 只在 reason == "early-print" 时附加：普通 accuracy 不受影响。
+    if out.reason == "early-print":
+        out.notes.append(_EARLY_PRINT_RULES_NOTE)
     dpi = RENDER_DPI_DETAIL
     images = render_pages(src, dpi=dpi)
     if not images:
@@ -1391,6 +1477,63 @@ def _self_test() -> int:
     )
     check("anydoc 空输出当失败", res.ok, False)
     check_true("anydoc 空输出提示扫描件", "扫描件" in (res.error or ""))
+
+    # —— 第三步：早期印本信号与路由（2026-11-12）——
+    # 文本层含长 s/早期连字 → accuracy（优先于 OXR），并附专用转写规则 note。
+    early = PdfProbe(pages=4, avg_chars=500, images=4, tables=0, early_print=True)
+    early_with_ocr = PdfProbe(
+        pages=4, avg_chars=500, images=4, tables=0, early_print=True, ocr_font=True
+    )
+    check("auto+早期印本", decide(".pdf", early, "auto"), "accuracy")
+    check("理由 auto+早期印本", decide_route(".pdf", early, "auto")[1], "early-print")
+    check("accuracy+早期印本", decide(".pdf", early, "accuracy"), "accuracy")
+    check("理由 accuracy+早期印本", decide_route(".pdf", early, "accuracy")[1], "early-print")
+    # 早期印本优先于 OCR 藏字（二者常同时命中；ocr_font 是 OXR 路，必须被压过）
+    check(
+        "早期印本优先于 OCR 藏字",
+        decide_route(".pdf", early_with_ocr, "auto"),
+        ("accuracy", "early-print"),
+    )
+    # 显式覆盖尊重：layout 仍 OXR、fast 仍本地
+    check("layout 覆盖早期印本", decide(".pdf", early, "layout"), "structural")
+    check("fast 覆盖早期印本", decide(".pdf", early, "fast"), "fast")
+    # 无早期印本信号时不误伤：现代希腊文图片/干净 PDF 行为不变（回归）
+    check("希腊文图片不受早期印本规则影响", decide(".jpg", None, "accuracy"), "accuracy")
+    check("干净 PDF 仍 fast（回归）", decide(".pdf", clean, "auto"), "fast")
+
+    # 早期印本的专用转写规则 note：只在 reason == "early-print" 时附加
+    old_mode = os.environ.get("DSH_OXR_MODE")
+    try:
+        os.environ["DSH_OXR_MODE"] = "off"
+        res_ep = _run_accuracy(
+            RouteOutcome(ok=False, kind="accuracy", reason="early-print"),
+            Path("_stub_.pdf"), lambda p: "本地兜底正文" * 12,
+        )
+        check_true("早期印本规则在 note（长 s）", any("ſit=sit" in n for n in res_ep.notes))
+        check_true("早期印本规则在 note（栏位）", any("栏位" in n for n in res_ep.notes))
+        check_true("早期印本规则在 note（catchword）", any("catchword" in n for n in res_ep.notes))
+        res_plain = _run_accuracy(
+            RouteOutcome(ok=False, kind="accuracy", reason="image-accuracy"),
+            Path("_stub_.jpg"), lambda p: "本地兜底正文" * 12,
+        )
+        check_true("普通 accuracy 不附早期印本规则", not any("ſit=sit" in n for n in res_plain.notes))
+    finally:
+        if old_mode is None:
+            os.environ.pop("DSH_OXR_MODE", None)
+        else:
+            os.environ["DSH_OXR_MODE"] = old_mode
+
+    # 强制 fast 撞早期印本：风险提示写明信号
+    check_true(
+        "强制fast 早期印本有提示",
+        bool(_forced_fast_warning(early)) and "早期印本" in _forced_fast_warning(early),
+    )
+
+    # MHTML 路由：本地专属（native-format），不再落 not-pdf 兜底
+    check_true("MHTML 在本地格式表", ".mhtml" in LOCAL_SUFFIXES and ".mht" in LOCAL_SUFFIXES)
+    check("mhtml/auto 走本地", decide(".mhtml", None, "auto"), "fast")
+    check("理由 mhtml", decide_route(".mhtml", None, "auto")[1], "native-format")
+    check("mht/auto 走本地", decide(".mht", None, "auto"), "fast")
 
     # normalize_prefer
     check("prefer 大小写", normalize_prefer("  ACCURACY "), "accuracy")

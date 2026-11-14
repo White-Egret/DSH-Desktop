@@ -288,6 +288,20 @@
         <!-- 「自动检测」结果行是动态文案（main.js 拼装），刻意不挂 data-i18n；
              切语言后的重绘见 applyLanguage 的 autodetectLast 分支。 -->
         <div class="hint hidden" id="autodetect-result"></div>
+        <!-- 工具链七项状态（与首装向导同一节、同一份渲染逻辑）：受管工具显示
+             "受管/复用系统"，系统组件显示探测结果；Broken 给具体原因（方案 §3.2）。
+             动态行由 main.js 渲染，不挂 data-i18n（与 office / kb 两块同一纪律）。 -->
+        <div class="field tc-block">
+          <span class="py-head" data-i18n="tc_section_title">工具链状态（受管 + 系统组件）</span>
+          <table class="check-table">
+            <tbody id="tc-body-manage">
+              <tr><td data-i18n="tc_checking">正在检测工具链…</td></tr>
+            </tbody>
+          </table>
+          <div class="row gap left">
+            <button id="btn-tc-refresh-manage" class="btn small" type="button" data-i18n="tc_refresh">重新检测工具链</button>
+          </div>
+        </div>
         <div class="field python-block">
           <span class="py-head" data-i18n="lbl_python_env">Python 环境（办公文档读写 / 数据分析）</span>
           <div id="python-status" class="py-status" data-i18n="py_checking">正在检测本机 Python…</div>
@@ -834,6 +848,24 @@
           <tr><td data-i18n="lbl_dsh">DSH</td><td id="wiz-dsh-flag" data-i18n="wiz_detecting_row">检测中…</td><td id="wiz-dsh-path" class="mono"></td></tr>
         </tbody>
       </table>
+
+      <!-- 工具链七项状态（toolchain::toolchain_status）：node/pnpm/dsh/python 的受管/系统
+           归属 + rust/msvc/webview2 探测；Broken 会给出具体原因而不是笼统的"未检测到"
+           （方案 §3.2）。行内容由 main.js 按后端报告动态渲染，刻意不挂 data-i18n
+           （会被 applyDom 打回默认文案，与 office / kb 两块同一纪律）；
+           切语言后的重绘在 applyLanguage 里做。 -->
+      <div class="field tc-block">
+        <span class="py-head" data-i18n="tc_section_title">工具链状态（受管 + 系统组件）</span>
+        <div class="hint" data-i18n-html="tc_hint_html"></div>
+        <table class="check-table">
+          <tbody id="tc-body-wiz">
+            <tr><td data-i18n="tc_checking">正在检测工具链…</td></tr>
+          </tbody>
+        </table>
+        <div class="row gap left">
+          <button id="btn-tc-refresh-wiz" class="btn small" type="button" data-i18n="tc_refresh">重新检测工具链</button>
+        </div>
+      </div>
 
       <!-- 缺少 Node.js 时的引导步骤 -->
       <div id="wiz-step-node" class="wiz-step hidden">

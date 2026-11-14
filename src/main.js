@@ -1685,6 +1685,9 @@ function applyLanguage(lang) {
   // 「自动检测」结果行（同在安装/卸载弹窗）：由动态文案拼成，切语言后按缓存重绘；
   // 没有缓存（本次还没点过）就保持隐藏 —— 占位行没有存在的意义。
   if (!$('manage-modal').classList.contains('hidden')) renderAutodetect();
+  // 工具链七项状态（向导 + 安装/卸载弹窗共用）：行内容全部动态拼装，切语言后
+  // 按缓存重绘（不重发检测 —— 检测是有界但仍有成本的子进程动作，换语言不该触发它）
+  renderToolchainStatus();
   // 首选项顶部的桌面端版本行：语言切换后按新词典重绘（版本号本身不变；
   // 后端异常时保持原样，不值得为它做空态处理）。
   if (!$('settings-modal').classList.contains('hidden')) {
@@ -1770,6 +1773,121 @@ function openSettings() {
 ///
 /// 每次打开都重问一次后端：安装在后台线程里跑，用户完全可能关掉弹窗再打开，
 /// 界面上的状态不能是旧的。
+// ---------- 工具链七项状态（toolchain::toolchain_status；方案 plans/toolchain-module-plan.md §7） ----------
+// 向导与「安装/卸载」弹窗共用同一份报告与同一套渲染（两个 tbody，一个渲染函数）。
+// 受管工具显示「受管 / 复用系统」，系统组件显示探测结果；Broken 显示**具体原因**
+// （哪个版本目录不完整），绝不退化为笼统的「未检测到」。行内容全部动态拼装，
+// 刻意不挂 data-i18n（会被 applyDom 打回默认文案）——切语言后由 applyLanguage 重绘。
+
+let toolchainReport = null; // 最近一次 toolchain_status 的结果（含 error 字段时为失败）
+let toolchainLoading = false;
+
+async function refreshToolchainStatus() {
+  if (toolchainLoading) return;
+  toolchainLoading = true;
+  try {
+    toolchainReport = await invoke('toolchain_status');
+  } catch (e) {
+    toolchainReport = { error: String(e) };
+  }
+  toolchainLoading = false;
+  renderToolchainStatus();
+}
+
+/// 工具名 → 词典 key（node/npm/pnpm/dsh 沿用首装向导既有词条）。
+function tcNameKey(id) {
+  return { node: 'lbl_node', pnpm: 'lbl_pnpm', dsh: 'lbl_dsh',
+           python: 'tc_name_python', rust: 'tc_name_rust',
+           msvc: 'tc_name_msvc', webview2: 'tc_name_webview2' }[id] || id;
+}
+
+function tcRowHtml(item) {
+  const name = t(tcNameKey(item.id));
+  // 徽标三态：可用（ok）/ 有具体问题的（warn：Broken、版本被拒）/ 缺失（bad）
+  const badgeKey = { managed: 'tc_src_managed', system: 'tc_src_system',
+                     probe: 'tc_src_probe', missing: 'tc_src_missing' }[item.source] || 'tc_src_missing';
+  const badgeCls = item.usable ? 'ok' : (item.detail ? 'warn' : 'bad');
+  const ver = item.version ? verTag(item.version) : '';
+  const path = item.path ? escapeHtml(item.path) + ver : ver;
+  const detail = item.detail ? '<br/><span class="wiz-warn-note">' + escapeHtml(item.detail) + '</span>' : '';
+  // 系统组件缺失时给官方安装指引深链（受管四项的处置是"装到受管目录"，不给外链）
+  const guide = (!item.usable && item.guide_url)
+    ? ' <a href="#" class="tc-guide" data-tool="' + escapeHtml(item.id) + '" data-url="'
+      + escapeHtml(item.guide_url) + '">' + escapeHtml(t('tc_btn_guide')) + '</a>'
+    : '';
+  // 受管四项的安装入口：未可用（缺失 / 被拒 / 版本不符）时给一颗「装到受管目录」。
+  // 系统组件（probe）**永远不给安装按钮** —— 本模块只探测不代装（方案 §1.4）。
+  let action = '';
+  if (item.scope === 'managed' && !item.usable) {
+    action = ' <a href="#" class="tc-install" data-tool="' + escapeHtml(item.id) + '">'
+      + escapeHtml(t('tc_btn_install')) + '</a>';
+  }
+  // dsh 的「显式切换」：受管副本已装、而当前生效的是系统那份 → 给用户一个自己点的入口
+  // （装完不自动改写 cfg.dsh_path，不抢用户已有配置；Q3 的 UI 落点）
+  if (item.id === 'dsh' && item.usable && item.source === 'system'
+      && toolchainReport && (toolchainReport.managed_dsh || '').trim()) {
+    action += ' <a href="#" class="tc-switch" data-tool="dsh">'
+      + escapeHtml(t('tc_btn_switch_managed')) + '</a>';
+  }
+  return '<tr><td>' + escapeHtml(name) + '</td><td><span class="flag '
+    + badgeCls + '">' + escapeHtml(t(badgeKey)) + '</span></td><td class="mono">'
+    + path + detail + guide + action + '</td></tr>';
+}
+
+function renderToolchainStatus() {
+  for (const bodyId of ['tc-body-wiz', 'tc-body-manage']) {
+    const el = $(bodyId);
+    if (!el) continue;
+    if (!toolchainReport) {
+      el.innerHTML = '<tr><td>' + escapeHtml(t('tc_checking')) + '</td></tr>';
+      continue;
+    }
+    if (toolchainReport.error) {
+      el.innerHTML = '<tr><td>' + escapeHtml(t('tc_fail', toolchainReport.error)) + '</td></tr>';
+      continue;
+    }
+    const rows = (toolchainReport.tools || []).map(tcRowHtml).join('');
+    const minSrc = toolchainReport.constraints_source
+      + (toolchainReport.node_min_from_runtime ? ' · ' + t('tc_min_runtime_note') : '');
+    const minLine = '<tr><td colspan="3" class="hint">'
+      + escapeHtml(t('tc_node_min_line', toolchainReport.node_min, minSrc)) + '</td></tr>';
+    el.innerHTML = rows + minLine;
+    // 指引链接：走 toolchain_open_guide（后端开系统浏览器；data-url 仅作展示回退）
+    el.querySelectorAll('.tc-guide').forEach(function (a) {
+      a.onclick = function (ev) {
+        ev.preventDefault();
+        invoke('toolchain_open_guide', { tool: a.dataset.tool })
+          .catch(function (e) { toast(t('tc_fail', e), true); });
+      };
+    });
+    // 安装到受管目录：进度走既有的 setup-status（后端 setup_progress），结果走 updateView
+    el.querySelectorAll('.tc-install').forEach(function (a) {
+      a.onclick = function (ev) {
+        ev.preventDefault();
+        const id = a.dataset.tool;
+        toast(t('tc_installing', id));
+        invoke('toolchain_install', { ids: [id] })
+          .then(function () { refreshToolchainStatus(); })
+          .catch(function (e) { toast(t('tc_install_fail', id, String(e)), true); });
+      };
+    });
+    // 显式切换到受管 dsh（只有用户点这里才改 cfg.dsh_path）
+    el.querySelectorAll('.tc-switch').forEach(function (a) {
+      a.onclick = function (ev) {
+        ev.preventDefault();
+        invoke('toolchain_use_managed', { tool: a.dataset.tool })
+          .then(function () {
+            toast(t('tc_switch_done'));
+            return invoke('get_config').then(function (c) { config = c; return true; })
+              .catch(function () { return true; })
+              .then(function () { refreshToolchainStatus(); });
+          })
+          .catch(function (e) { toast(t('tc_switch_fail', String(e)), true); });
+      };
+    });
+  }
+}
+
 function openManage() {
   // Python 状态（版本 / 路径 / 包是否装齐）—— 顺带会刷新桥接状态行
   refreshPythonStatus();
@@ -1789,6 +1907,9 @@ function openManage() {
   }
   // 「Node.js，pnpm与DSH」块：版本行 + 按安装状态切换的安装/卸载 UI
   refreshToolchainBlock();
+  // 工具链七项状态（受管 + 系统组件）：每次打开重问一次 —— VS 升级、WebView2
+  // 自动更新都会让上一次的结论过期（方案「运行期要能自愈」）
+  refreshToolchainStatus();
   // 卸载确认框里那条命令要跟着当前 DSH 实际所在目录走
   refreshUninstallCmd();
   // npm 缓存位置：把已保存的值填进输入框，并重问一次「实际生效的缓存目录」
@@ -3584,6 +3705,9 @@ async function wizDetect() {
   }
   setWizProgress(false);
   renderWiz();
+  // 工具链七项状态（含 rust/msvc/webview2 探测，走有界通道）与检测并行动作：
+  // 不 await —— 它失败只影响那一节的状态行，不该拖住向导主检测
+  refreshToolchainStatus();
 }
 
 // ---------- 「安装位置」的预填 ----------
@@ -4170,6 +4294,14 @@ function bindUI() {
       toast(t('toast_detect_fail', e), true);
     }
   };
+
+  // 工具链七项状态的「重新检测」按钮（向导 + 安装/卸载弹窗各一颗，同一个处理）：
+  // 重发 toolchain_status —— 探测全走有界通道，MSVC 有缓存，重复点击有 toolchainLoading 防抖
+  const tcRefresh = () => refreshToolchainStatus();
+  const btnTcWiz = $('btn-tc-refresh-wiz');
+  const btnTcManage = $('btn-tc-refresh-manage');
+  if (btnTcWiz) btnTcWiz.onclick = tcRefresh;
+  if (btnTcManage) btnTcManage.onclick = tcRefresh;
 
   // 开机自启开关（即时生效）
   $('set-autostart').onchange = async (ev) => {

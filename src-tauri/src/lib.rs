@@ -12,6 +12,7 @@ mod safe;
 mod secret;
 mod session_probe;
 mod tasks;
+mod toolchain;
 mod window_state;
 
 use std::time::Duration;
@@ -157,6 +158,16 @@ pub fn run(launched_by_autostart: bool) {
             exit_guard::get_active_tasks,
             exit_guard::exit_decision,
             exit_guard::get_last_session_killed,
+            // 工具链模块（toolchain/）：七项工具状态（node/pnpm/dsh/python 受管 +
+            // rust/msvc/webview2 探测）；安装/卸载命令随受管实现一并接入
+            toolchain::toolchain_status,
+            toolchain::toolchain_open_guide,
+            toolchain::toolchain_install,
+            toolchain::toolchain_uninstall,
+            toolchain::toolchain_prune,
+            // 显式把 DSH 切换到受管副本（只有用户点按钮才改 cfg.dsh_path，
+            // 装完不自动改写 —— 不抢用户已有的配置）
+            toolchain::toolchain_use_managed,
         ])
         .setup(move |app| {
             // ---- 0. 按用户配置初始化界面语言与外观（后续所有 launcher 日志/托盘菜单文案跟随语言） ----

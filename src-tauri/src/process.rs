@@ -2083,10 +2083,27 @@ pub(crate) fn start_internal(app: &AppHandle) -> Result<(), String> {
     // 工作目录：DSH 家目录的上一级；DSH_HOME 指向家目录（DSH 在此读取配置）
     cmd.current_dir(&cwd);
     cmd.env("DSH_HOME", &home_dir);
-    // dsh.cmd 是 npm 生成的 shim，回退分支同样依赖 PATH 里的 node
-    cmd.env(
-        "PATH",
-        detect::child_path_for(&[dsh_prog.as_str(), npm_for_path.as_str()]),
+    // dsh.cmd 是 npm 生成的 shim，回退分支同样依赖 PATH 里的 node。
+    // ---- toolchain 改造（方案 §4.2）----
+    // 受管工具与 MSVC 的环境增量**前置**在这份补好的 PATH 之前：受管 node 存在时
+    // npm shim 解析到它；MSVC 部分让 DSH 自己派生的 cargo（工作区构建）能找到
+    // link.exe 与 LIB。overlay 为空时 path_with_prefix 对现有 PATH 只去重、不改序，
+    // 所以「什么都没装受管工具」的机器上行为与改造前完全一致。
+    let tc_overlay = crate::toolchain::spawn_env(&crate::toolchain::store::toolchain_root(app));
+    let spawn_path = tc_overlay.path_with_prefix(Some(
+        detect::child_path_for(&[dsh_prog.as_str(), npm_for_path.as_str()]).as_os_str(),
+    ));
+    cmd.env("PATH", &spawn_path);
+    // MSVC 的 LIB / INCLUDE 等（空 overlay 时一个都不写）
+    for (k, v) in &tc_overlay.vars {
+        cmd.env(k, v);
+    }
+    // 每次 spawn 把**实际** PATH 写进 desktop.log（方案 §4.2 风险 2 的缓解：
+    // PATH 构造出问题时，事后能从日志里看到当时的真实值，而不是靠猜）
+    emit_log(
+        app,
+        "launcher",
+        i18n::fmt("log_spawn_path", &[&spawn_path.to_string_lossy()]),
     );
     apply_no_window(&mut cmd);
     // stdin 不需要输入；stdout/stderr 必须 piped 转发到日志，绝不吞掉
@@ -2764,6 +2781,7 @@ pub async fn registry_align_apply(app: AppHandle) -> Result<String, String> {
     // cwd 传空（继承本进程）：真机实测 pnpm config set **无条件**写它自己的
     // %LOCALAPPDATA%\pnpm\config\auth.ini —— 在带 package.json 的项目目录里跑也一样，
     // 不会在项目里生成 .npmrc，所以工作目录不影响写到哪儿。
+    // TODO(toolchain): 切到 toolchain::spawn（pnpm 的 config get/set，v1 保持原样）
     let (ok, out) = run_cmd_capture(&pnpm_s, &args, "", Duration::from_secs(60))?;
     if !ok {
         return Err(i18n::fmt("err_reg_apply", &[&output_tail(&out)]));
@@ -2810,6 +2828,7 @@ pub async fn registry_restore(app: AppHandle) -> Result<String, String> {
         "registry".to_string(),
         target.clone(),
     ];
+    // TODO(toolchain): 切到 toolchain::spawn（pnpm 的 config get/set，v1 保持原样）
     let (ok, out) = run_cmd_capture(&pnpm_s, &args, "", Duration::from_secs(60))?;
     if !ok {
         return Err(i18n::fmt("err_reg_apply", &[&output_tail(&out)]));
@@ -3366,6 +3385,7 @@ pub async fn check_versions(app: AppHandle) -> Result<VersionInfo, String> {
             view_args.push("--cache".to_string());
             view_args.push(c);
         }
+        // TODO(toolchain): 切到 toolchain::spawn（查 dist-tags，v1 保持原样）
         match run_cmd_capture(&npm_prog, &view_args, &cwd, Duration::from_secs(60)) {
             Ok((true, out)) => {
                 let (latest, next) = parse_dist_tags(&out);
@@ -3440,6 +3460,7 @@ pub async fn detect_npm_package(app: AppHandle) -> Result<String, String> {
         list_args.push("--cache".to_string());
         list_args.push(c);
     }
+    // TODO(toolchain): 切到 toolchain::spawn（全局包列表，v1 保持原样）
     let (ok, out) = run_cmd_capture(&npm_prog, &list_args, &cwd, Duration::from_secs(60))?;
     let text = out.trim().to_string();
     let mut found: Vec<String> = Vec::new();
@@ -3627,8 +3648,22 @@ pub async fn update_dsh(
         let result: Result<i32, String> = (|| {
             let mut cmd = command_for(&npm_prog, &args)?;
             cmd.current_dir(&cwd);
-            // npm.cmd 自身能找到 node，但它派生的安装脚本调的是裸 `node`：必须给出补好的 PATH
-            cmd.env("PATH", detect::child_path_for(&[npm_prog.as_str()]));
+            // npm.cmd 自身能找到 node，但它派生的安装脚本调的是裸 `node`：必须给出补好的 PATH。
+            // toolchain 改造（方案 §4.2）：受管工具与 MSVC 的增量前置（overlay 为空时
+            // 行为与原来一致 —— path_with_prefix 对现有 PATH 只去重、不改序）。
+            let tc_overlay =
+                crate::toolchain::spawn_env(&crate::toolchain::store::toolchain_root(&app2));
+            let spawn_path = tc_overlay
+                .path_with_prefix(Some(detect::child_path_for(&[npm_prog.as_str()]).as_os_str()));
+            cmd.env("PATH", &spawn_path);
+            for (k, v) in &tc_overlay.vars {
+                cmd.env(k, v);
+            }
+            emit_log(
+                &app2,
+                "update",
+                i18n::fmt("log_spawn_path", &[&spawn_path.to_string_lossy()]),
+            );
             // loglevel=http：npm 会把每次 registry 请求打成一行日志，据此统计「已获取 N 个包文件」
             cmd.env("npm_config_loglevel", "http");
             apply_no_window(&mut cmd);
@@ -3697,6 +3732,11 @@ pub async fn update_dsh(
         match result {
             Ok(0) => {
                 emit_log(&app2, "update", i18n::t("log_update_ok").to_string());
+                // ---- toolchain：更新后的约束重读（方案 §1.1b 最关键的触发点）----
+                // 通道变动真正发生在这里：装完新包立刻重读它的 package.json 约束，
+                // 把新的 effective_min 与当前 Node 比对，不合规就明确告警（不阻断 ——
+                // 包已经装好，用户需要的是知道接下来会发生什么）。
+                crate::toolchain::recheck_after_dsh_update(&app2);
                 // 关键：必须在发出 update-finished **之前**把状态从「updating」复位为「idle」。
                 // 前端收到该事件会立刻 invoke start_dsh，而 start_internal 看到
                 // status=="updating" 会以 err_status_locked 拒绝启动 —— 之前这里漏了复位，
@@ -4174,6 +4214,9 @@ fn install_pnpm_blocking(app: &AppHandle) -> Result<String, String> {
     // 复用 run_cmd_capture：它已经带超时、不弹窗口，并给子进程补 PATH
     // （刚装完 Node 时本进程 PATH 还是旧快照，裸 `node` 要靠它才能被解析到）。
     // pnpm 很小（几 MB），10 分钟是宽松上限，只为网络极差时能自己收场。
+    // TODO(toolchain): 切到 toolchain::spawn
+    // 走 `npm install -g pnpm` 装进 npm 自己的全局目录；v1 保持原样（受管安装走
+    // toolchain::managed::install_npm_pkg，装进受管目录，是另一条路径）。
     let (ok, out) = run_cmd_capture(&npm_s, &args, "", Duration::from_secs(10 * 60))?;
     // 输出落盘：成功也留痕（排查「装到哪去了」时唯一能查到的现场）
     if !out.trim().is_empty() {
@@ -4636,6 +4679,7 @@ fn pip_uninstall_blocking(
 ) -> Result<String, String> {
     let mut args = py.full_args(&["-m", "pip", "uninstall", "-y"]);
     args.extend(pkgs.iter().map(|s| (*s).to_string()));
+    // TODO(toolchain): 切到 toolchain::spawn（pip 卸载走系统/受管解释器，v1 保持原样）
     let ok = run_cmd_streaming(
         app,
         &py.program.to_string_lossy(),
@@ -4939,9 +4983,9 @@ fn install_python_verified(
     // ③ 下载：curl 优先（实时进度），PowerShell 兜底
     setup_progress(app, "download", &i18n::fmt("setup_py_dl_start", &[&version, &url]));
     let mut last_err = i18n::t("setup_no_dl_tool").to_string();
-    if !try_download_curl(&url, &dest, &mut last_err, Some(app), &page) {
+    if !try_download_curl(&url, &dest, &mut last_err, Some(app), &page, &[]) {
         setup_progress(app, "download", &i18n::fmt("setup_curl_fallback", &[&last_err]));
-        try_download_powershell(&url, &dest, &page)?;
+        try_download_powershell(&url, &dest, &page, &[])?;
     }
 
     // 体积粗筛（防截断、防把 HTML 错误页当安装包），真正的判断是接下来的哈希比对
@@ -5042,8 +5086,8 @@ fn resolve_latest_python_version(dir: &Path, last_err: &mut String) -> Option<St
     let dest = dir.join("python-downloads.html");
 
     let mut curl_err = String::new();
-    let downloaded = try_download_curl(url, &dest, &mut curl_err, None, url)
-        || try_download_powershell(url, &dest, url).is_ok();
+    let downloaded = try_download_curl(url, &dest, &mut curl_err, None, url, &[])
+        || try_download_powershell(url, &dest, url, &[]).is_ok();
     if !downloaded {
         *last_err = if curl_err.trim().is_empty() {
             i18n::t("setup_no_dl_tool").to_string()
@@ -5138,7 +5182,7 @@ fn fetch_python_installer_sha256(
     let mut curl_err = String::new();
     let mut ps_err = String::new();
     let mut downloaded =
-        try_download_curl(&page, &dest, &mut curl_err, None, detect::PYTHON_DOWNLOAD_PAGE);
+        try_download_curl(&page, &dest, &mut curl_err, None, detect::PYTHON_DOWNLOAD_PAGE, &[]);
     // curl 会把「响应没声明压缩却塞来 gzip」的字节原样落盘（`--compressed` 只认响应头），
     // 这种文件读文本必炸 —— 先按魔数认出来，**当失败处理**，交给下面的 PowerShell
     // 兜底重取一次（Invoke-WebRequest 自己声明并解开压缩，通常能拿回明文）。
@@ -5146,7 +5190,7 @@ fn fetch_python_installer_sha256(
         downloaded = false;
     }
     if !downloaded {
-        match try_download_powershell(&page, &dest, detect::PYTHON_DOWNLOAD_PAGE) {
+        match try_download_powershell(&page, &dest, detect::PYTHON_DOWNLOAD_PAGE, &[]) {
             Ok(()) => downloaded = true,
             Err(e) => ps_err = e,
         }
@@ -5548,7 +5592,11 @@ pub(crate) fn create_private_temp_dir(tag: &str) -> Result<PathBuf, String> {
 
 /// 取官方清单里 `msi_name` 对应的 SHA-256（小写）。
 /// 每一步失败都返回 Err —— 调用方据此中止安装，绝不退化成「不校验继续装」。
-fn fetch_expected_sha256(dir: &Path, version: &str, msi_name: &str) -> Result<String, String> {
+///
+/// `pub(crate)`：toolchain 模块的受管安装共用这条「官方清单取哈希」链 ——
+/// **信任锚只有一份**。形参名 `msi_name` 是历史沿革，语义就是「dist 目录里的
+/// 文件名」，zip / tar.gz 同样适用（清单格式对三者一致）。
+pub(crate) fn fetch_expected_sha256(dir: &Path, version: &str, msi_name: &str) -> Result<String, String> {
     if !detect::is_safe_node_version(version) {
         return Err(i18n::fmt("setup_verify_bad_version", &[&version]));
     }
@@ -5558,7 +5606,7 @@ fn fetch_expected_sha256(dir: &Path, version: &str, msi_name: &str) -> Result<St
 
     let mut curl_err = String::new();
     let mut ps_err = String::new();
-    let mut downloaded = try_download_curl(&url, &dest, &mut curl_err, None, &page);
+    let mut downloaded = try_download_curl(&url, &dest, &mut curl_err, None, &page, &[]);
     // 与发布页那条路同一道防线（原来只有发布页有，这条是复核指出的不对称）：
     // curl 报成功但落盘的是**没解开的 gzip** 就当失败，交给 PowerShell 兜底重取一次。
     // 校验清单是「必须读到内容」的关键路径，不该因为一次编码故障就直接把用户堵死在中止上。
@@ -5566,7 +5614,7 @@ fn fetch_expected_sha256(dir: &Path, version: &str, msi_name: &str) -> Result<St
         downloaded = false;
     }
     if !downloaded {
-        match try_download_powershell(&url, &dest, &page) {
+        match try_download_powershell(&url, &dest, &page, &[]) {
             Ok(()) => downloaded = true,
             Err(e) => ps_err = e,
         }
@@ -5607,7 +5655,8 @@ fn fetch_expected_sha256(dir: &Path, version: &str, msi_name: &str) -> Result<St
 }
 
 /// 读文件并算 SHA-256；先按 metadata 卡上限，避免异常大的文件把内存打满。
-fn sha256_hex_of(path: &Path, max_bytes: u64) -> Result<String, String> {
+/// `pub(crate)`：toolchain 模块校验下载物时复用同一份实现（手写 SHA-256 只有一份）。
+pub(crate) fn sha256_hex_of(path: &Path, max_bytes: u64) -> Result<String, String> {
     let len = std::fs::metadata(path)
         .map_err(|e| format!("{}: {}", path.display(), e))?
         .len();
@@ -5620,15 +5669,18 @@ fn sha256_hex_of(path: &Path, max_bytes: u64) -> Result<String, String> {
 
 /// 从官方 dist 的 SHASUMS256.txt 解析该 LTS 线最新补丁版本号（如 "22.23.2"）。
 /// 任何一步失败（无网络、镜像缺文件、格式意外）都返回 None，由调用方回退固定版本。
-fn resolve_latest_lts_version(dir: &Path, last_err: &mut String) -> Option<String> {
+///
+/// `pub(crate)`：toolchain 模块的受管 Node 安装用同一条「该 LTS 线最新补丁版」解析，
+/// 版本来源只有一份（不再各自读 dist 清单）。
+pub(crate) fn resolve_latest_lts_version(dir: &Path, last_err: &mut String) -> Option<String> {
     let url = detect::node_shasums_url();
     let dest = dir.join("SHASUMS256-latest.txt");
 
     let mut curl_err = String::new();
     let page = detect::NODE_DOWNLOAD_PAGE;
     let downloaded =
-        try_download_curl(&url, &dest, &mut curl_err, None, page)
-            || try_download_powershell(&url, &dest, page).is_ok();
+        try_download_curl(&url, &dest, &mut curl_err, None, page, &[])
+            || try_download_powershell(&url, &dest, page, &[]).is_ok();
     if !downloaded {
         *last_err = if curl_err.trim().is_empty() {
             i18n::t("setup_no_dl_tool").to_string()
@@ -5754,14 +5806,14 @@ fn install_node_verified(
     // 方式一：curl.exe（Windows 10 1803+ 自带）；失败则回退 PowerShell Invoke-WebRequest
     // curl 下载时实时回报进度（MB / 百分比）；PS 回退路径拿不到流式落盘，只有提示行
     let mut last_err = i18n::t("setup_no_dl_tool").to_string();
-    let via_curl = try_download_curl(&url, &dest, &mut last_err, Some(app), &page);
+    let via_curl = try_download_curl(&url, &dest, &mut last_err, Some(app), &page, &[]);
     if !via_curl {
         setup_progress(
             app,
             "download",
             &i18n::fmt("setup_curl_fallback", &[&last_err]),
         );
-        try_download_powershell(&url, &dest, &page)?;
+        try_download_powershell(&url, &dest, &page, &[])?;
     }
 
     // 体积只是一道粗筛（防下载被截断），真正的完整性判断在下面这次 SHA-256 比对。
@@ -5809,6 +5861,8 @@ fn install_node_verified(
     }
 
     // 运行官方 MSI：/passive 显示进度条但无需逐页点击；UAC 由 Windows 弹出（权限提升交给系统）
+    // TODO(toolchain): 切到 toolchain::spawn（官方 MSI 整机安装；受管 zip 安装走
+    // toolchain::managed，不解 MSI、不写注册表 —— 两条路语义不同，v1 各留各的）
     let mut cmd = Command::new("msiexec");
     cmd.arg("/i").arg(&dest).args(["/passive", "/norestart"]);
     if let Some(d) = install_dir {
@@ -5993,7 +6047,22 @@ fn is_python_download_url(url: &str) -> bool {
 
 /// 两个下载函数共用的来源守卫：Node 与 Python 各自的白名单前缀。
 fn is_allowed_download_url(url: &str) -> bool {
-    is_node_dist_url(url) || is_python_download_url(url)
+    is_allowed_download_url_for(url, &[])
+}
+
+/// 来源守卫的**参数化形态**。toolchain 模块共享同一条 curl / PowerShell 下载链时，
+/// 用它追加**自己的** HTTPS 白名单常量 —— 守卫本身、curl 安全参数（`--proto` /
+/// `--proto-redir` 强制 https）、PowerShell 编码命令只有这一份，各调用方的白名单
+/// 是显式参数而不是散落的副本（避免"复制一份下载器"导致的纪律漂移）。
+///
+/// 前缀必须以 `https://` 开头，否则在这里直接忽略 —— 防降级的第一道闸在白名单本身。
+fn is_allowed_download_url_for(url: &str, extra_prefixes: &[&str]) -> bool {
+    if is_node_dist_url(url) || is_python_download_url(url) {
+        return true;
+    }
+    extra_prefixes
+        .iter()
+        .any(|p| p.starts_with("https://") && url.starts_with(*p))
 }
 
 /// PowerShell 单引号字符串里，字面单引号要写成两个（`''`）。
@@ -6020,7 +6089,12 @@ pub(crate) fn encode_powershell_command(script: &str) -> String {
 /// curl 下载官方 Node.js 安装包：spawn 后轮询落盘文件大小，
 /// 通过 setup-status 事件实时回报「已下载字节 / 百分比」（约 0.4s 一次）。
 /// 返回 true 表示下载成功；失败原因写入 last_err。
-fn try_download_curl(
+///
+/// `extra_allowed`：调用方（toolchain 模块）追加的 HTTPS 白名单前缀。
+/// 本文件内部的调用一律传 `&[]`，行为与历史版本完全一致。curl 的安全参数
+/// （`--proto =https`、`--proto-redir =https`、`--compressed`、`-fL`）**不再复制**，
+/// 共享这一份 —— 这是"不复制安全参数"的落点。
+pub(crate) fn try_download_curl(
     url: &str,
     dest: &Path,
     last_err: &mut String,
@@ -6028,9 +6102,10 @@ fn try_download_curl(
     // 超时/失败文案里给用户看的「去哪儿手动下载」（Node → nodejs.org，Python → python.org）。
     // 两个下载来源共用本函数，所以这个页面只能由调用方给出，不能在这里写死。
     page: &str,
+    extra_allowed: &[&str],
 ) -> bool {
     // 来源守卫放最前面：不认识的地址，连探大小都不做
-    if !is_allowed_download_url(url) {
+    if !is_allowed_download_url_for(url, extra_allowed) {
         *last_err = i18n::fmt("setup_dl_bad_url", &[&url]);
         return false;
     }
@@ -6134,9 +6209,17 @@ fn try_download_curl(
 /// 路径是随机十六进制目录，所以不可注入，但安全性完全依赖上游白名单，属于「靠巧合」。
 /// 改成编码命令后，命令行上只剩一个不透明的 base64 串，引号 / `$` / `;` 的语义全部消失：
 /// 即便将来 URL 来源放宽（比如改成从 HTML 解析版本号），也不会变成命令注入。
-fn try_download_powershell(url: &str, dest: &Path, page: &str) -> Result<(), String> {
+///
+/// `extra_allowed`：与 [`try_download_curl`] 同一参数 —— toolchain 模块共享这条
+/// 回退链时追加自己的白名单。**编码命令、TLS12、来源守卫仍只有这一份**。
+pub(crate) fn try_download_powershell(
+    url: &str,
+    dest: &Path,
+    page: &str,
+    extra_allowed: &[&str],
+) -> Result<(), String> {
     // 与 curl 路径同一道来源守卫 —— 不能只有 curl 那条路受保护（M-4 第 3 点）
-    if !is_allowed_download_url(url) {
+    if !is_allowed_download_url_for(url, extra_allowed) {
         return Err(i18n::fmt("setup_dl_bad_url", &[&url]));
     }
     // 契约（M-4 第 2 点）：能走到这里的地址必须是「常量前缀 + 白名单版本号」拼出来的。
@@ -6145,7 +6228,8 @@ fn try_download_powershell(url: &str, dest: &Path, page: &str) -> Result<(), Str
         url.starts_with("https://nodejs.org/dist/v")
             || url.starts_with("https://nodejs.org/dist/latest-v")
             || url.starts_with("https://www.python.org/downloads/")
-            || url.starts_with("https://www.python.org/ftp/python/"),
+            || url.starts_with("https://www.python.org/ftp/python/")
+            || extra_allowed.iter().any(|p| url.starts_with(*p)),
         "PowerShell 下载路径收到了非预期的 URL 形状：{url}"
     );
 
@@ -6481,6 +6565,7 @@ pub async fn setup_install_dsh(app: AppHandle, dir: Option<String>) -> Result<()
         }
 
         let outcome: Result<i32, String> = (|| {
+            // TODO(toolchain): 切到 toolchain::spawn
             let mut cmd = command_for(&npm, &args)?;
             cmd.current_dir(&cwd);
             // 同上：koffi 等原生依赖的 prebuild 脚本用裸 `node`，PATH 必须包含 node 目录

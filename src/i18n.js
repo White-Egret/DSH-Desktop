@@ -526,6 +526,33 @@
     music_finish_cycle: '启动页已结束：内置曲将奏完当前乐句后自然收尾。',
     music_finish_track: '启动页已结束：自选曲将继续播完剩余约 {0} 秒后停止。',
     music_finish_track_unknown: '启动页已结束：自选曲将继续播完这一遍后停止。',
+    // ---- 工具链七项状态（toolchain::toolchain_status；向导 + 安装/卸载弹窗共用一节）----
+    // 行内容全部由 main.js 按后端报告动态渲染（状态徽标 / Broken 具体原因 / 指引链接），
+    // 这里只放节标题、说明与固定词。Broken 必须显示具体原因，不给笼统的"未检测到"。
+    tc_section_title: '工具链状态（受管 + 系统组件）',
+    tc_hint_html: 'Node / pnpm / DSH / Python 由本程序安装到自己的受管目录（<b>不写系统 PATH</b>，终端行为不变）；Rust / MSVC / WebView2 是系统共享组件，只检测、不代装、不卸载。',
+    tc_checking: '正在检测工具链…',
+    tc_fail: '工具链检测失败：{0}',
+    tc_src_managed: '受管',
+    tc_src_system: '复用系统',
+    tc_src_probe: '系统',
+    tc_src_missing: '未检测到',
+    tc_name_python: 'Python',
+    tc_name_rust: 'Rust（rustc / cargo）',
+    tc_name_msvc: 'MSVC Build Tools',
+    tc_name_webview2: 'WebView2 Runtime',
+    tc_node_min_line: '生效的 Node.js 下限：{0}（来源：{1}）',
+    tc_min_runtime_note: '运行时读自已安装的 DSH 包',
+    tc_btn_guide: '安装指引',
+    tc_refresh: '重新检测工具链',
+    tc_btn_install: '安装到受管目录',
+    tc_btn_switch_managed: '切换为受管副本',
+    tc_btn_uninstall: '卸载受管副本',
+    tc_installing: '正在安装 {0}…',
+    tc_install_done: '{0} 安装完成',
+    tc_install_fail: '{0} 安装失败：{1}',
+    tc_switch_done: 'DSH 已切换为受管副本',
+    tc_switch_fail: '切换失败：{0}',
   };
 
   const en = {
@@ -1034,6 +1061,34 @@
     music_finish_cycle: 'Startup page ended: the built-in tune finishes the current phrase, then winds down naturally.',
     music_finish_track: 'Startup page ended: the custom track keeps playing its remaining ~{0} s, then stops.',
     music_finish_track_unknown: 'Startup page ended: the custom track keeps playing to the end of this pass, then stops.',
+    // ---- Toolchain status (toolchain::toolchain_status; shared by the wizard and the manage modal) ----
+    // Rows are rendered dynamically by main.js from the backend report (source badge /
+    // concrete Broken reason / guide link); only section texts live here. A Broken item
+    // must show its concrete reason, never a generic "not found".
+    tc_section_title: 'Toolchain status (managed + system components)',
+    tc_hint_html: 'Node / pnpm / DSH / Python are installed by this app into its own managed directory (<b>the system PATH is never touched</b>; your terminal keeps working as before). Rust / MSVC / WebView2 are shared system components — detected only, never installed or uninstalled by this app.',
+    tc_checking: 'Detecting the toolchain…',
+    tc_fail: 'Toolchain detection failed: {0}',
+    tc_src_managed: 'Managed',
+    tc_src_system: 'Reused (system)',
+    tc_src_probe: 'System',
+    tc_src_missing: 'Not found',
+    tc_name_python: 'Python',
+    tc_name_rust: 'Rust (rustc / cargo)',
+    tc_name_msvc: 'MSVC Build Tools',
+    tc_name_webview2: 'WebView2 Runtime',
+    tc_node_min_line: 'Effective Node.js minimum: {0} (source: {1})',
+    tc_min_runtime_note: 'read at runtime from the installed DSH package',
+    tc_btn_guide: 'Install guide',
+    tc_refresh: 'Re-check toolchain',
+    tc_btn_install: 'Install into managed dir',
+    tc_btn_switch_managed: 'Switch to managed copy',
+    tc_btn_uninstall: 'Uninstall managed copy',
+    tc_installing: 'Installing {0}…',
+    tc_install_done: '{0} installed',
+    tc_install_fail: '{0} install failed: {1}',
+    tc_switch_done: 'DSH now starts from the managed copy',
+    tc_switch_fail: 'Switch failed: {0}',
   };
 
   const L = {

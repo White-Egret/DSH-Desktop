@@ -213,6 +213,23 @@ pub fn kb_phase(released: bool, registered: bool) -> KbPhase {
     }
 }
 
+/// 进门是否该**补释放** tgz（`NeedsRelease` 态的自愈判据）。
+///
+/// 真机事故（2026-11，用户卸载 Desktop 再装新包）：卸载会删掉 `kb-bundle/`，
+/// 而 profile 在 `<DSH_HOME>/profiles/<p>/`（应用数据目录之外）**毫发无损**，
+/// 于是重装后落到 `released=false, registered=true` —— 正是 `NeedsRelease`。
+/// 文案承诺过「下次进入 DSH 会自动补释放」，但旧实现把 `release_bundles` 放在
+/// `todo.is_empty() { return None }` 之后：这个状态下两个包都已注册、pending 也空，
+/// `todo` 必然为空 → 早退 → 补释放永远跑不到 → 状态永久卡在「安装很蓝、文案
+/// 一直说会自动补」。
+///
+/// 抽成纯函数是为了让这条判据可单测（`activate_pending` 需要 `AppHandle`，
+/// 而真机回归不能靠手点）。
+pub fn needs_rerelease(released: bool, any_registered: bool, any_pending: bool) -> bool {
+    // 只有「该来的 tgz 不在」才补；两个事实都空说明是全新安装，交给 kb_install
+    !released && (any_registered || any_pending)
+}
+
 /// 单个包的短语（其余组合时逐包点名用）。
 ///
 /// Active 分支的诚实口径（照 office.rs:370-378）：pending 还挂着这个包时，
@@ -701,6 +718,36 @@ pub fn activate_pending(app: &AppHandle) -> Option<String> {
             .unwrap_or(false)
     };
 
+    // ── ① 先补释放（必须在下面的 todo 早退之前，见 needs_rerelease 的注释）──
+    // 真机复现路径：卸载 Desktop 删掉 kb-bundle → 重装后 profile 里注册还在 →
+    // released=false, registered=true → todo 为空 → 旧代码在这里 return None，
+    // 补释放永远跑不到。放到前面之后，这个状态进门即修复：tgz 回来，phase 回到
+    // Active，按钮随之变成「卸载…」。
+    let any_registered = KB_PACKAGES.iter().any(|(pkg, _)| registered_of(pkg));
+    let any_pending = KB_PACKAGES
+        .iter()
+        .any(|(pkg, _)| pending.iter().any(|q| q.as_str() == *pkg));
+    let mut release_line: Option<String> = None;
+    let released = if needs_rerelease(released, any_registered, any_pending) {
+        match release_bundles(&bun) {
+            Ok(()) => {
+                let line = format!(
+                    "NeedsRelease 自愈：注册还在、释放目录被清过，已补释放两个 tgz → {}",
+                    bun.to_string_lossy()
+                );
+                log_line(app, &line);
+                release_line = Some(line.clone());
+                true
+            }
+            Err(e) => {
+                log_line(app, &format!("重新释放 tgz 失败：{e}"));
+                return Some(e);
+            }
+        }
+    } else {
+        released
+    };
+
     // 自愈进门（方案 8.7 的第三道防线）：pending 标记丢了也要补注册 ——
     // 判据是「tgz 已释放、profile 里却没有这个包」。
     let todo: Vec<&'static str> = KB_PACKAGES
@@ -717,7 +764,9 @@ pub fn activate_pending(app: &AppHandle) -> Option<String> {
             log_line(app, &format!("两个包均已在 profile 里，清除残留 pending：{pending:?}"));
             clear_pending(app);
         }
-        return None;
+        // 只补释放、不需要重新注册时也要留下一行可观测的结论（否则「进门到底
+        // 做了什么」又变回查不动 —— 这正是当初加日志锚点的原因）。
+        return release_line;
     }
     // 激活链的可观测性锚点（真机事故：激活线程静默死亡、零日志，事后无从排查）。
     // ⚠ 格式串里不能混用「具名内联参数」与「位置参数」（rustc 会数错参数个数），
@@ -736,13 +785,9 @@ pub fn activate_pending(app: &AppHandle) -> Option<String> {
         ),
     );
 
-    // pending 在但 tgz 被清过（用户动过应用数据目录）：重新释放，别让标记永远悬空
-    if !released {
-        if let Err(e) = release_bundles(&bun) {
-            log_line(app, &format!("重新释放 tgz 失败：{e}"));
-            return Some(e);
-        }
-    }
+    // （补释放已前移到 todo 判定之前 —— 见上面 ① 那段与 needs_rerelease。
+    //   留在这里的话只有「todo 非空」时才跑得到，NeedsRelease 态永远漏掉。）
+
     let profile = match profile_hint {
         Some(p) => p,
         None => {
@@ -792,6 +837,29 @@ mod tests {
         assert_eq!(kb_phase(false, true), NeedsRelease);
         assert_eq!(kb_phase(true, false), PendingActivate);
         assert_eq!(kb_phase(true, true), Active);
+    }
+
+    /// 真机回归（2026-11 用户卸载 Desktop 再装新包）：`NeedsRelease` 态必须补释放。
+    ///
+    /// 旧实现把 `release_bundles` 放在 `todo.is_empty()` 早退之后，而这个状态下
+    /// （两个包都已注册、pending 为空）`todo` 必然为空 —— 补释放永远跑不到，
+    /// 按钮卡在「安装…」而文案一直承诺「下次进入 DSH 会自动补释放」。
+    /// 这条用例钉住判据本身，防止有人再把顺序调回去。
+    #[test]
+    fn needs_rerelease_covers_the_registered_but_cleared_case() {
+        // 真机现场：卸载删了 kb-bundle，profile/node_modules 里两个包都还在
+        assert!(
+            needs_rerelease(false, true, false),
+            "注册还在、tgz 被清 = NeedsRelease，必须补释放（否则按钮永不翻转）"
+        );
+        // pending 挂着但 tgz 也没了：同样要补（原实现覆盖到的唯一情形）
+        assert!(needs_rerelease(false, false, true));
+        assert!(needs_rerelease(false, true, true));
+        // 已经释放过：不再重复写盘
+        assert!(!needs_rerelease(true, true, false));
+        assert!(!needs_rerelease(true, false, true));
+        // 全新安装（什么痕迹都没有）：交给 kb_install，进门不擅自释放
+        assert!(!needs_rerelease(false, false, false));
     }
 
     #[test]

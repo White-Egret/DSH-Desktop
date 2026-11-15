@@ -531,7 +531,7 @@
     // 这里只放节标题、说明与固定词。Broken 必须显示具体原因，不给笼统的"未检测到"。
     tc_section_title: '工具链状态（受管 + 系统组件）',
     tc_wiz_title: 'WebView2 运行时（DSH 页面渲染依赖）',
-    tc_manage_title: '系统组件状态（Rust / MSVC / WebView2）',
+    tc_manage_title: '系统组件状态（WebView2 / Rust / MSVC）',
     tc_hint_html: 'Node / pnpm / DSH / Python 由本程序安装到自己的受管目录（<b>不写系统 PATH</b>，终端行为不变）；Rust / MSVC / WebView2 是系统共享组件，只检测、不代装、不卸载。',
     tc_hint_wiz_html: 'DSH 的页面靠 WebView2 渲染；缺失时请按右侧「安装指引」装一次。Python / Rust / MSVC 对运行 DSH 不是必需的，安装与检测见「安装/卸载」面板。',
     tc_checking: '正在检测工具链…',
@@ -1071,7 +1071,7 @@
     // must show its concrete reason, never a generic "not found".
     tc_section_title: 'Toolchain status (managed + system components)',
     tc_wiz_title: 'WebView2 Runtime (required to render the DSH page)',
-    tc_manage_title: 'System components (Rust / MSVC / WebView2)',
+    tc_manage_title: 'System components (WebView2 / Rust / MSVC)',
     tc_hint_html: 'Node / pnpm / DSH / Python are installed by this app into its own managed directory (<b>the system PATH is never touched</b>; your terminal keeps working as before). Rust / MSVC / WebView2 are shared system components — detected only, never installed or uninstalled by this app.',
     tc_hint_wiz_html: 'DSH renders its page with WebView2; if it is missing, use "Install guide" on the right. Python / Rust / MSVC are not required to run DSH — see the Install/Uninstall panel for those.',
     tc_checking: 'Detecting the toolchain…',

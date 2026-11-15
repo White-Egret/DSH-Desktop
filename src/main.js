@@ -1850,7 +1850,8 @@ function tcRowHtml(item) {
 // 板块的 #tc-node-min（见 renderNodeMinLine）——那个下限是运行时从已装的 DSH 包里读出来的，
 // 与底部那行版本号放一起才讲得通。
 const TC_WIZ_SHOWN = ['webview2'];
-const TC_MANAGE_SHOWN = ['rust', 'msvc', 'webview2'];
+// 管理面板的行序与标题一致：WebView2（运行 DSH 的前提）在前，Rust / MSVC（构建依赖）在后
+const TC_MANAGE_SHOWN = ['webview2', 'rust', 'msvc'];
 
 /// 把「生效的 Node.js 下限 + 来源」写进 Node 板块。没有报告（还没检测/检测失败）时隐藏。
 ///

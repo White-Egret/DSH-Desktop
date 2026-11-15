@@ -115,3 +115,54 @@ tgz 是 `include_bytes!` 在构建期嵌进二进制的，文件名带版本号 
 **memory2skill 的 `npm run check` 有一处既有漂移**（与本次无关、未修）：`scripts/host-check.mjs:70` 期望 **8** 个工具，但源码在 0.4.8 打包之后新增了 `memory2skill_recall`（现注册 **9** 个），host-check 因此报「应注册 8 个工具，实际 9」。0.4.8 的成品包里确实只有 8 个 —— 漂移在仓库里早于本轮。本轮按约定跳过该子步骤（typecheck / build / test 145 例 / verify-skills 全绿）；下次动插件仓库时把 host-check 的期望改成 9 即可（`scripts/` 不进 tgz，改它不影响成品）。
 
 **推送提醒**：拷贝 DSH-Desktop 到本地仓库后，`resources/kb-bundle/` 的两个**新** tgz（`dsh-kb-0.4.2.tgz`、`dsh-memory2skill-0.4.9.tgz`）必须入库 —— `.gitignore` 的例外已放行，普通 `git add .` 即可；旧 tgz（0.4.1 / 0.4.6）已删，别再把它们加回来。`src-tauri/.cargo/` 仍被忽略（里面是本机绝对路径的 target-dir 配置，别提交）。
+
+---
+
+## 2026-11-15 第三轮：NeedsRelease 态的自愈被早退跳过（真机缺陷）
+
+**现象**（用户真机，换 Desktop 新包后）：安装/卸载面板里两个插件都显示
+「已注册进 profile，但随程序分发的安装包被清掉了，下次进入 DSH 会自动补释放」，
+但按钮一直是蓝色的「安装记忆与知识库…」，从不变成「卸载…」；左栏插件表里两个插件都在。
+
+**成因链**（逐环实测，不是推测）：
+
+1. 用户习惯「卸载旧版 → 装新版」。卸载会删 `%APPDATA%\com.dsh.desktop\kb-bundle\`（本块自己的数据目录），
+   但 **profile 在 `<DSH_HOME>/profiles/web/`（应用数据目录之外），毫发无损** ——
+   所以重装后 `profiles/web/node_modules/dsh-kb{,-memory2skill}` 两个包实体仍在（插件本身可用）。
+2. 于是相位落到 `NeedsRelease`：`bundle_released=false`（tgz 没了）、`bundle_registered_named=true`（node_modules 里有）。
+3. 这个相位的文案承诺「下次进入 DSH 会自动补释放」，`KbPhase::NeedsRelease` 的注释也写着
+   「activate_pending 会补释放」——**但代码做不到**：`activate_pending` 里
+   `release_bundles` 原本放在 `todo.is_empty() { return None }` **之后**，
+   而 NeedsRelease 态下两个包都已注册、`pending` 也是空，`todo` 必然为空 → 早退 → 补释放永远跑不到。
+   即「死代码被放在了它唯一想处理的场景之后」。
+4. 后果不只是按钮难看：profile 的 `package.json` 里两条依赖仍是
+   `file:…\kb-bundle\dsh-kb-0.4.2.tgz` / `…dsh-memory2skill-0.4.9.tgz`，
+   **tgz 缺失 = 悬空的 `file:` 依赖** —— 之后任何一次 `pnpm install`（比如在插件页装别的插件）都会因找不到 tarball 而失败。
+
+**改法**（`src-tauri/src/kb.rs`）：
+
+- 新增纯函数 `needs_rerelease(released, any_registered, any_pending) -> bool`：
+  `!released && (any_registered || any_pending)`。抽成纯函数是为让判据可单测
+  （`activate_pending` 要 `AppHandle`，真机回归不能靠手点）。
+- `activate_pending` 里把补释放**前移到 `todo` 判定之前**，补完再把 `released`
+  当 `true` 参与后续 `todo` 计算；只补释放、不需要重新注册时也返回那行日志
+  （否则「进门做了什么」又变回查不动）。
+- 删掉原位置那段已被取代的 `if !released { release_bundles }`（此时必为 true，留着是死代码）。
+- 新单测 `needs_rerelease_covers_the_registered_but_cleared_case`：钉住六种组合，
+  其中 `(released=false, registered=true, pending=false)` 就是本次真机现场。
+
+**验证**：`cargo check --lib` 通过（6 条既有 warning 与本次无关）；
+`cargo test --lib kb::` **13 passed / 0 failed**（含新用例）。
+注：`bundle_dir_and_release_are_idempotent` / `locked_dir_stops_self_heal_by_emptying_it` /
+`stale_cleanup_keeps_non_empty_dir` 三条用 `std::env::temp_dir()`，在受限沙箱里
+被注入的不可写临时目录挡住 → 把 `TMP` 指到可写路径后同样全绿，与本次改动无关。
+
+**已做的现场修复**（不依赖重新构建）：把 `resources/kb-bundle/` 的两个 tgz 拷回
+`%APPDATA%\com.dsh.desktop\kb-bundle\`。拷前核过哈希 —— 两个文件的
+`sha512` 与 `profiles/web/pnpm-lock.yaml` 里的 `integrity` **逐字节一致**
+（`dsh-kb-0.4.2` = `u9xBnuYL…LAAbQ==`，`dsh-memory2skill-0.4.9` = `gIDToYIP…X2FGg==`），
+所以这不是「拿一个相近版本凑数」，而是恢复 pnpm 本来就在等的同一份字节。
+恢复后判据 `released=true, registered=true` → 相位 `Active` → 面板重开即显示「卸载…」。
+
+**还没做**：重新构建 Desktop 并打包，让上面那条代码修复真正随程序分发。
+在装上新构建之前，**再走一次「卸载 → 装新版」还会复现**（只是这次可以用同样的两个 tgz 手工补回）。

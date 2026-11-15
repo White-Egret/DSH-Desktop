@@ -278,33 +278,6 @@
         <button id="btn-close-manage" class="btn small" data-i18n="btn_close_log">关闭</button>
       </div>
       <div class="form">
-        <!-- 「自动检测」从首选项顶部搬来（用户要求 2026-11-07）：它检测的是本机的
-             Node / npm / DSH 路径，与这里的安装/卸载是同一类「本机环境」操作。
-             点击后检测结果（含未找到的项）显示在正下方的 autodetect-result 行，
-             而不是只进日志 —— 路径本来就是要给用户看的。 -->
-        <div class="row left">
-          <button id="btn-autodetect" class="btn small" data-i18n="btn_autodetect">自动检测 Node / npm / DSH 路径</button>
-        </div>
-        <!-- 「自动检测」结果行是动态文案（main.js 拼装），刻意不挂 data-i18n；
-             切语言后的重绘见 applyLanguage 的 autodetectLast 分支。 -->
-        <div class="hint hidden" id="autodetect-result"></div>
-        <!-- 系统组件状态：Python 有自己的「Python 环境」板块，Node/pnpm/DSH 有底部那块
-             「Node.js，pnpm与DSH」板块，所以这里**只列没有别处显示的**三样系统组件
-             （Rust / MSVC / WebView2），避免同一页里同一件事显示两遍。
-             末尾那行「生效的 Node.js 下限」保留：它是运行时从已装的 DSH 包里读出来的，
-             底部板块只显示版本号，别的地方看不到「这条下限是谁要求的」（方案 §1.1b）。
-             动态行由 main.js 渲染（按 id 过滤），不挂 data-i18n（与 office / kb 两块同一纪律）。 -->
-        <div class="field tc-block">
-          <span class="py-head" data-i18n="tc_manage_title">系统组件状态（Rust / MSVC / WebView2）</span>
-          <table class="check-table">
-            <tbody id="tc-body-manage">
-              <tr><td data-i18n="tc_checking">正在检测…</td></tr>
-            </tbody>
-          </table>
-          <div class="row gap left">
-            <button id="btn-tc-refresh-manage" class="btn small" type="button" data-i18n="tc_refresh">重新检测</button>
-          </div>
-        </div>
         <div class="field python-block">
           <span class="py-head" data-i18n="lbl_python_env">Python 环境（办公文档读写 / 数据分析）</span>
           <div id="python-status" class="py-status" data-i18n="py_checking">正在检测本机 Python…</div>
@@ -403,6 +376,23 @@
             <pre id="kb-log" class="update-progress-log hidden"></pre>
           </div>
         </div>
+        <!-- 系统组件状态：Python 有自己的「Python 环境」板块，Node/pnpm/DSH 有下面那块
+             「Node.js，pnpm与DSH」板块，所以这里**只列没有别处显示的**三样系统组件，
+             行序 WebView2 → Rust → MSVC（与标题一致；WebView2 是运行 DSH 的前提，
+             另两样是构建依赖）。放在 Node 板块**上面**：两者都是「本机环境」信息，
+             挨在一起读起来顺。动态行由 main.js 渲染（按 id 过滤、按 TC_MANAGE_SHOWN
+             定序），不挂 data-i18n（与 office / kb 两块同一纪律）。 -->
+        <div class="field tc-block">
+          <span class="py-head" data-i18n="tc_manage_title">系统组件状态（WebView2 / Rust / MSVC）</span>
+          <table class="check-table">
+            <tbody id="tc-body-manage">
+              <tr><td data-i18n="tc_checking">正在检测…</td></tr>
+            </tbody>
+          </table>
+          <div class="row gap left">
+            <button id="btn-tc-refresh-manage" class="btn small" type="button" data-i18n="tc_refresh">重新检测</button>
+          </div>
+        </div>
         <div class="field uninstall-block">
           <span data-i18n="lbl_node_pnpm_dsh">Node.js，pnpm与DSH</span>
           <div id="toolchain-versions" class="toolchain-versions">正在读取版本号…</div>
@@ -411,6 +401,17 @@
                「上游此刻要求多少、是谁要求的」。上面那行版本号只讲各装了哪个版本。
                内容动态拼装（main.js 的 renderNodeMinLine），刻意不挂 data-i18n。 -->
           <div id="tc-node-min" class="hint hidden"></div>
+          <!-- 「自动检测」按钮 + 结果行（用户要求 2026-11-15 挪进本板块）：它检测的正是
+               本机的 Node / npm / DSH 路径，与这块是同一类「本机环境」操作 —— 之前它在
+               弹窗顶部（2026-11-07 从首选项搬进弹窗时的落点），悬在那里没有着落。
+               点击后检测结果（含未找到的项）显示在正下方的 autodetect-result 行，
+               而不是只进日志 —— 路径本来就是要给用户看的。 -->
+          <div class="row left">
+            <button id="btn-autodetect" class="btn small" data-i18n="btn_autodetect">自动检测 Node / npm / DSH 路径</button>
+          </div>
+          <!-- 「自动检测」结果行是动态文案（main.js 拼装），刻意不挂 data-i18n；
+               切语言后的重绘见 applyLanguage 的 autodetectLast 分支。 -->
+          <div class="hint hidden" id="autodetect-result"></div>
           <!-- 一键安装行：只显示「没装」的那几个（与首装向导同一套后端任务，见
                main.js 的 runManageInstall）。pnpm / DSH 的安装都借道 npm，npm 不在时
                点了也必然失败，所以那两颗先不显示 —— 装好 Node 重检后自然出现。

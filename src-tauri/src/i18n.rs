@@ -710,6 +710,9 @@ pub fn t(key: &str) -> &'static str {
         // 精确版本的下限校验（resolve::check_min）：拒绝时要能回答"谁要求的、多少"
         "tool_min_rejected" => if en { "Rejected: {0} version {1} is below the required minimum {2}." } else { "已拒绝：{0} 版本 {1} 低于要求的下限 {2}。" },
         "tool_probe_too_old" => if en { "Version {0} is below the configured minimum." } else { "版本 {0} 低于配置要求的下限。" },
+        // 系统里装了某个受管工具、但这次不采用它时的**如实说明**（不再谎报"未检测到"）
+        "tool_sys_reuse_disabled" => if en { "Installed on this system ({0}), but \"reuse system tools\" is turned off — install it into the managed directory to use it from this app." } else { "本机已安装（{0}），但「复用系统工具」是关闭的 —— 要由本程序使用，请安装到受管目录。" },
+        "tool_sys_version_mismatch" => if en { "Installed on this system ({0}), but the configured exact version is {1} — install the managed copy to match it." } else { "本机已安装（{0}），但配置指定的精确版本是 {1} —— 需要安装受管副本以匹配。" },
         // spawn 改造（方案 §4.2）：每次 spawn 把实际 PATH 写进 desktop.log，便于诊断 PATH 构造问题
         "log_spawn_path" => if en { "[launcher] spawn PATH: {0}" } else { "[launcher] spawn PATH: {0}" },
         // update_dsh 完成后的约束重读（方案 §1.1b 最关键触发点）

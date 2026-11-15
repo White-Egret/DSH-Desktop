@@ -530,8 +530,12 @@ def convert_fast_anydoc_first(src: Path) -> "tuple[str, str]":
         "（其解析器拿不到文本）时是**降级信号**——自动转交 structural/accuracy，不报错；"
         "anydoc 已知会静默丢 LaTeX 花括号，故 PDF 另有花括号保真抽检：文本层有花括号"
         "而 anydoc 输出丢了一半以上 → 自动回退 markitdown 并在 note 说明。"
-        "**含表格或复杂版面的 PDF、扫描件 PDF、以及独立图片** 走云端版面模型 OXR"
+        "**含表格或复杂版面的 PDF、以及独立图片** 走云端版面模型 OXR"
         "（会把文件上传到 SoMark 免费服务，单次 ≤10MB/≤20 页，无 key、免费）；"
+        "**纯扫描 PDF（无文本层）不再直接送 OXR**：auto 会渲染**一页样张**交给你做"
+        "**视觉分诊**（kind=scanned-triage）——看样张判断是否早期印本（Fraktur/长 s/连字/"
+        "花体首字母/macron 缩写/古版式），是 → 用 prefer=\"accuracy\" 重调（全页渲染+逐字"
+        "转写，规则随分诊 note 交付）；否（现代扫描）→ 用 prefer=\"layout\" 重调走 OXR。"
         "**当版面模型不够好时（多音标小语种、手写、极小字号、需要逐字准确引用），"
         "传 prefer=\"accuracy\"：工具会把页面渲染成 PNG 并把绝对路径交给你，"
         "由你**自己用 read_image 读图转写**——这条最准，因为不经任何 OCR，"
@@ -778,7 +782,15 @@ def markitdown_capabilities() -> dict:
             },
             "router": {
                 "fast": "本地引擎：DOCX/CSV/干净文本层 PDF/LaTeX 由 anydoc 优先（Rust 本地、快 38–52 倍），HTML/PPTX 由 markitdown，XLSX 由 openpyxl（不联网）",
-                "structural": "云端版面模型 OXR：有表格/复杂版面/扫描件的 PDF，以及独立图片",
+                "structural": "云端版面模型 OXR：有表格/复杂版面的 PDF、以及独立图片（纯扫描件先分诊，见 scanned_triage）",
+                "scanned_triage": (
+                    "纯扫描 PDF（无文本层）auto 不再直接送 OXR：先渲染一页样张（300 DPI）"
+                    "交 Agent 视觉分诊（kind=scanned-triage，note 含早期印本特征清单 + 完整"
+                    "转写规则）。Agent 判定：早期印本 → prefer=\"accuracy\" 重调（全页渲染+逐字"
+                    "转写）；现代扫描 → prefer=\"layout\" 重调走 OXR。依据：OXR 对早期印本"
+                    "实证失效（old-publication-1-purescan.pdf：长 s 全认成 f），纯扫描没有"
+                    "文本层可供 early_print 信号判断，只能靠 Agent 看样张。"
+                ),
                 "accuracy": "渲染页面图交回 Agent 自己读：多音标小语种、手写、需逐字准确（仅图片与扫描件）",
                 "early_print": (
                     "早期印本（16–18 世纪）：文本层含长 s（ſ，U+017F）或早期连字码点"

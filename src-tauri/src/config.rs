@@ -193,8 +193,8 @@ impl Default for Config {
             port: 3080,
             extra_args: String::new(),
             package_name: "@deepseek-ai/dsh".to_string(),
-            // DSH 冷启动（尤其重启电脑后首次）可能需要 1~2 分钟以上，默认给足 5 分钟
-            health_timeout_secs: 300,
+            // DSH 冷启动（尤其重启电脑后首次）可能需要 1~2 分钟以上，默认给足 6 分钟
+            health_timeout_secs: 360,
             // 默认点 X 隐藏到托盘（后台继续运行）；可在设置页改为退出程序
             close_action: "tray".to_string(),
             // 默认中文界面

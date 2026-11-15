@@ -341,8 +341,18 @@ pub struct Resolved {
     pub pnpm_min: MinBound,
 }
 
-/// 复用 / 受管 / 缺失的三方判定 —— **纯函数内核**（机器探测结果作为参数传入，
+/// 复用 / 受管 / 缺失的判定 —— **纯函数内核**（机器探测结果作为参数传入，
 /// 单测用临时数据构造，不依赖本机真实环境）。
+///
+/// 复用的语义（方案 §2.3 + §10 的验收判据）：`use_system_tools = true` 时，
+/// **只要系统里有一个可用版本就复用它**；只有两种情况不复用：
+/// - `toolchain.json` 显式指定了精确版本，而系统版本与之不同（那说明确实要装受管版）；
+/// - 系统版本过不了下限校验。
+///
+/// ⚠ 这里曾经写成「必须配置了精确版本才复用」，结果是首次运行（`toolchain.json`
+/// 还不存在 → `managed` 为空）时**所有已装的系统工具都被报成"未检测到"**，
+/// 而同一台机器上 DSH 正因为那个 Node 才能启动、Python 板块也说"已安装"——
+/// 三个地方三个结论。配置版本是"我要钉哪个版本"，不是"我允不允许复用系统装的"。
 pub fn decide_tool(
     id: ToolId,
     use_system_tools: bool,
@@ -351,12 +361,18 @@ pub fn decide_tool(
     managed_found: Option<&Installed>,
     min: Option<&str>,
 ) -> ResolvedTool {
-    // ① 复用系统工具：配置了精确版本、系统里真有、版本精确一致，再过下限校验
-    //    （方案 §2.3：不能因为"是系统自带的"就跳过校验）
-    if use_system_tools {
-        let cfg_v = configured.map(str::trim).filter(|s| !s.is_empty());
-        if let (Some(cfg_v), Some(sys)) = (cfg_v, system_found) {
-            if !sys.version.trim().is_empty() && versions_match(cfg_v, &sys.version) {
+    let cfg_v = configured.map(str::trim).filter(|s| !s.is_empty());
+
+    // ① 复用系统工具（方案 §2.3：不能因为"是系统自带的"就跳过下限校验）
+    if let Some(sys) = system_found {
+        if use_system_tools {
+            // 是否"就是用户要的那个"：没指定版本 = 系统有什么用什么；
+            // 指定了版本 = 必须精确相等（否则该装受管版）。
+            let is_wanted = match cfg_v {
+                None => true,
+                Some(want) => !sys.version.trim().is_empty() && versions_match(want, &sys.version),
+            };
+            if is_wanted {
                 return match check_min(id, &sys.version, min) {
                     Ok(()) => ResolvedTool {
                         id,
@@ -403,12 +419,33 @@ pub fn decide_tool(
             },
         };
     }
-    // ③ 都没有（系统里有但与配置不一致 = 需要装受管版本，不算错误）
+    // ③ 系统里有、但这次不采用它 —— 必须如实说明**为什么**，不能谎报"未检测到"
+    if let Some(sys) = system_found {
+        let why = if !use_system_tools {
+            crate::i18n::fmt("tool_sys_reuse_disabled", &[&sys.version])
+        } else {
+            let want = cfg_v.unwrap_or("");
+            crate::i18n::fmt(
+                "tool_sys_version_mismatch",
+                &[&sys.version, &want],
+            )
+        };
+        return ResolvedTool {
+            id,
+            scope: Scope::Managed,
+            source: ToolSource::System(sys.path.clone()),
+            version: Some(sys.version.clone()),
+            usable: false,
+            detail: Some(why),
+            path_prefix: None,
+        };
+    }
+    // ④ 真的哪儿都没有
     ResolvedTool {
         id,
         scope: Scope::Managed,
         source: ToolSource::Missing,
-        version: system_found.map(|s| s.version.clone()).filter(|v| !v.trim().is_empty()),
+        version: None,
         usable: false,
         detail: None,
         path_prefix: None,
@@ -804,9 +841,45 @@ mod tests {
             Some(min),
         );
         assert!(matches!(t3.source, ToolSource::Managed(_)));
-        // 没配置精确版本时不复用（可复现要求：配置说了才算）
+        // **没配置精确版本时照样复用系统里的那份**（这正是首次运行的现实：
+// `toolchain.json` 还不存在，而机器上早就装好 Node/DSH 了）。
+// 曾经的实现要求"必须配置了版本才复用"，结果是整台机器上已装的工具全被
+// 报成"未检测到"——而 DSH 正是靠那个 Node 才启动得起来。
         let t4 = decide_tool(ToolId::Node, true, None, Some(&sys_inst("24.22.0")), None, Some(min));
-        assert!(matches!(t4.source, ToolSource::Missing));
+        assert!(
+            matches!(t4.source, ToolSource::System(_)),
+            "未配置版本时应当复用系统安装，而不是报缺失"
+        );
+        assert!(t4.usable, "系统版本达标就应标记可用");
+        assert_eq!(t4.version.as_deref(), Some("24.22.0"));
+
+        // use_system_tools=false 时才不复用：但要**如实说明系统里已经装了**，
+        // 不能谎报"未检测到"
+        let t5 = decide_tool(ToolId::Node, false, None, Some(&sys_inst("24.22.0")), None, Some(min));
+        assert!(matches!(t5.source, ToolSource::System(_)), "系统里确实有，来源就应显示系统");
+        assert!(!t5.usable, "关闭复用时不算可用");
+        let why = t5.detail.unwrap_or_default();
+        assert!(why.contains("24.22.0"), "说明里应带上系统里那个版本：{why}");
+        assert!(why.contains("复用"), "说明里应讲清是「复用系统工具」被关了：{why}");
+
+        // 配置了版本而系统版本不符：同样如实说明"为什么不用它"
+        let t6 = decide_tool(
+            ToolId::Node,
+            true,
+            Some("24.22.0"),
+            Some(&sys_inst("22.19.0")),
+            None,
+            Some(min),
+        );
+        assert!(matches!(t6.source, ToolSource::System(_)));
+        assert!(!t6.usable);
+        let why6 = t6.detail.unwrap_or_default();
+        assert!(why6.contains("24.22.0") && why6.contains("22.19.0"), "两个版本都要出现：{why6}");
+
+        // 真的什么都没有：才是 Missing（且不该凭空造一个版本号出来）
+        let t7 = decide_tool(ToolId::Node, true, None, None, None, Some(min));
+        assert!(matches!(t7.source, ToolSource::Missing));
+        assert_eq!(t7.version, None, "缺失时不应显示任何版本号");
     }
 
     /// 判据 (c) 的内核：某工具缺失不影响其他 —— decide_tool 对 Missing 输入

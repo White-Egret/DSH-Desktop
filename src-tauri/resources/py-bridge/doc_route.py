@@ -138,8 +138,18 @@ _EARLY_PRINT_RULES_NOTE = (
     "Ariſtoteli=Aristoteli）。注意 ſ 与 f 字形相近：ſ 无完整横杠。圆体 s 仍作 s。\n"
     "2. 连字：æ/œ 保留或展开为 ae/oe（注明约定）；ﬆ→st、ﬀ→ff、ﬁ→fi、ﬂ→fl、"
     "ﬃ→ffi、ﬄ→ffl。\n"
-    "3. 抄本/早期缩写按规则展开并标注：ū=um、ō=on、q;=que、上标字母"
-    "（如 cōuenit=conuenit、Categorematū=Categorematum）；不确定的缩写标 [?]，不要臆造。\n"
+    "3. 抄本/早期缩写：先按下方对照表展开，并在展开处保留原缩写标注；表外或歧义的标 [?]，不要臆造。\n"
+    "   常见拉丁缩写对照（多为省略 m/n 或固定词，须依上下文判断）：\n"
+    "   · 元音上的横杠(macron)=省略的 m/n：ā=am/an、ē=em/en、ī=im/in、ō=om/on、ū=um/un"
+    "（cōuenit=conuenit、Categorematū=Categorematum、eō=eum）。\n"
+    "   · q;=que/quam/qui（依上下文：omniſq;=omnisque、atq;=atque、q; omnes=quam omnes、"
+    "q; in tria=qui in tria）、q̄=quam、qd=quid/quod、qn=quoniam；p̄=per/par/por、p+上标a=pra、ꝓ=pro。\n"
+    "   · ⁊(Tironian et)=et、&=et（ampersand 本是 et 连字）、÷=est；9 形符=con/com（9tra=contra）；ꝛ(圆 r)=r。\n"
+    "   · 上标元音常表 -m/-n 或 -nt/-ntur 等词尾；n̄=non、s̄=sed/sunt、m̄=men。\n"
+    "   · 圣名缩写：dñs=dominus、dñi=domini、xps=Christus、xpi=Christi、ihs=Jesus。\n"
+    "   · 常见词缩写：&c.=et cetera、ſ.=sc./scilicet、qbus=quibus、aliqs=aliquis。\n"
+    "   注意：许多缩写依上下文有多解（如 p̄ 可 per/par/por、q; 可 que/quam/qui），不确定就标 [?]，"
+    "宁可少展开也不展开错。OCR 文本层常把缩写符号认错（q;→g、q̄→ĝ、macron→ü/ű/ă/ñ），务必以原图字形为准，不要照抄文本层。\n"
     "4. 多音标希腊文：保留送气符/重音/下标 iota（ᾳ ῃ ῳ），不要剥成单调希腊文。\n"
     "5. 【双栏语言-栏位对应：因书而异，逐页按图判断】不同书籍编排不同："
     "有的全书固定（如希腊左/拉丁右），有的相邻页交替，有的另有编排。"
@@ -150,6 +160,38 @@ _EARLY_PRINT_RULES_NOTE = (
     "7. 旁注（marginalia）与正文分离，单独标出；页尾 catchword（接排词）与签名标记"
     "（a/b/数字）注明但不混入正文；脚注上标序号保留。\n"
     "8. 通顺≠正确：以原图字形为准，专名/译名不按常识改动；逐字核对长 s/连字/缩写/数字。"
+)
+
+# —— 纯扫描件的视觉分诊（2026-11-14 第四步，方案 A）——
+#
+# 缺口：early_print 依赖文本层字符，**纯扫描**（整页是图、avg_chars=0）没有字符
+# 可查 → 旧路由落「structural/scanned → OXR」。而 OXR 对早期印本实证失效
+# （old-publication-1-purescan.pdf 一手实测：`Minis ars omnifōp do'otina`、
+# `fit vt multi fint`——读着像拉丁文，长 s 全认成 f，「通顺≠正确」的典型）。
+#
+# 架构约束决定方案形态：decide_route 是纯函数、不做视觉；视觉是 Agent 的事。
+# 所以扫描件在送 OXR 之前先渲染**一页样张**交回 Agent 分类（本 note 就是分诊
+# 说明书），Agent 判定后按指引重调。刻意不做「字体年代学猜测判据」——不可靠。
+#
+#   · 早期印本 → Agent 用 prefer="accuracy" 重调（全页渲染 + 逐字转写；规则随
+#     本条 note 一起交付，Agent 分类时已持有，重调后按规则处理全部页面图）；
+#   · 现代扫描 → Agent 用 prefer="layout" 重调走 OXR（与第四步之前的行为一致，
+#     代价只是多一张样张图与一次交互）。
+_SCANNED_TRIAGE_NOTE = (
+    "这是一份**纯扫描** PDF（无文本层，路由无法用文本判断它是不是早期印本）——"
+    "这个判断是视觉问题，交给你：请用 read_image 看上面这张样张，按以下特征分类。\n"
+    "早期印本特征（16–18 世纪）：Fraktur/黑体字；长 s「ſ」（无完整横杠，与 f 相近，"
+    "常见于 ſit/ſint/neceſſe 这类词）；连字 æ/œ/ﬅ/ﬀ；花体首字母（装饰大字母+正文合读）；"
+    "旁注 marginalia；页尾 catchword/签名标记（a/b/数字）；macron 缩写"
+    "（ā ē ī ō ū，如 cōuenit=conuenit）；古版式（双栏对照、密排、肋线）。\n"
+    "判定与下一步：\n"
+    "· **是早期印本** → 用 prefer=\"accuracy\" 重新调用本工具：会渲染**全部**页面，"
+    "按下方转写规则逐字转写（长 s 绝不认 f；连字/缩写按对照表展开；双栏语言-栏位逐页"
+    "按图判断）。OXR 对这类文献实证失效（长 s→f、连字丢失、希腊文错乱），不要送 OXR。\n"
+    "· **现代扫描**（普通印刷体，无上述特征）→ 用 prefer=\"layout\" 重新调用本工具，"
+    "走云端版面模型（行为与引入分诊前一致）。\n"
+    "注意：样张是第 1 页——若第 1 页是封面/扉页看不出特征，直接用 prefer=\"accuracy\" "
+    "重调看全部页面再判断，不要凭一页定终身。"
 )
 
 # 升级规则 2 的判据：超过三成字母属「第三类文字」，就附上原图让 Agent 自己看（方案 §4）
@@ -284,7 +326,12 @@ class RouteOutcome:
 
 
 def decide(suffix: str, probe: "PdfProbe | None", prefer: str) -> str:
-    """返回 'fast' | 'structural' | 'accuracy'。永不返回 None：每一步都要有结论。"""
+    """返回 'fast' | 'structural' | 'accuracy' | 'scanned-triage'。永不返回 None：每一步都要有结论。
+
+    'scanned-triage'（2026-11-14 第四步）是纯扫描件的**视觉分诊**：渲染一页样张
+    交回 Agent 分类（早期印本 → accuracy 重调；现代扫描 → layout 重调走 OXR），
+    见 _SCANNED_TRIAGE_NOTE。它不是最终路线，是「给 Agent 的一道判断题」。
+    """
     return decide_route(suffix, probe, prefer)[0]
 
 
@@ -296,7 +343,9 @@ def decide_route(
     判据逐条对应方案 §4，**顺序就是优先级**，改任何一条都要连带看注释：
     显式档 > 图片 > 原生格式 > 非 PDF > layout > accuracy 的三段判断 > 自动判据；
     自动判据里，**「文本层不可信」信号（竖排 / OCR 藏字）压在「干净文本层 → fast」
-    之前** —— 字多不等于字对，2026-11 路由修复（见 VERTICAL_RATIO 处的标定注释）。
+    之前** —— 字多不等于字对，2026-11 路由修复（见 VERTICAL_RATIO 处的标定注释）；
+    **纯扫描（无文本层）不再直接送 OXR**，改走视觉分诊（scanned-triage，见
+    _SCANNED_TRIAGE_NOTE）—— OXR 对早期印本实证失效，分诊让 Agent 先看样张分类。
     """
     suffix = (suffix or "").lower()
 
@@ -363,7 +412,17 @@ def decide_route(
         # 路由结论一样（都是 structural），但**理由要分开说**：真扫描件与
         # 「有图 + 文本偏薄」在用户眼里是两件事，混成一个 "scanned" 会让人以为
         # 自己那份有正文的 PDF 被当成扫描件了。有表格时优先报 tables。
-        return "structural", "tables" if probe.tables > 0 else "scanned"
+        if probe.tables > 0:
+            return "structural", "tables"
+        if probe.avg_chars < SCANNED_AVG_CHARS:
+            # 纯扫描（2026-11-14 第四步）：没有文本层可供 early_print/竖排/字体
+            # 信号判断，直接送 OXR 会把早期印本「糟蹋」掉（实证见
+            # _SCANNED_TRIAGE_NOTE 处注释）。渲染一页样张交 Agent 分类：
+            # 早期印本 → accuracy 重调；现代扫描 → layout 重调走 OXR。
+            # 有薄文本层的混排件（80 ≤ avg < 300）不走分诊：它有字符，
+            # early_print 已经查过，且 OXR 对这类「有正文」的件本来可用。
+            return "scanned-triage", "scanned-triage"
+        return "structural", "scanned"
     if probe.tables > 0:
         return "structural", "tables"
     # 「文本层不可信」的两个信号（2026-11 修复）：命中任何一个都不许判
@@ -916,6 +975,8 @@ def convert_any(
         if fast_convert is not None:
             return _run_fast_anydoc(out, src, fast_convert, local_convert, prefer, probe)
         return _run_fast(out, src, local_convert)
+    if kind == "scanned-triage":
+        return _run_scanned_triage(out, src, local_convert)
     if kind == "structural":
         return _run_structural(out, src, local_convert, prefer=prefer)
     return _run_accuracy(out, src, local_convert)
@@ -1041,6 +1102,37 @@ def _run_fast_anydoc(
             text = fb_text
 
     return _finish_fast(out, engine, text)
+
+
+# ---- 扫描件视觉分诊（2026-11-14 第四步，OXR 之前的拦截） ----
+
+
+def _run_scanned_triage(out: RouteOutcome, src: Path, local_convert) -> RouteOutcome:
+    """纯扫描件的视觉分诊：渲染一页样张交回 Agent 分类（方案 A）。
+
+    交付形态与 accuracy 类似（page_images + need_agent_vision），但**不带正文**、
+    也不渲染全部页 —— 它是一道判断题，不是一次转写。判定后的下一步在
+    _SCANNED_TRIAGE_NOTE 里写给 Agent：早期印本 → prefer="accuracy" 重调；
+    现代扫描 → prefer="layout" 重调走 OXR。转写规则（_EARLY_PRINT_RULES_NOTE）
+    随本条结果一起交付 —— Agent 分类确认后手上已有规则，重调拿到全页图即可
+    开工，不需要跨调用状态。
+
+    渲染失败（pdfplumber 缺失 / 加密 / 无可渲染页）→ 退回 OXR 路并写明原因：
+    分诊是加分项，不能因为渲染坏掉就把扫描件判死刑（第四步之前的行为是直接 OXR）。
+    """
+    images = render_pages(src, max_pages=1, dpi=RENDER_DPI_DETAIL)
+    if not images:
+        out.notes.append("分诊样张渲染失败（pdfplumber 不可用、文件加密或无可渲染页），退回云端版面模型")
+        return _run_structural(out, src, local_convert, prefer="auto")
+    out.ok = True
+    out.kind = "scanned-triage"
+    out.engine = "page-images"
+    out.page_images = images
+    out.notes.append(_SCANNED_TRIAGE_NOTE)
+    # 规则随分诊一起交付：Agent 确认「早期印本」后手上已有规则，
+    # prefer="accuracy" 重调拿到全页图就能直接开工。
+    out.notes.append(_EARLY_PRINT_RULES_NOTE)
+    return out
 
 
 # ---- 路线二：structural（OXR；体检不过则附页面图给 Agent 校对） ----
@@ -1277,7 +1369,8 @@ def _self_test() -> int:
     check("png/auto", decide(".png", None, "auto"), "structural")
     check("png/accuracy", decide(".png", None, "accuracy"), "accuracy")
     check("docx/auto", decide(".docx", None, "auto"), "fast")
-    check("pdf 扫描件", decide(".pdf", scanned, "auto"), "structural")
+    # 纯扫描件第四步起改走视觉分诊（不再直接送 OXR——见 _SCANNED_TRIAGE_NOTE）
+    check("pdf 纯扫描件 → 分诊", decide(".pdf", scanned, "auto"), "scanned-triage")
     check("pdf 纯文本", decide(".pdf", clean, "auto"), "fast")
     check("pdf 表格", decide(".pdf", table, "auto"), "structural")
     check("pdf 图文混排薄文本", decide(".pdf", thick_with_images, "auto"), "structural")
@@ -1313,7 +1406,7 @@ def _self_test() -> int:
 
     # 理由码：给 Agent 解释用，改了判据要一起改
     check("理由 png", decide_route(".png", None, "auto")[1], "image")
-    check("理由 扫描件", decide_route(".pdf", scanned, "auto")[1], "scanned")
+    check("理由 纯扫描分诊(原扫描件位)", decide_route(".pdf", scanned, "auto")[1], "scanned-triage")
     check("理由 干净文本层", decide_route(".pdf", clean, "auto")[1], "clean-text-layer")
     # 有图 + 薄文本 + 有表格：结论仍是 structural，但理由要报 tables 而不是 scanned
     check(
@@ -1534,6 +1627,56 @@ def _self_test() -> int:
     check("mhtml/auto 走本地", decide(".mhtml", None, "auto"), "fast")
     check("理由 mhtml", decide_route(".mhtml", None, "auto")[1], "native-format")
     check("mht/auto 走本地", decide(".mht", None, "auto"), "fast")
+
+    # —— 第四步：纯扫描件的视觉分诊（2026-11-14，方案 A）——
+    # 纯扫描（avg=0、无表）不再直接送 OXR：路由改判分诊，样张交 Agent 分类。
+    purescan = PdfProbe(pages=1, avg_chars=0, images=1, tables=0)
+    check("auto+纯扫描 → 分诊", decide(".pdf", purescan, "auto"), "scanned-triage")
+    check("理由 纯扫描分诊", decide_route(".pdf", purescan, "auto")[1], "scanned-triage")
+    # 薄文本混排件（有字符，early_print 已查过）不走分诊：行为不变（回归）
+    check("图文混排薄文本仍 structural", decide(".pdf", thick_with_images, "auto"), "structural")
+    check("理由 图文混排无表格", decide_route(".pdf", thick_with_images, "auto")[1], "scanned")
+    # avg=0 但有表 → 仍 tables（分诊守卫）
+    check(
+        "纯扫描+表仍 tables",
+        decide_route(".pdf", PdfProbe(pages=1, avg_chars=0, images=0, tables=1), "auto"),
+        ("structural", "tables"),
+    )
+    # 显式覆盖尊重：layout 仍 OXR、fast 仍本地、accuracy 仍渲染
+    check("layout 覆盖纯扫描", decide(".pdf", purescan, "layout"), "structural")
+    check("fast 覆盖纯扫描", decide(".pdf", purescan, "fast"), "fast")
+    check("accuracy+纯扫描", decide(".pdf", purescan, "accuracy"), "accuracy")
+
+    # 分诊执行层：样张交付 + 特征/规则 note（规则复用 _EARLY_PRINT_RULES_NOTE）
+    original_render = globals()["render_pages"]
+    globals()["render_pages"] = lambda src, max_pages=10, dpi=150: ["C:\\fake\\sample_p1.png"]
+    try:
+        res = _run_scanned_triage(
+            RouteOutcome(ok=False, kind="scanned-triage"), Path("_stub_.pdf"), lambda p: "兜底正文" * 12
+        )
+        check("分诊交付样张", (res.ok, res.engine, len(res.page_images)), (True, "page-images", 1))
+        check_true("分诊 kind 保持", res.kind == "scanned-triage")
+        check_true("分诊 note 含特征清单", any("Fraktur" in n and "catchword" in n for n in res.notes))
+        check_true("分诊 note 含转写规则（复用）", any("ſit=sit" in n for n in res.notes))
+        check_true("分诊 note 含缩写对照表（复用扩充表）", any("q;=que/quam/qui" in n for n in res.notes))
+        check_true("分诊 note 含重调指引", any("prefer=\"accuracy\"" in n and "prefer=\"layout\"" in n for n in res.notes))
+    finally:
+        globals()["render_pages"] = original_render
+
+    # 渲染失败 → 退回 OXR 路（云端关闭时落到本地兜底，全程离线可测）
+    old_mode = os.environ.get("DSH_OXR_MODE")
+    try:
+        os.environ["DSH_OXR_MODE"] = "off"
+        res = _run_scanned_triage(
+            RouteOutcome(ok=False, kind="scanned-triage"), Path("_stub_.pdf"), lambda p: "分诊渲染失败退回本地兜底正文" * 8
+        )
+        check("分诊渲染失败退回", (res.ok, res.engine, res.degraded), (True, "markitdown-fallback", True))
+        check_true("渲染失败有说明", any("分诊样张渲染失败" in n for n in res.notes))
+    finally:
+        if old_mode is None:
+            os.environ.pop("DSH_OXR_MODE", None)
+        else:
+            os.environ["DSH_OXR_MODE"] = old_mode
 
     # normalize_prefer
     check("prefer 大小写", normalize_prefer("  ACCURACY "), "accuracy")

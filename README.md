@@ -233,7 +233,7 @@ Open **⚙ 首选项 (Preferences)** from the toolbar. The paths of the two prog
 | DSH home dir | `%USERPROFILE%\.dsh` | passed to DSH as `DSH_HOME`; process cwd is its parent; not your workspace |
 | User env var `DSH_HOME` | automatic (no switch) | **automatic rule**: while the home dir is not the default, saving writes it into the current user's `HKCU\Environment`, so `dsh` in a terminal **you open yourself** uses the same home; changing back to the default removes it. This app (safe mode included) always injects `DSH_HOME` explicitly, so its own behaviour is untouched — see *Write the home dir into `DSH_HOME`* below |
 | Port | `3080` | must be 1–65535; validated on save; takes effect on next DSH start |
-| Ready timeout | `300` seconds | cold start can take minutes; **0 = wait forever** (as long as the process lives) |
+| Ready timeout | `360` seconds | cold start can take minutes; **0 = wait forever** (as long as the process lives) |
 | When clicking X | hide to tray | or "quit program" (stops the DSH process started by this session) |
 | Extra args | empty | appended after `dsh web --port N --no-open`; plain flags only (see below) |
 | Package name | `@deepseek-ai/dsh` | used for the `dist-tags` version query **and** to build the update command |

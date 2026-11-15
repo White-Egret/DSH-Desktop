@@ -1803,9 +1803,13 @@ function tcNameKey(id) {
 
 function tcRowHtml(item) {
   const name = t(tcNameKey(item.id));
-  // 徽标三态：可用（ok）/ 有具体问题的（warn：Broken、版本被拒）/ 缺失（bad）
-  const badgeKey = { managed: 'tc_src_managed', system: 'tc_src_system',
-                     probe: 'tc_src_probe', missing: 'tc_src_missing' }[item.source] || 'tc_src_missing';
+  // 徽标三态：可用（ok）/ 有具体问题的（warn：Broken、版本被拒）/ 缺失（bad）。
+  // 注意「系统里有但这次没采用」：来源是 system、却 usable=false —— 这时徽标必须
+  // 说「系统（未采用）」而不是绿色的「复用系统」，否则又变成一句谎话（曾出现
+  // 「未检测到 (v24.21.0)」这种自相矛盾的显示）。
+  let badgeKey = { managed: 'tc_src_managed', system: 'tc_src_system',
+                   probe: 'tc_src_probe', missing: 'tc_src_missing' }[item.source] || 'tc_src_missing';
+  if (item.source === 'system' && !item.usable) badgeKey = 'tc_src_system_unused';
   const badgeCls = item.usable ? 'ok' : (item.detail ? 'warn' : 'bad');
   const ver = item.version ? verTag(item.version) : '';
   const path = item.path ? escapeHtml(item.path) + ver : ver;
@@ -1834,9 +1838,48 @@ function tcRowHtml(item) {
     + path + detail + guide + action + '</td></tr>';
 }
 
+// 两处显示的**范围不同**，因为同一页里已经有各自的专门板块：
+//
+// - 首装向导只回答一件事：**DSH 能不能跑起来**。Node/npm/pnpm/DSH 顶部那张表已列，
+//   WebView2 是唯一还没显示的运行前提。Python / Rust / MSVC 对「跑 DSH」非必需，
+//   刻意不出现 —— 摆出来只会让人以为非装不可。
+// - 「安装/卸载」弹窗里，Python 有「Python 环境」板块，Node/pnpm/DSH 有底部那块
+//   「Node.js，pnpm与DSH」板块，所以这个探测列表只留**没有别处显示的**三样系统组件。
+//
+// 「生效的 Node.js 下限」那行**不在这两张表里**：它属于 Node，渲染到「Node.js，pnpm与DSH」
+// 板块的 #tc-node-min（见 renderNodeMinLine）——那个下限是运行时从已装的 DSH 包里读出来的，
+// 与底部那行版本号放一起才讲得通。
+const TC_WIZ_SHOWN = ['webview2'];
+const TC_MANAGE_SHOWN = ['rust', 'msvc', 'webview2'];
+
+/// 把「生效的 Node.js 下限 + 来源」写进 Node 板块。没有报告（还没检测/检测失败）时隐藏。
+///
+/// 为什么单独一个函数：它的数据来自 toolchain_status（运行时约束），而同一个板块里
+/// 那行版本号来自 detect_environment —— 两个来源各自刷新，不能互相覆盖。
+function renderNodeMinLine() {
+  const el = $('tc-node-min');
+  if (!el) return;
+  const r = toolchainReport;
+  if (!r || r.error || !r.node_min) {
+    el.classList.add('hidden');
+    el.textContent = '';
+    return;
+  }
+  const src = (r.constraints_source || '')
+    + (r.node_min_from_runtime ? ' · ' + t('tc_min_runtime_note') : '');
+  el.textContent = t('tc_node_min_line', String(r.node_min), src);
+  el.classList.remove('hidden');
+}
+
 function renderToolchainStatus() {
-  for (const bodyId of ['tc-body-wiz', 'tc-body-manage']) {
-    const el = $(bodyId);
+  const targets = [
+    { id: 'tc-body-wiz', only: TC_WIZ_SHOWN },
+    { id: 'tc-body-manage', only: TC_MANAGE_SHOWN },
+  ];
+  // Node 下限行独立渲染到 Node 板块（不在这两张表里）
+  renderNodeMinLine();
+  for (const target of targets) {
+    const el = $(target.id);
     if (!el) continue;
     if (!toolchainReport) {
       el.innerHTML = '<tr><td>' + escapeHtml(t('tc_checking')) + '</td></tr>';
@@ -1846,12 +1889,11 @@ function renderToolchainStatus() {
       el.innerHTML = '<tr><td>' + escapeHtml(t('tc_fail', toolchainReport.error)) + '</td></tr>';
       continue;
     }
-    const rows = (toolchainReport.tools || []).map(tcRowHtml).join('');
-    const minSrc = toolchainReport.constraints_source
-      + (toolchainReport.node_min_from_runtime ? ' · ' + t('tc_min_runtime_note') : '');
-    const minLine = '<tr><td colspan="3" class="hint">'
-      + escapeHtml(t('tc_node_min_line', toolchainReport.node_min, minSrc)) + '</td></tr>';
-    el.innerHTML = rows + minLine;
+    const shown = (toolchainReport.tools || []).filter(function (it) {
+      return target.only === null || target.only.indexOf(it.id) >= 0;
+    });
+    const rows = shown.map(tcRowHtml).join('');
+    el.innerHTML = rows;
     // 指引链接：走 toolchain_open_guide（后端开系统浏览器；data-url 仅作展示回退）
     el.querySelectorAll('.tc-guide').forEach(function (a) {
       a.onclick = function (ev) {
@@ -2984,7 +3026,7 @@ async function saveSettings() {
       ? ((config && config.toolbar_mode) || 'pinned')
       : ($('set-toolbar-auto').checked ? 'auto' : 'pinned'),
     // 0 = 一直等待，是合法值，不能用 || 兜底
-    health_timeout_secs: Number.isFinite(timeout) && timeout >= 0 ? timeout : 300,
+    health_timeout_secs: Number.isFinite(timeout) && timeout >= 0 ? timeout : 360,
     extra_args: $('set-extra-args').value.trim(),
     package_name: $('set-package-name').value.trim() || '@deepseek-ai/dsh',
     // 安全模式：基线重置开关 + 修复验证等待（0 = 不验证；后端保存时还会收敛范围）

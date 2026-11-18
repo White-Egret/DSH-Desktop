@@ -2954,6 +2954,92 @@ pub async fn dsh_home_env_info(_app: AppHandle) -> String {
     detect::user_env_raw(detect::HOME_ENV_NAME).unwrap_or_default()
 }
 
+/// 「DeepSeek OCR（付费第四引擎）」开关的状态（只读，零风险）。
+///
+/// 为什么开关只能写用户环境变量（2026-11-18 第五步-b）：桌面端**不 spawn 桥接进程**
+/// （它只释放源码 + 查状态，见 py_bridge.rs 头注），桥接由 DSH 插件拉起并继承
+/// 用户环境变量；首选项的 config.json 桥接读不到。所以「开启」= 往
+/// `HKCU\Environment` 写 `DSH_DEEPSEEK_OCR=on`，「关闭（默认）」= 删除该值。
+/// 环境变量在进程启动时冻结 —— **改完必须重启 DSH** 才被下一次 spawn 看到，
+/// UI 与结果文案都必须如实说这一点。
+#[derive(Clone, Serialize)]
+pub struct DeepseekOcrReport {
+    /// 持久值是否构成「启用」（与 Python 侧 enabled() 同词表：1/on/true/yes）
+    pub enabled: bool,
+    /// `HKCU\Environment` 里实际存在的值（空串 = 没设置；供状态行如实展示）
+    pub raw_value: String,
+    /// 凭据文件里是否配置了 `DEEPSEEK_API_KEY` —— **只判存在**，key 本身
+    /// 绝不进这个结构（IPC / 日志 / env 都不出现明文）
+    pub key_present: bool,
+    /// 凭据文件的路径（状态行展示「在哪查的 key」用；路径本身不含秘密）
+    pub cred_path: String,
+}
+
+/// 判定一个环境变量值是否构成「启用」—— 词表与 py-bridge
+/// `deepseek_ocr_client.enabled()` 完全一致，两边漂移就会出现「UI 说开了、
+/// 引擎说没开」的谜。
+fn deepseek_env_enabled(raw: &str) -> bool {
+    matches!(raw.trim().to_lowercase().as_str(), "1" | "on" | "true" | "yes")
+}
+
+/// 凭据文件里有没有 `DEEPSEEK_API_KEY`（非空、非注释）。只返回布尔与路径，
+/// 读到的内容不外传 —— 与插件版 client.js 的 deepseekKeySource 同一纪律。
+fn deepseek_key_present(app: &AppHandle) -> (bool, String) {
+    let home = config::load(app).dsh_home_dir;
+    let cred = std::path::Path::new(&home).join(".credentials.yaml");
+    let present = std::fs::read_to_string(&cred)
+        .map(|text| {
+            text.lines().any(|l| {
+                let l = l.trim();
+                match l.strip_prefix("DEEPSEEK_API_KEY:") {
+                    Some(rest) => {
+                        let v = rest.trim();
+                        !v.is_empty() && !v.starts_with('#')
+                    }
+                    None => false,
+                }
+            })
+        })
+        .unwrap_or(false);
+    (present, cred.display().to_string())
+}
+
+#[tauri::command]
+pub async fn deepseek_ocr_info(app: AppHandle) -> DeepseekOcrReport {
+    let raw = detect::user_env_raw(detect::DEEPSEEK_ENV_NAME).unwrap_or_default();
+    let (key_present, cred_path) = deepseek_key_present(&app);
+    DeepseekOcrReport {
+        enabled: deepseek_env_enabled(&raw),
+        raw_value: raw,
+        key_present,
+        cred_path,
+    }
+}
+
+/// 「启用 / 关闭 DeepSeek OCR」按钮：写或删 `HKCU\Environment\DSH_DEEPSEEK_OCR`
+/// （复用 detect.rs 的三件套 + WM_SETTINGCHANGE 广播，与 DSH_HOME 自动同步同一条路）。
+/// 只动这一个值；返回一句 i18n 结果文案（含「重启 DSH 后生效」——必现，不是可选提示）。
+#[tauri::command]
+pub async fn deepseek_ocr_set(app: AppHandle, enabled: bool) -> Result<String, String> {
+    let current = detect::user_env_raw(detect::DEEPSEEK_ENV_NAME).unwrap_or_default();
+    if enabled {
+        if deepseek_env_enabled(&current) {
+            return Ok(i18n::t("deepseek_ocr_unchanged").to_string());
+        }
+        detect::set_user_env_value(detect::DEEPSEEK_ENV_NAME, "on")
+            .map_err(|e| i18n::fmt("err_deepseek_env_write", &[&e]))?;
+        detect::broadcast_env_change();
+        return Ok(i18n::t("deepseek_ocr_written").to_string());
+    }
+    if current.trim().is_empty() {
+        return Ok(i18n::t("deepseek_ocr_unset").to_string());
+    }
+    detect::delete_user_env_value(detect::DEEPSEEK_ENV_NAME)
+        .map_err(|e| i18n::fmt("err_deepseek_env_delete", &[&e]))?;
+    detect::broadcast_env_change();
+    Ok(i18n::t("deepseek_ocr_removed").to_string())
+}
+
 /// 首选项「npm 全局目录」那一行的状态（只读，零风险）。
 ///
 /// 真机故障（2026-10-06）：用户的 `~/.npmrc` 里写着 `prefix=D:\Programs\npm`、dsh 也装在那里，
@@ -8048,6 +8134,19 @@ pub fn remember_node_min_version_notice(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DeepSeek OCR 开关的词表必须与 py-bridge `deepseek_ocr_client.enabled()`
+    /// 完全一致（1/on/true/yes，大小写不敏感、容空格）—— 两边漂移就会出现
+    /// 「UI 说开了、引擎说没开」或反过来的谜。这条测试钉住对齐。
+    #[test]
+    fn deepseek_env_enabled_matches_the_python_side_vocabulary() {
+        for v in ["on", "ON", " 1", "true", "Yes", "  YES "] {
+            assert!(deepseek_env_enabled(v), "{v} 应视为启用");
+        }
+        for v in ["", "  ", "off", "0", "false", "no", "1.0", "one"] {
+            assert!(!deepseek_env_enabled(v), "{v:?} 不应视为启用");
+        }
+    }
 
     /// 「卸载办公包」要卸的包集合：**办公库 + 桥接运行时**。
     ///

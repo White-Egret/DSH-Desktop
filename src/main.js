@@ -1890,9 +1890,15 @@ function renderToolchainStatus() {
       el.innerHTML = '<tr><td>' + escapeHtml(t('tc_fail', toolchainReport.error)) + '</td></tr>';
       continue;
     }
-    const shown = (toolchainReport.tools || []).filter(function (it) {
-      return target.only === null || target.only.indexOf(it.id) >= 0;
-    });
+    // 行序由 `target.only` 的**排列顺序**决定，不是后端返回的顺序 —— 后端按
+    // REGISTRY 的固定顺序给数（…Rust → MSVC → WebView2），只 filter 不重排的话，
+    // 数组里怎么写都白写（真机截图踩过：标题说 WebView2 在前，行里它排第三）。
+    // `.filter(Boolean)` 兜住「报告里没有该 id」的情况（例如后端旧版本）。
+    const shown = target.only
+      .map(function (id) {
+        return (toolchainReport.tools || []).find(function (it) { return it.id === id; });
+      })
+      .filter(Boolean);
     const rows = shown.map(tcRowHtml).join('');
     el.innerHTML = rows;
     // 指引链接：走 toolchain_open_guide（后端开系统浏览器；data-url 仅作展示回退）
@@ -2405,6 +2411,8 @@ async function refreshPythonStatus() {
   // 桥接状态与 Python 状态是两条独立的探测，跟着一起刷：用户在设置页做的一切
   // 「装 / 部署」动作都会改它其中之一
   refreshBridgeStatus();
+  // DeepSeek OCR 付费开关（Python 块内子块）：读用户环境变量持久值 + key 存在性
+  refreshDeepseekStatus();
 }
 
 function renderPythonStatus(s) {
@@ -2687,6 +2695,47 @@ async function refreshBridgeStatus() {
   } catch (e) {
     // 问不到就如实说一句，别让这一行空着像卡住了
     el.textContent = t('toast_py_status_fail', e);
+  }
+}
+
+// ============ DeepSeek OCR 付费开关（第五步-b，Python 环境块内子块）============
+// 开关 = 写/删用户环境变量 HKCU\Environment\DSH_DEEPSEEK_OCR（桌面端不 spawn 桥接，
+// 桥接由 DSH 插件拉起时继承用户环境变量；改完**重启 DSH** 才生效 —— 提示必现）。
+// API key 只读凭据文件判存在（后端只回 bool + 路径，明文绝不进 IPC/日志/env）。
+const deepseekState = { enabled: false, loading: true };
+
+async function refreshDeepseekStatus() {
+  const el = $('deepseek-status');
+  if (!el) return;
+  try {
+    const s = await invoke('deepseek_ocr_info');
+    deepseekState.enabled = !!s.enabled;
+    deepseekState.loading = false;
+    el.textContent = s.enabled ? t('deepseek_on') : t('deepseek_off');
+    const keyEl = $('deepseek-key-row');
+    if (keyEl) keyEl.textContent = s.key_present
+      ? t('deepseek_key_yes', s.cred_path)
+      : t('deepseek_key_no', s.cred_path);
+    const btn = $('btn-deepseek-toggle');
+    if (btn) btn.textContent = s.enabled ? t('btn_deepseek_off') : t('btn_deepseek_on');
+  } catch (e) {
+    deepseekState.loading = false;
+    el.textContent = t('deepseek_status_fail', e);
+  }
+}
+
+async function toggleDeepseekOcr() {
+  const btn = $('btn-deepseek-toggle');
+  if (!btn || deepseekState.loading) return;
+  btn.disabled = true;
+  try {
+    const msg = await invoke('deepseek_ocr_set', { enabled: !deepseekState.enabled });
+    toast(msg);
+    await refreshDeepseekStatus();
+  } catch (e) {
+    toast(String(e), true);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -4373,6 +4422,9 @@ function bindUI() {
   $('btn-py-uninstall-confirm').onclick = () => doPyUninstall(false);
   $('btn-py-uninstall-extra-first').onclick = () => doPyUninstall(true);
   // 能力桥接**没有按钮**：释放 + 注册由「进入 DSH 时自动激活」承担，见 refreshBridgeStatus
+  // DeepSeek OCR 付费开关（第五步-b）：两态按钮（启用 ⇄ 关闭），写/删用户环境变量后
+  // toast 里必含「重启 DSH 后生效」；状态行跟着刷新
+  $('btn-deepseek-toggle').onclick = () => toggleDeepseekOcr();
   // OnlyOffice 块（P3）：一键按钮两态（安装 ⇄ 卸载），卸载过确认框；清扫只在卸载后露出
   $('btn-office-install').onclick = () => (officeState.installed
     ? openOfficeUninstallConfirm()

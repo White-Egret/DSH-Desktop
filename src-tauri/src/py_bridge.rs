@@ -103,6 +103,13 @@ const BRIDGE_FILES: &[(&str, &str)] = &[
         "oxr_client.py",
         include_str!("../resources/py-bridge/oxr_client.py"),
     ),
+    // 第四引擎（2026-11-18 第五步）：DeepSeek OCR 客户端（全家桶独立 OCR API，
+    // 付费、默认关闭由 DSH_DEEPSEEK_OCR 控制）。与 oxr_client 同性质：不注册工具、
+    // 由 doc_route 惰性 import —— 少一条 include_str! 就是 import 阶段直接崩。
+    (
+        "deepseek_ocr_client.py",
+        include_str!("../resources/py-bridge/deepseek_ocr_client.py"),
+    ),
 ];
 
 /// 释放进 bundle\ 的文件
@@ -1243,7 +1250,7 @@ mod tests {
     #[test]
     fn every_generated_file_is_compiled_in_and_non_empty() {
         // 少写一个 include_str 都不会编译不过，但内容空/名错会让 Python 侧 ModuleNotFoundError
-        assert_eq!(BRIDGE_FILES.len(), 10, "py-bridge 下应有 10 个文件");
+        assert_eq!(BRIDGE_FILES.len(), 11, "py-bridge 下应有 11 个文件");
         for (name, body) in BRIDGE_FILES.iter().chain(BUNDLE_FILES.iter()) {
             assert!(!body.trim().is_empty(), "{name} 内容为空");
             assert!(body.len() > 200, "{name}  suspiciously short");

@@ -532,10 +532,16 @@ def convert_fast_anydoc_first(src: Path) -> "tuple[str, str]":
         "而 anydoc 输出丢了一半以上 → 自动回退 markitdown 并在 note 说明。"
         "**含表格或复杂版面的 PDF、以及独立图片** 走云端版面模型 OXR"
         "（会把文件上传到 SoMark 免费服务，单次 ≤10MB/≤20 页，无 key、免费）；"
-        "**纯扫描 PDF（无文本层）不再直接送 OXR**：auto 会渲染**一页样张**交给你做"
-        "**视觉分诊**（kind=scanned-triage）——看样张判断是否早期印本（Fraktur/长 s/连字/"
+        "**第四引擎 DeepSeek OCR（付费、默认关闭）**：设置环境变量 DSH_DEEPSEEK_OCR=on "
+        "并提供 DSH_DEEPSEEK_API_KEY 后，structural 路的现代件（表格/竖排/词典/现代扫描）"
+        "先走 DeepSeek OCR（1.5 元/千页，note 写明页数与预估花费），失败或无 key 自动回落 OXR；"
+        "其输出命中早期印本信号（ſ/疑似长 s 误 f）会自动升级 accuracy。"
+        "prefer=\"layout\" 仍指免费 OXR，永不进付费路。"
+        "**纯扫描 PDF（无文本层）不再直接送 OXR**：DeepSeek OCR 关闭时，auto 会渲染**一页样张**"
+        "交给你做**视觉分诊**（kind=scanned-triage）——看样张判断是否早期印本（Fraktur/长 s/连字/"
         "花体首字母/macron 缩写/古版式），是 → 用 prefer=\"accuracy\" 重调（全页渲染+逐字"
         "转写，规则随分诊 note 交付）；否（现代扫描）→ 用 prefer=\"layout\" 重调走 OXR。"
+        "DeepSeek OCR 开启时纯扫描直接整档识别（便宜），输出命中早期印本信号同样升级 accuracy。"
         "**当版面模型不够好时（多音标小语种、手写、极小字号、需要逐字准确引用），"
         "传 prefer=\"accuracy\"：工具会把页面渲染成 PNG 并把绝对路径交给你，"
         "由你**自己用 read_image 读图转写**——这条最准，因为不经任何 OCR，"
@@ -782,7 +788,18 @@ def markitdown_capabilities() -> dict:
             },
             "router": {
                 "fast": "本地引擎：DOCX/CSV/干净文本层 PDF/LaTeX 由 anydoc 优先（Rust 本地、快 38–52 倍），HTML/PPTX 由 markitdown，XLSX 由 openpyxl（不联网）",
-                "structural": "云端版面模型 OXR：有表格/复杂版面的 PDF、以及独立图片（纯扫描件先分诊，见 scanned_triage）",
+                "structural": "云端引擎：DeepSeek OCR（付费第四引擎，DSH_DEEPSEEK_OCR=on 启用，现代件首选，1.5 元/千页）→ OXR（免费兜底）；独立图片走 OXR（纯扫描件先分诊，见 scanned_triage）",
+                "deepseek_ocr": (
+                    "第四引擎（2026-11-18 第五步）：DeepSeek 全家桶独立 OCR API"
+                    "（api.deepseek.com/v1/tools/ocr，rich_layout_recognition）。"
+                    "启用：DSH_DEEPSEEK_OCR=on + DSH_DEEPSEEK_API_KEY（或凭据文件 DEEPSEEK_API_KEY 字段）。"
+                    "默认关闭 = auto 不产生任何 DeepSeek 花费；启用后 structural 路现代件"
+                    "（表格/竖排/词典/现代扫描）首选它，note 写明页数与预估花费；"
+                    "输出命中早期印本信号（ſ / 疑似长 s 误 f）自动升级 accuracy（复用转写规则）；"
+                    "多音标希腊文经既有 needs_vlm 体检升级；无 key / 402 余额不足 / 失败一律回落 OXR 不报错。"
+                    "bake-off（ocr-bakeoff-deepseek-report.md）：现代件质量与视觉持平（5/5）且便宜 3 倍；"
+                    "早期印本系统性失败（长 s→f）——所以古文献升级视觉。"
+                ),
                 "scanned_triage": (
                     "纯扫描 PDF（无文本层）auto 不再直接送 OXR：先渲染一页样张（300 DPI）"
                     "交 Agent 视觉分诊（kind=scanned-triage，note 含早期印本特征清单 + 完整"

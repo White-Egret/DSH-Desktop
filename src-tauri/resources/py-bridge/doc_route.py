@@ -847,6 +847,17 @@ def _import_oxr():
         return None
 
 
+def _import_deepseek():
+    """惰性 import：DeepSeek OCR 客户端（第五步第四引擎）坏了同样不拖垮工具组。"""
+    try:
+        import deepseek_ocr_client
+
+        return deepseek_ocr_client
+    except Exception as exc:  # noqa: BLE001
+        diag("route.deepseek.import-fail", f"{type(exc).__name__}: {str(exc)[:160]}")
+        return None
+
+
 def _describe_failure(exc: BaseException) -> str:
     """把客户端异常转成一句人话（客户端负责把「连不上」与「服务返回错误」分开）。"""
     kind = getattr(exc, "kind", "")
@@ -978,6 +989,11 @@ def convert_any(
     if kind == "scanned-triage":
         return _run_scanned_triage(out, src, local_convert)
     if kind == "structural":
+        # 第五步：DeepSeek OCR 是付费引擎 —— `prefer="layout"` 的语义是免费 OXR，
+        # 永远不进付费路；auto 只有在 DSH_DEEPSEEK_OCR 开启时才走付费（默认关闭，
+        # 不产生意外花费）。关闭/失败一律回落本函数（OXR 免费兜底）。
+        if prefer != "layout":
+            return _run_deepseek_or_oxr(out, src, local_convert, prefer)
         return _run_structural(out, src, local_convert, prefer=prefer)
     return _run_accuracy(out, src, local_convert)
 
@@ -1108,7 +1124,73 @@ def _run_fast_anydoc(
 
 
 def _run_scanned_triage(out: RouteOutcome, src: Path, local_convert) -> RouteOutcome:
-    """纯扫描件的视觉分诊：渲染一页样张交回 Agent 分类（方案 A）。
+    """纯扫描件的分流入口（第四步 Agent 分诊 + 第五步 OCR 直跑）。
+
+    · DeepSeek OCR 开启（DSH_DEEPSEEK_OCR）且 key 可得 → **先跑 OCR**（便宜，
+      不重复渲染）：输出命中早期印本信号（ſ / 疑似长 s 误 f）→ 升级 accuracy；
+      无信号 → 直接交付 OCR 正文（现代扫描的最短路径，免去 Agent 二次交互）。
+    · 未开启 / OCR 失败 → 回到第四步的 **Agent 视觉分诊**（渲染一页样张交回
+      Agent 分类），行为与第四步完全一致。
+    """
+    ds = _import_deepseek()
+    if ds is not None and ds.enabled() and ds.api_key():
+        return _run_scanned_ocr_direct(out, src, local_convert, ds)
+    return _run_scanned_triage_agent(out, src, local_convert)
+
+
+def _run_scanned_ocr_direct(
+    out: RouteOutcome, src: Path, local_convert, ds
+) -> RouteOutcome:
+    """纯扫描件：DeepSeek OCR 直跑 + 输出信号升级（第五步）。
+
+    与 Agent 分诊互补：OCR 便宜到可以直接整档跑（1.5 元/千页），跑完按输出
+    信号分类——这正是「别重复渲染/重复上传」的协同方式：样张不用渲染，
+    一次上传同时完成分类与（现代件的）转写。
+    """
+    try:
+        result = ds.parse_file(src)
+    except Exception as exc:  # noqa: BLE001 — 任何失败退回 Agent 分诊
+        why = ds.describe_error(exc)
+        out.notes.append(f"DeepSeek OCR 不可用（{why}），退回视觉分诊")
+        diag("route.deepseek.fail", f"{getattr(exc, 'kind', '?')} | {str(exc)[:200]}")
+        return _run_scanned_triage_agent(out, src, local_convert)
+    text = "\n\n".join(result["pages"])
+    if not text.strip():
+        out.notes.append("DeepSeek OCR 返回空内容，退回视觉分诊")
+        return _run_scanned_triage_agent(out, src, local_convert)
+
+    sig = ds.early_print_signal(text)
+    if sig["hit"]:
+        out.kind = "accuracy"
+        out.reason = "ocr-signal-upgrade"
+        out.notes.append(
+            f"DeepSeek OCR 输出命中早期印本信号（ſ×{sig['long_s']}、"
+            f"疑似长 s 误 f×{sig['fake_f']}），升级 Agent 视觉逐字转写"
+        )
+        diag("route.deepseek.early-print-signal", str(sig))
+        return _run_accuracy(out, src, local_convert)
+
+    pages = result["page_count"]
+    cost = ds.cost_estimate(pages)
+    out.ok = True
+    out.kind = "structural"
+    out.engine = "deepseek-ocr"
+    out.text = text
+    out.notes.append(
+        f"DeepSeek OCR：{pages} 页 × 1.5 元/千页 ≈ {cost:.3f} 元；"
+        "纯扫描已直接识别（无早期印本信号），需要逐字准确可改 prefer=\"accuracy\""
+    )
+    _maybe_escalate(out, src, prefer="auto")
+    if not out.page_images:
+        out.notes.append(
+            "OCR 结果仅供草稿：专名、译名、数字、日期与「读得通但可疑」的字，"
+            "请对照原图核对 —— 通顺不等于正确"
+        )
+    return out
+
+
+def _run_scanned_triage_agent(out: RouteOutcome, src: Path, local_convert) -> RouteOutcome:
+    """纯扫描件的 Agent 视觉分诊（第四步方案 A，原样保留）。
 
     交付形态与 accuracy 类似（page_images + need_agent_vision），但**不带正文**、
     也不渲染全部页 —— 它是一道判断题，不是一次转写。判定后的下一步在
@@ -1135,7 +1217,79 @@ def _run_scanned_triage(out: RouteOutcome, src: Path, local_convert) -> RouteOut
     return out
 
 
-# ---- 路线二：structural（OXR；体检不过则附页面图给 Agent 校对） ----
+# ---- 路线二：structural（DeepSeek OCR 付费优先 / OXR 免费兜底；体检不过则附页面图） ----
+
+
+def _run_deepseek_or_oxr(
+    out: RouteOutcome, src: Path, local_convert, prefer: str
+) -> RouteOutcome:
+    """structural 路的现代件编排（第五步）：DeepSeek OCR 付费优先，OXR 免费兜底。
+
+    纪律：
+      · `DSH_OXR_MODE=off`（云端总开关）**同样关闭 DeepSeek** —— 隐私开关不能只
+        关一半，两个云端引擎一起停；
+      · `prefer="layout"` 在派发层就不进这里（layout = 免费 OXR，语义不变）；
+      · 未启用 / 无 key / 余额不足 / 任何失败 → note 写明原因，回落 OXR；
+      · 成功交付必须**成本透明**：note 写明页数与按 1.5 元/千页的预估花费；
+      · 交付后照常跑 `_maybe_escalate`（多音标希腊文升级视觉）。
+    """
+    blocked = _cloud_block_reason()
+    if blocked:
+        out.notes.append(blocked)
+        return _run_structural(out, src, local_convert, prefer=prefer)
+
+    ds = _import_deepseek()
+    if ds is None or not ds.enabled():
+        return _run_structural(out, src, local_convert, prefer=prefer)
+    if not ds.api_key():
+        out.notes.append("DeepSeek OCR 已启用但未配置 API Key（DSH_DEEPSEEK_API_KEY 或凭据文件），回落 OXR")
+        return _run_structural(out, src, local_convert, prefer=prefer)
+
+    try:
+        result = ds.parse_file(src)
+    except Exception as exc:  # noqa: BLE001 — 任何失败回落 OXR，不报错给用户
+        why = ds.describe_error(exc)
+        out.notes.append(f"DeepSeek OCR 不可用（{why}），回落 OXR")
+        diag("route.deepseek.fail", f"{getattr(exc, 'kind', '?')} | {str(exc)[:200]}")
+        return _run_structural(out, src, local_convert, prefer=prefer)
+
+    text = "\n\n".join(result["pages"])
+    if not text.strip():
+        out.notes.append("DeepSeek OCR 返回空内容，回落 OXR")
+        return _run_structural(out, src, local_convert, prefer=prefer)
+
+    pages = result["page_count"]
+    cost = ds.cost_estimate(pages)
+    out.ok = True
+    out.kind = "structural"
+    out.engine = "deepseek-ocr"
+    out.text = text
+    out.notes.append(
+        f"DeepSeek OCR（rich_layout）：{pages} 页 × 1.5 元/千页 ≈ {cost:.3f} 元 —— "
+        "付费引擎已按配置启用（DSH_DEEPSEEK_OCR）"
+    )
+
+    # OCR 输出侧的早期印本信号（ſ / 疑似长 s 误 f）→ 升级 Agent 视觉：
+    # bake-off 实证 OCR 对早期印本系统性失败（长 s→f、希腊栏读成拉丁字母），
+    # 这类页宁可多花一次视觉也不能交付乱码。
+    sig = ds.early_print_signal(text)
+    if sig["hit"]:
+        out.kind = "accuracy"
+        out.reason = "ocr-signal-upgrade"
+        out.notes.append(
+            f"DeepSeek OCR 输出命中早期印本信号（ſ×{sig['long_s']}、"
+            f"疑似长 s 误 f×{sig['fake_f']}），升级 Agent 视觉逐字转写"
+        )
+        diag("route.deepseek.early-print-signal", str(sig))
+        return _run_accuracy(out, src, local_convert)
+
+    _maybe_escalate(out, src, prefer=prefer)
+    if not out.page_images:
+        out.notes.append(
+            "OCR 结果仅供草稿：专名、译名、数字、日期与「读得通但可疑」的字，"
+            "请对照原图核对 —— 通顺不等于正确"
+        )
+    return out
 
 
 def _run_structural(
@@ -1247,8 +1401,9 @@ def _run_accuracy(out: RouteOutcome, src: Path, local_convert) -> RouteOutcome:
     # 早期印本（2026-11-12 第三步）：附专用转写规则。放在函数最前面 ——
     # 即使后续渲染失败走了 OXR 兜底，规则也已随 note 交付（那条兜底路对
     # 早期印本同样是坏结局，规则能让 Agent 知道该去对照原图）。
-    # 只在 reason == "early-print" 时附加：普通 accuracy 不受影响。
-    if out.reason == "early-print":
+    # 第五步：OCR 输出信号升级（ocr-signal-upgrade）同样附规则 —— 它与
+    # early-print 命中的是同一类文献，只是信号来自 OCR 输出而非文本层。
+    if out.reason in ("early-print", "ocr-signal-upgrade"):
         out.notes.append(_EARLY_PRINT_RULES_NOTE)
     dpi = RENDER_DPI_DETAIL
     images = render_pages(src, dpi=dpi)
@@ -1678,6 +1833,106 @@ def _self_test() -> int:
         else:
             os.environ["DSH_OXR_MODE"] = old_mode
 
+    # —— 第五步：DeepSeek OCR 第四引擎（路由桩测，不联网）——
+    # 纪律：默认 off 不产生花费；layout 不进付费路；无 key/失败回落 OXR 不报错；
+    # 成本透明（note 写页数与预估花费）；OCR 输出早期印本信号升级 accuracy。
+    import deepseek_ocr_client as _dsc
+
+    _dsc_orig = (_dsc.enabled, _dsc.api_key, _dsc.parse_file)
+    try:
+        _dsc.enabled = lambda: True
+        _dsc.api_key = lambda: "stub-key"
+        _dsc.parse_file = lambda p, purpose="rich_layout_recognition": {
+            "pages": ["modern scan content with a table"], "page_count": 3, "usage": {}}
+        res = _run_deepseek_or_oxr(
+            RouteOutcome(ok=False, kind="structural"), Path("_stub_.pdf"),
+            lambda p: "兜底正文" * 12, "auto")
+        check("structural 开关on → DeepSeek", (res.ok, res.engine, res.kind),
+              (True, "deepseek-ocr", "structural"))
+        check_true("成本透明 note", any("1.5 元/千页" in n and "3 页" in n for n in res.notes))
+        # 竖排语义：竖排走 structural → DeepSeek OCR（不送视觉——bake-off 实证视觉竖排弱）
+        _dsc.parse_file = lambda p, purpose="rich_layout_recognition": {
+            "pages": ["第一章 序論"], "page_count": 2, "usage": {}}
+        res = _run_deepseek_or_oxr(
+            RouteOutcome(ok=False, kind="structural"), Path("_stub_.pdf"),
+            lambda p: "x", "auto")
+        check_true("竖排不送视觉", not res.page_images and res.engine == "deepseek-ocr")
+        # OCR 输出早期印本信号 → 升级 accuracy（附转写规则）
+        _dsc.parse_file = lambda p, purpose="rich_layout_recognition": {
+            "pages": ["quod ſit non fit ... the fit fint funt"], "page_count": 1, "usage": {}}
+        res = _run_deepseek_or_oxr(
+            RouteOutcome(ok=False, kind="structural"), Path("_stub_.pdf"),
+            lambda p: "兜底正文" * 12, "auto")
+        check("OCR 信号升级 accuracy", (res.kind, res.reason), ("accuracy", "ocr-signal-upgrade"))
+        check_true("升级附转写规则", any("ſit=sit" in n for n in res.notes))
+        # 失败回落 OXR：用桩替换 _run_structural（不真上传），验证「note 透明 + 确实走了 OXR 路」。
+        # 刻意不设 DSH_OXR_MODE=off —— 那是云端总开关，会把 DeepSeek 一起跳过，测不到回落分支。
+        def _fail(path, purpose="rich_layout_recognition"):
+            raise _dsc.OcrError("balance", "HTTP 402（余额不足）")
+
+        _dsc.parse_file = _fail
+        _orig_structural = globals()["_run_structural"]
+        _captured = {}
+
+        def _fake_structural(o, s, lc, prefer="auto"):
+            _captured["called"] = True
+            o.ok = True
+            o.engine = "oxr"
+            o.degraded = True
+            return o
+
+        globals()["_run_structural"] = _fake_structural
+        try:
+            res = _run_deepseek_or_oxr(
+                RouteOutcome(ok=False, kind="structural"), Path("_stub_.pdf"),
+                lambda p: "回落正文" * 12, "auto")
+            check("OCR 失败回落 OXR", (res.ok, res.engine, res.degraded), (True, "oxr", True))
+            check_true("回落原因透明", any("DeepSeek OCR 不可用" in n for n in res.notes))
+            check_true("回落确实走了 OXR 编排", bool(_captured.get("called")))
+        finally:
+            globals()["_run_structural"] = _orig_structural
+        # 开关 off → 根本不进付费路（auto 不产生意外花费）
+        _dsc.enabled = lambda: False
+        old_mode = os.environ.get("DSH_OXR_MODE")
+        try:
+            os.environ["DSH_OXR_MODE"] = "off"
+            res = _run_deepseek_or_oxr(
+                RouteOutcome(ok=False, kind="structural"), Path("_stub_.pdf"),
+                lambda p: "开关关闭回落正文" * 12, "auto")
+            check("开关 off → OXR 路", (res.ok, res.engine, res.degraded),
+                  (True, "markitdown-fallback", True))
+        finally:
+            if old_mode is None:
+                os.environ.pop("DSH_OXR_MODE", None)
+            else:
+                os.environ["DSH_OXR_MODE"] = old_mode
+
+        # scanned-triage 分流：开关 on → OCR 直跑（无信号交付 / 有信号升级）
+        _dsc.enabled = lambda: True
+        _dsc.parse_file = lambda p, purpose="rich_layout_recognition": {
+            "pages": ["modern scan text ok"], "page_count": 1, "usage": {}}
+        res = _run_scanned_triage(
+            RouteOutcome(ok=False, kind="scanned-triage"), Path("_stub_.pdf"), lambda p: "x")
+        check("triage 开关on → OCR 直跑", (res.ok, res.engine, res.kind),
+              (True, "deepseek-ocr", "structural"))
+        _dsc.parse_file = lambda p, purpose="rich_layout_recognition": {
+            "pages": ["ſiglo ſed ..."], "page_count": 1, "usage": {}}
+        res = _run_scanned_triage(
+            RouteOutcome(ok=False, kind="scanned-triage"), Path("_stub_.pdf"), lambda p: "x")
+        check("triage OCR 信号升级", (res.kind, res.reason), ("accuracy", "ocr-signal-upgrade"))
+        # 开关 off（默认）→ Agent 分诊（第四步现状回归；开关默认关闭时不产生花费）
+        _dsc.enabled = lambda: False
+        _orig_render = globals()["render_pages"]
+        globals()["render_pages"] = lambda src, max_pages=10, dpi=150: ["C:\\fake\\p1.png"]
+        try:
+            res = _run_scanned_triage(
+                RouteOutcome(ok=False, kind="scanned-triage"), Path("_stub_.pdf"), lambda p: "x")
+            check("triage 开关off → Agent 分诊", (res.ok, res.engine), (True, "page-images"))
+        finally:
+            globals()["render_pages"] = _orig_render
+    finally:
+        _dsc.enabled, _dsc.api_key, _dsc.parse_file = _dsc_orig
+
     # normalize_prefer
     check("prefer 大小写", normalize_prefer("  ACCURACY "), "accuracy")
     check("prefer 空值", normalize_prefer(None), "auto")
@@ -1766,7 +2021,7 @@ def _self_test() -> int:
 
     # 兄弟模块的纯函数（同样是断网可跑的自测；markitdown_tools 只测纯函数，
     # 不会触发 import markitdown / numpy —— import 发生在 _converter() 里）
-    for module_name in ("oxr_client", "markitdown_tools"):
+    for module_name in ("oxr_client", "markitdown_tools", "deepseek_ocr_client"):
         try:
             mod = __import__(module_name)
         except Exception as exc:  # noqa: BLE001
@@ -1787,7 +2042,7 @@ def _self_test() -> int:
         for f in failures:
             print(f"     {f}")
         return 1
-    print("OK   doc_route / oxr_client / markitdown_tools 纯函数自测全部通过（含页面图 TTL 清理）")
+    print("OK   doc_route / oxr_client / markitdown_tools / deepseek_ocr_client 纯函数自测全部通过（含页面图 TTL 清理）")
     return 0
 
 

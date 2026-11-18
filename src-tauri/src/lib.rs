@@ -71,6 +71,11 @@ pub fn run(launched_by_autostart: bool) {
             // 显式注入、覆盖继承值），写/删 HKCU\Environment + 读回现值
             process::apply_dsh_home_env,
             process::dsh_home_env_info,
+            // 「安装/卸载」弹窗 Python 块内的 DeepSeek OCR 付费开关（第五步-b）：
+            // 读 HKCU\Environment 的 DSH_DEEPSEEK_OCR + 凭据文件 key 存在性（只判存在）；
+            // 写/删该值 + WM_SETTINGCHANGE 广播 —— 桥接由插件 spawn、重启 DSH 后才看到新值。
+            process::deepseek_ocr_info,
+            process::deepseek_ocr_set,
             // 首选项「npm 全局目录」：读状态（零风险）+ 点按钮把它加进用户 PATH。
             // 用户自己配了 prefix 的机器上，终端里 `dsh` 能不能直接敲就看这个。
             process::npm_path_status,

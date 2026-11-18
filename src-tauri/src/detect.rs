@@ -1519,6 +1519,12 @@ pub(crate) fn broadcast_env_change() {
 /// 用户环境变量里的 DSH_HOME 值名（读 / 写 / 删共用，免得三处拼写漂移）。
 pub const HOME_ENV_NAME: &str = "DSH_HOME";
 
+/// 「DeepSeek OCR 第四引擎」开关的用户环境变量名（2026-11-18 第五步-b）。
+/// 桌面端**不 spawn 桥接**（桥接由 DSH 插件拉起），首选项的 config.json 桥接读不到，
+/// 所以付费开关只能走用户环境变量：HKCU\Environment 写 `on`（删除 = 默认关闭）。
+/// 消费方是 py-bridge 的 deepseek_ocr_client.enabled()（认 1/on/true/yes）。
+pub const DEEPSEEK_ENV_NAME: &str = "DSH_DEEPSEEK_OCR";
+
 /// 读 `HKCU\Environment` 下某个值的**持久值**（未展开 `%VAR%`；REG_SZ 与
 /// REG_EXPAND_SZ 都能读到）。没有这个值或读不到一律 `None` —— 调用方据此区分
 /// 「没设置」与「设置成了别的值」，这两种在提示里必须分开说。

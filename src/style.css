@@ -683,6 +683,17 @@ body.tb-auto .refresh-overlay { top: 0; }
   gap: 8px;
 }
 .py-head { font-weight: 600; }
+/* DeepSeek OCR 付费开关子块（第五步-b）：Python 环境块**内部**、OnlyOffice 块之上。
+   与外层 .python-block 同款虚线分隔 —— 它是「挂在 Python 块里的子块」，
+   不是又一个自带边框的 field（field 套 field 会双重边框）。 */
+.deepseek-block {
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--toolbar-border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 .py-status {
   font-size: 12px;
   color: var(--text-dim);

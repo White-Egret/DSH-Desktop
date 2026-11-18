@@ -359,6 +359,14 @@ pub fn t(key: &str) -> &'static str {
         "home_env_kept" => if en { "Your user environment already has DSH_HOME={0}, and it does not point at a home this app has configured — it was left untouched (delete it yourself if it is stale)." } else { "你的用户环境变量里已有 DSH_HOME={0}，但它不指向本程序配置过的家目录，已原样保留（若确认过期可自行删除）。" },
         "err_home_env_write" => if en { "Cannot write the user environment variable DSH_HOME: {0}" } else { "无法写入用户环境变量 DSH_HOME：{0}" },
         "err_home_env_delete" => if en { "Cannot delete the user environment variable DSH_HOME: {0}" } else { "无法删除用户环境变量 DSH_HOME：{0}" },
+        // DeepSeek OCR 付费开关（第五步-b）：结果文案必含「重启 DSH 后生效」——
+        // 环境变量在进程启动时冻结，桥接由插件 spawn 时才继承，不重启看不到新值。
+        "deepseek_ocr_written" => if en { "User environment variable DSH_DEEPSEEK_OCR=on written: after restarting DSH, modern documents will go through DeepSeek OCR (¥1.5 per 1,000 pages — this incurs charges)." } else { "已把 DSH_DEEPSEEK_OCR=on 写入用户环境变量：重启 DSH 后，现代件会走 DeepSeek OCR（1.5 元/千页，会产生费用）。" },
+        "deepseek_ocr_removed" => if en { "Removed DSH_DEEPSEEK_OCR from your user environment: after restarting DSH, DeepSeek OCR is off (zero cost)." } else { "已从用户环境变量删除 DSH_DEEPSEEK_OCR：重启 DSH 后 DeepSeek OCR 关闭（零花费）。" },
+        "deepseek_ocr_unchanged" => if en { "Your user environment already has DSH_DEEPSEEK_OCR set to an on value; nothing was changed (takes effect after restarting DSH if it was changed elsewhere)." } else { "用户环境变量里已经是 DSH_DEEPSEEK_OCR=on，未做改动（若别处改过，重启 DSH 后生效）。" },
+        "deepseek_ocr_unset" => if en { "Your user environment has no DSH_DEEPSEEK_OCR; the engine is already off (the default), nothing to change." } else { "用户环境变量里没有 DSH_DEEPSEEK_OCR，本来就是关闭状态（默认），无需改动。" },
+        "err_deepseek_env_write" => if en { "Cannot write the user environment variable DSH_DEEPSEEK_OCR: {0}" } else { "无法写入用户环境变量 DSH_DEEPSEEK_OCR：{0}" },
+        "err_deepseek_env_delete" => if en { "Cannot delete the user environment variable DSH_DEEPSEEK_OCR: {0}" } else { "无法删除用户环境变量 DSH_DEEPSEEK_OCR：{0}" },
 
         // ---------- 首选项：npm 全局目录 / 用户 PATH ----------
         // 背景（2026-10-06 真机）：用户自己在 ~/.npmrc 里配了 prefix=D:\Programs\npm、dsh 也装在

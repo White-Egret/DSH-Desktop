@@ -174,6 +174,18 @@
     // ---- Python 能力桥接：把装好的库挂成 AI 工具（状态文案由后端按当前语言生成） ----
     py_bridge_label: 'AI 调用能力（Python 能力桥接）：',
     py_bridge_checking: '正在检测能力桥接状态…',
+    // ---- DeepSeek OCR 付费开关（第五步-b，Python 环境块内子块）----
+    deepseek_title: 'DeepSeek OCR（付费第四引擎）',
+    deepseek_desc: '官方 OCR 服务，1.5 元/千页、按成功页数计费。开启后现代件（表格 / 竖排 / 词典 / 现代扫描）优先走它（质量与视觉持平、便宜约 3 倍）；早期印本与多音标希腊文自动升级 Agent 视觉逐字转写；失败或无 key 自动回落免费 OXR；关闭（默认）时行为与无此引擎完全一致，零花费。',
+    deepseek_checking: '正在检测开关状态…',
+    deepseek_status_fail: '检测 DeepSeek OCR 开关失败: {0}',
+    deepseek_on: '已启用 —— convert_file_to_markdown 的现代件会调用 DeepSeek OCR 并产生计费',
+    deepseek_off: '未启用（默认，零花费）',
+    deepseek_key_yes: 'API Key：已检测到（凭据文件 {0}）',
+    deepseek_key_no: 'API Key：未检测到 —— 开启后每次调用会自动回落 OXR（不报错、不计费）。key 读取顺序：系统环境变量 DSH_DEEPSEEK_API_KEY → 凭据文件 {0} 的 DEEPSEEK_API_KEY 字段。本页面不存储 key。',
+    btn_deepseek_on: '启用 DeepSeek OCR（会产生费用）',
+    btn_deepseek_off: '关闭 DeepSeek OCR',
+    deepseek_restart_note: '开关写入用户环境变量（HKCU\\Environment），重启 DSH 后生效（桥接进程由插件拉起时才继承新值）。',
     // ---- OnlyOffice 块（office.rs，P3）：状态行由后端按当前语言生成，这里只放静态文案 ----
     lbl_office_env: 'OnlyOffice 文档服务（docx / xlsx / pptx / pdf 在线编辑与 AI 生成）',
     office_checking: '正在检测 OnlyOffice…',
@@ -723,6 +735,18 @@
     // ---- Python capability bridge: exposes the installed libraries as AI tools ----
     py_bridge_label: 'AI-callable capabilities (Python capability bridge):',
     py_bridge_checking: 'Detecting the capability bridge…',
+    // ---- DeepSeek OCR paid switch (phase 5-b, sub-block inside the Python block) ----
+    deepseek_title: 'DeepSeek OCR (paid fourth engine)',
+    deepseek_desc: 'The official OCR service at ¥1.5 per 1,000 pages, billed by successfully recognized pages. When on, modern documents (tables / vertical text / dictionaries / modern scans) go through it first (quality on par with agent vision, about 3× cheaper); early prints and polytonic Greek automatically upgrade to agent vision for verbatim transcription; failures or a missing key fall back to the free OXR. When off (the default), behaviour is exactly as if the engine did not exist — zero cost.',
+    deepseek_checking: 'Detecting the switch…',
+    deepseek_status_fail: 'Failed to detect the DeepSeek OCR switch: {0}',
+    deepseek_on: 'On — convert_file_to_markdown will call DeepSeek OCR for modern documents and incur charges',
+    deepseek_off: 'Off (default, zero cost)',
+    deepseek_key_yes: 'API key: detected (credentials file {0})',
+    deepseek_key_no: 'API key: not detected — with the switch on, every call silently falls back to OXR (no error, no charge). Key lookup order: the DSH_DEEPSEEK_API_KEY environment variable, then the DEEPSEEK_API_KEY field in {0}. This page never stores the key.',
+    btn_deepseek_on: 'Enable DeepSeek OCR (incurs charges)',
+    btn_deepseek_off: 'Disable DeepSeek OCR',
+    deepseek_restart_note: 'The switch is written to your user environment (HKCU\\Environment) and takes effect after restarting DSH (the bridge inherits it when the plugin spawns it).',
     // ---- OnlyOffice block (office.rs, P3): status lines are composed backend-side ----
     lbl_office_env: 'OnlyOffice Document Server (docx / xlsx / pptx / pdf editing and AI generation)',
     office_checking: 'Detecting OnlyOffice…',

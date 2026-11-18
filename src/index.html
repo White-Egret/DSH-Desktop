@@ -304,6 +304,23 @@
             </div>
             <pre id="python-log" class="update-progress-log hidden"></pre>
           </div>
+          <!-- DeepSeek OCR 第四引擎付费开关（2026-11-18 第五步-b）。
+               桌面端不 spawn 桥接（桥接由 DSH 插件拉起并继承用户环境变量），
+               所以开关 = 写/删 HKCU\Environment\DSH_DEEPSEEK_OCR（复用 detect.rs
+               三件套 + WM_SETTINGCHANGE 广播），**重启 DSH 后生效** —— 提示必现。
+               API key 只读凭据文件判存在，绝不进 env / 日志 / IPC 明文。
+               默认关闭 = 零花费，行为与无此引擎完全一致。状态两行由
+               main.js 按 deepseek_ocr_info 填（动态文案不挂 data-i18n，同款纪律）。 -->
+          <div class="deepseek-block">
+            <span class="py-head" data-i18n="deepseek_title">DeepSeek OCR（付费第四引擎）</span>
+            <div class="hint" data-i18n-html="deepseek_desc">官方 OCR 服务，1.5 元/千页、按成功页数计费。开启后现代件（表格 / 竖排 / 词典 / 现代扫描）优先走它（质量与视觉持平、便宜约 3 倍）；早期印本与多音标希腊文自动升级 Agent 视觉逐字转写；失败或无 key 自动回落免费 OXR；关闭（默认）时行为与无此引擎完全一致，零花费。</div>
+            <div class="py-status" id="deepseek-status" data-i18n="deepseek_checking">正在检测开关状态…</div>
+            <div class="hint" id="deepseek-key-row"></div>
+            <div class="row gap">
+              <button id="btn-deepseek-toggle" class="btn" data-i18n="btn_deepseek_on">启用 DeepSeek OCR（会产生费用）</button>
+            </div>
+            <div class="hint" data-i18n="deepseek_restart_note">开关写入用户环境变量（HKCU\Environment），重启 DSH 后生效（桥接进程由插件拉起时才继承新值）。</div>
+          </div>
         </div>
         <!-- OnlyOffice 块（P3）：结构与 Python 块同款（py-head/py-status/py-dir/py-progress
              全部复用现有样式，见 style.css 的 py-* 清单）。状态两行都由后端拼好

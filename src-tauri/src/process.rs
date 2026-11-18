@@ -2973,6 +2973,11 @@ pub struct DeepseekOcrReport {
     pub key_present: bool,
     /// 凭据文件的路径（状态行展示「在哪查的 key」用；路径本身不含秘密）
     pub cred_path: String,
+    /// 当前进程树是否**已经**在用持久值：本 launcher 的 env 快照 == 注册表持久值。
+    /// launcher 启动时冻结 env 快照 → 它 spawn 的 DSH → 插件在 DSH 里 spawn 桥接，
+    /// 整条链拿到的都是这份快照。所以「快照 == 注册表」⇔「注册表里的值已被全链使用」：
+    /// true 时文案说「已改为开/关」，false 时说「重启 DSH 后生效」（用户反馈 2026-11-18）。
+    pub in_effect: bool,
 }
 
 /// 判定一个环境变量值是否构成「启用」—— 词表与 py-bridge
@@ -3008,11 +3013,18 @@ fn deepseek_key_present(app: &AppHandle) -> (bool, String) {
 pub async fn deepseek_ocr_info(app: AppHandle) -> DeepseekOcrReport {
     let raw = detect::user_env_raw(detect::DEEPSEEK_ENV_NAME).unwrap_or_default();
     let (key_present, cred_path) = deepseek_key_present(&app);
+    // 本进程 env 快照（launcher 启动时冻结，DSH 与桥接都从它继承）与注册表持久值
+    // 一致 → 全链已在用这个值；不一致 → 还欠一次重启。大小写/空白差异按
+    // 词表归一前先去空白小写比对 —— 「1」和「on」都算启用但值不同，
+    // 这种罕见漂移宁可显示「重启后生效」也不谎称已生效。
+    let proc_raw = std::env::var(detect::DEEPSEEK_ENV_NAME).unwrap_or_default();
+    let in_effect = proc_raw.trim().to_lowercase() == raw.trim().to_lowercase();
     DeepseekOcrReport {
         enabled: deepseek_env_enabled(&raw),
         raw_value: raw,
         key_present,
         cred_path,
+        in_effect,
     }
 }
 

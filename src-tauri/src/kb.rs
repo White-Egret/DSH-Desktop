@@ -74,6 +74,8 @@ const BUNDLE_DIR_NAME: &str = "kb-bundle";
 /// config.json 里的 pending 键。`kb_pending` **同时**是 Config 正式字段
 /// （见 config.rs 那个字段的三条真机教训：正式字段 + 单键读写 + 自愈进门，缺一不可）
 const PENDING_KEY: &str = "kb_pending";
+/// config.json 里的「最近一次注册成功时刻」键（UNIX 毫秒十进制串，见 config.rs 字段注释）。
+const REGISTERED_AT_KEY: &str = "kb_registered_at";
 
 /// 一次 `dsh plugin add/remove` 的超时：那是一次 pnpm 安装，实测几十秒到几分钟。
 /// 与 office / py_bridge 同一档。
@@ -251,16 +253,22 @@ fn package_phrase(phase: KbPhase, pending_here: bool, profile: &str) -> String {
     }
 }
 
-/// 合并状态文案（纯函数，可单测）：两个包的 phase + 两个 pending 位 → 一句人话。
+/// 合并状态文案（纯函数，可单测）：两个包的 phase + 两个 pending 位 + profile
+/// + **effective（当前运行的 DSH 是否已加载这次注册）** → 一句人话。
 ///
 /// 四种主组合照方案 8.6；**其余组合一律逐包点名**，这样「只装成一个」永远不会
 /// 被笼统的「已就绪」盖掉（方案 8.9 第 5 条，这套设计的三根柱子之一）。
+///
+/// effective 只影响「两个都 ready」这一句的尾巴：DSH 在注册之后启动过 →
+/// 「可调用 …工具」（工具真的在）；还没重启 → 诚实说「重启 DSH 后 …」。
+/// 判据在调用方（kb_status_blocking）：dsh_started_at >= 最近注册时刻。
 pub fn kb_merged_message(
     kb: KbPhase,
     kb_pending: bool,
     memory: KbPhase,
     memory_pending: bool,
     profile: Option<&str>,
+    effective: bool,
 ) -> String {
     // prof 转成 String：`i18n::fmt` 的参数槽是 `&dyn Display`，递裸 `&str` 会撞上
     // 「str 没有大小」的 E0277（office.rs 同款坑，那里靠多包一层引用解决）
@@ -272,7 +280,11 @@ pub fn kb_merged_message(
     let both_deferred = kb == KbPhase::PendingActivate && memory == KbPhase::PendingActivate;
 
     if kb_ready && memory_ready {
-        i18n::fmt("kb_msg_both_ready", &[&prof])
+        if effective {
+            i18n::fmt("kb_msg_both_ready_live", &[&prof])
+        } else {
+            i18n::fmt("kb_msg_both_ready", &[&prof])
+        }
     } else if both_deferred {
         i18n::fmt("kb_msg_pending_activate", &[&prof])
     } else if kb_ready && memory == KbPhase::NotInstalled {
@@ -349,11 +361,25 @@ fn kb_status_blocking(app: &AppHandle) -> KbStatus {
     let kb = kb_phase(released || (kb_pending && no_profile), kb_registered);
     let memory = kb_phase(released || (memory_pending && no_profile), memory_registered);
 
+    // 「当前运行的 DSH 是否已加载这次注册」：启动时刻 >= 最近注册时刻 → 可调用。
+    // DSH 没在跑（None）→ false —— 文案说「重启后生效」，下次启动自然加载。
+    // 老配置没记过时刻（None）→ true 兼容：老版本装的要到升级后才看得见这行字，
+    // 那时 DSH 早重启过；把它说成「还要重启」反而是错的。
+    let effective = match (registered_at_ms(app), process::dsh_started_at(app)) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(at_ms), Some(started)) => started
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+            >= at_ms,
+    };
+
     KbStatus {
         kb_phase: kb.as_str().to_string(),
         memory_phase: memory.as_str().to_string(),
         profile: profile.clone().unwrap_or_default(),
-        message: kb_merged_message(kb, kb_pending, memory, memory_pending, profile.as_deref()),
+        message: kb_merged_message(kb, kb_pending, memory, memory_pending, profile.as_deref(), effective),
     }
 }
 
@@ -389,6 +415,29 @@ fn clear_pending(app: &AppHandle) {
     if let Err(e) = write_pending_list(app, &[]) {
         log_line(app, &format!("清除 pending 失败：{e}"));
     }
+}
+
+/// 记下「最近一次注册成功」的时刻（UNIX 毫秒）。状态文案用它判定当前运行的 DSH
+/// 是否已加载这次注册（`dsh_started_at >= 本值` → 工具真的可调用，否则说「重启生效」）。
+/// 写失败不往上抛：后果只是文案保守地说「重启后生效」，不影响注册本身 ——
+/// 与 drop_pending 同一纪律。
+fn touch_registered_at(app: &AppHandle) {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if let Err(e) = config::write_config_key(app, REGISTERED_AT_KEY, &ms.to_string()) {
+        log_line(app, &format!("写入 {REGISTERED_AT_KEY} 失败：{e}"));
+    }
+}
+
+/// 读注册时刻（毫秒）；空/坏值 = None（老配置没记过）。
+fn registered_at_ms(app: &AppHandle) -> Option<u64> {
+    config::load(app)
+        .kb_registered_at
+        .trim()
+        .parse::<u64>()
+        .ok()
 }
 
 // ---------- 注册 / 摘除（照 office::register_office_bundle / remove_office_bundle） ----------
@@ -500,6 +549,7 @@ fn register_with_pending(app: &AppHandle, profile: &str, pkg: &'static str, bun:
     match outcome {
         Ok(()) => {
             drop_pending(app, pkg);
+            touch_registered_at(app);
             let line = i18n::fmt("kb_registered", &[&pkg, &profile]);
             process::setup_progress(app, "deploy", &line);
             log_line(app, &line);
@@ -889,12 +939,12 @@ mod tests {
         zh();
         // 知识层装上了、记忆层没有
         let only_kb =
-            kb_merged_message(KbPhase::Active, false, KbPhase::NotInstalled, false, Some("web"));
+            kb_merged_message(KbPhase::Active, false, KbPhase::NotInstalled, false, Some("web"), true);
         assert!(only_kb.contains("记忆与技能层未安装"), "该点名记忆层：{only_kb}");
         assert!(!only_kb.contains("记忆与知识库已就绪"), "不得笼统报就绪：{only_kb}");
         // 反向：记忆层装上了、知识层没有（异常组合，照样如实报）
         let only_mem =
-            kb_merged_message(KbPhase::NotInstalled, false, KbPhase::Active, false, Some("web"));
+            kb_merged_message(KbPhase::NotInstalled, false, KbPhase::Active, false, Some("web"), true);
         assert!(only_mem.contains("知识库未安装"), "该点名知识层：{only_mem}");
         assert!(!only_mem.contains("记忆与知识库已就绪"), "不得笼统报就绪：{only_mem}");
     }
@@ -902,10 +952,10 @@ mod tests {
     #[test]
     fn merged_message_four_combos() {
         zh();
-        let both = kb_merged_message(KbPhase::Active, false, KbPhase::Active, false, Some("web"));
+        let both = kb_merged_message(KbPhase::Active, false, KbPhase::Active, false, Some("web"), true);
         assert!(both.contains("记忆与知识库已就绪"), "实际：{both}");
         let none =
-            kb_merged_message(KbPhase::NotInstalled, false, KbPhase::NotInstalled, false, None);
+            kb_merged_message(KbPhase::NotInstalled, false, KbPhase::NotInstalled, false, None, true);
         assert_eq!(none, "未安装");
         // DSH 在跑时装下来的形状：两个都已释放、都还没注册 → 「进入 DSH 后生效」
         let deferred = kb_merged_message(
@@ -914,27 +964,43 @@ mod tests {
             KbPhase::PendingActivate,
             true,
             Some("web"),
+            false,
         );
         assert!(deferred.contains("进入 DSH 后生效"), "实际：{deferred}");
         assert!(!deferred.contains("已就绪"), "没注册不得说就绪：{deferred}");
+    }
+
+    /// 「两个都 ready」的文案必须区分「这次注册已被当前 DSH 加载」与否：
+    /// 没加载 → 诚实说重启后生效；加载过 → 直接说可调用（用户重构建重启后
+    /// 还看到「重启后生效」会以为没生效 —— 反馈于 2026-11-18）。
+    #[test]
+    fn both_ready_distinguishes_effective() {
+        zh();
+        let pending_restart =
+            kb_merged_message(KbPhase::Active, false, KbPhase::Active, false, Some("web"), false);
+        assert!(pending_restart.contains("重启 DSH 后"), "未加载该说重启：{pending_restart}");
+        let live =
+            kb_merged_message(KbPhase::Active, false, KbPhase::Active, false, Some("web"), true);
+        assert!(live.contains("可调用 kb_*"), "已加载该说可调用：{live}");
+        assert!(!live.contains("重启"), "已生效还提重启就是误导：{live}");
     }
 
     /// 任一 Active 但 pending 还挂着 → 合并行也必须走「已注册…生效」口径
     #[test]
     fn merged_message_keeps_honest_wording_for_pending_active() {
         zh();
-        let s = kb_merged_message(KbPhase::Active, true, KbPhase::Active, true, Some("web"));
+        let s = kb_merged_message(KbPhase::Active, true, KbPhase::Active, true, Some("web"), false);
         assert!(!s.contains("记忆与知识库已就绪"), "pending 未清不得报整体就绪：{s}");
         assert!(s.contains("已注册进 profile"), "实际：{s}");
         // 兜底行按**包名**各说一句，两个都要出现
         assert!(s.contains("dsh-kb") && s.contains("dsh-memory2skill"), "两个包都要点名：{s}");
         // 半边已注册、半边 pending 也没清：同样逐包点名，不合并成一句好话
-        let mix = kb_merged_message(KbPhase::Active, true, KbPhase::NotInstalled, false, Some("web"));
+        let mix = kb_merged_message(KbPhase::Active, true, KbPhase::NotInstalled, false, Some("web"), false);
         assert!(mix.contains("未安装"), "实际：{mix}");
         assert!(mix.contains("dsh-kb") && mix.contains("dsh-memory2skill"), "实际：{mix}");
         assert!(!mix.contains("记忆与知识库已就绪"), "实际：{mix}");
         // NeedsRelease（profile 里有、tgz 被清过）也走逐包点名
-        let needs = kb_merged_message(KbPhase::NeedsRelease, false, KbPhase::Active, false, Some("web"));
+        let needs = kb_merged_message(KbPhase::NeedsRelease, false, KbPhase::Active, false, Some("web"), true);
         assert!(needs.contains("dsh-kb"), "实际：{needs}");
         assert!(!needs.contains("记忆与知识库已就绪"), "实际：{needs}");
     }

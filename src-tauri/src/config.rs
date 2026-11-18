@@ -174,6 +174,16 @@ pub struct Config {
     /// ①本字段（load/save 往返不丢）；②save_config 的「缺字段沿用磁盘值」兜底；
     /// ③`kb::activate_pending` 的自愈进门（标记丢了，只要 tgz 已释放就照样补注册）。
     pub kb_pending: String,
+    /// 「最近一次 kb 注册成功」的时刻（UNIX 毫秒的**十进制字符串**）。
+    /// 空串 = 老配置没记过 / 从未注册。
+    ///
+    /// 用途只有一个：状态文案区分「刚注册、要重启 DSH 才加载」与「DSH 已在
+    /// 注册之后启动过、工具真的可调用」—— 判据是 `dsh_started_at >= 本值`。
+    /// 与 kb_pending 同一套单键读-改-写（write_config_key），不是 UI 设置项。
+    ///
+    /// ⚠ 刻意用 String 而不是 u64：`write_config_key` 把值写成 JSON 字符串
+    /// （line 1919 的 Value::String），数值字段会整份 config 反序列化失败。
+    pub kb_registered_at: String,
 }
 
 impl Default for Config {
@@ -231,6 +241,8 @@ impl Default for Config {
             office_bridge_pending: String::new(),
             // 空 = 没有「待注册」的插件包（见该字段注释；值是逗号分隔的包名列表）
             kb_pending: String::new(),
+            // 0 = 老配置没记过注册时刻 —— 文案按「已生效」兼容处理（见 kb.rs effective）
+            kb_registered_at: String::new(),
         }
     }
 }
@@ -2066,9 +2078,11 @@ mod tests {
     fn legacy_config_without_kb_pending_falls_back_to_empty() {
         // 老版本 config.json 没有 kb_pending 键：serde(default) 必须兜住，
         // 且回落值是「没有 pending」而不是某个脏包名。
+        // kb_registered_at 同一次加的键：缺失必须回落 0（= 文案按已生效兼容处理）。
         let legacy = r#"{"port": 3080, "language": "zh"}"#;
         let c: Config = serde_json::from_str(legacy).expect("legacy config must parse");
         assert!(c.kb_pending.is_empty());
+        assert_eq!(c.kb_registered_at, "");
     }
 
     // 依赖 Windows 路径语义（盘符 / 反斜杠 / Program Files 环境变量）：

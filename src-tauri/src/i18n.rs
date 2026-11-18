@@ -636,6 +636,9 @@ pub fn t(key: &str) -> &'static str {
         "kb_active" => if en { "Registered into profile \"{0}\"" } else { "已注册进 profile「{0}」" },
         // 合并状态行的四种主组合 + 逐包点名（部分失败必须点得出是哪一个）
         "kb_msg_both_ready" => if en { "Memory and knowledge base are ready (profile \"{0}\"): restart DSH to load the kb_* and memory2skill_* tools." } else { "记忆与知识库已就绪（profile「{0}」）：重启 DSH 后 AI 即可调用 kb_* 与 memory2skill_* 工具。" },
+        // 当前运行的 DSH 已在注册之后启动过（判据见 kb_status_blocking）：工具真的在，
+        // 不再提重启（用户反馈 2026-11-18：重启后还见「重启后生效」会以为没生效）
+        "kb_msg_both_ready_live" => if en { "Memory and knowledge base are ready (profile \"{0}\"): the kb_* and memory2skill_* tools are callable." } else { "记忆与知识库已就绪（profile「{0}」）：可调用 kb_* 与 memory2skill_* 工具。" },
         "kb_msg_pending_activate" => if en { "Written to profile \"{0}\"; it takes effect the next time DSH starts." } else { "已写入（profile「{0}」），进入 DSH 后生效。" },
         "kb_msg_kb_only" => if en { "Knowledge base ready (profile \"{0}\"); the memory & skills layer is not installed." } else { "知识库已就绪（profile「{0}」）；记忆与技能层未安装。" },
         "kb_msg_memory_only" => if en { "Memory layer ready; the knowledge base is not installed (profile \"{0}\")." } else { "记忆层已就绪；知识库未安装（profile「{0}」）。" },

@@ -186,6 +186,9 @@
     btn_deepseek_on: '启用 DeepSeek OCR（会产生费用）',
     btn_deepseek_off: '关闭 DeepSeek OCR',
     deepseek_restart_note: '开关写入用户环境变量（HKCU\\Environment），重启 DSH 后生效（桥接进程由插件拉起时才继承新值）。',
+    // 全链已在用注册表里的值（launcher env 快照 == 持久值）→ 陈述现状，不再提重启
+    deepseek_env_on_now: '用户环境变量（HKCU\\Environment）已改为开。',
+    deepseek_env_off_now: '用户环境变量（HKCU\\Environment）已改为关（默认，零花费）。',
     // ---- OnlyOffice 块（office.rs，P3）：状态行由后端按当前语言生成，这里只放静态文案 ----
     lbl_office_env: 'OnlyOffice 文档服务（docx / xlsx / pptx / pdf 在线编辑与 AI 生成）',
     office_checking: '正在检测 OnlyOffice…',
@@ -747,6 +750,9 @@
     btn_deepseek_on: 'Enable DeepSeek OCR (incurs charges)',
     btn_deepseek_off: 'Disable DeepSeek OCR',
     deepseek_restart_note: 'The switch is written to your user environment (HKCU\\Environment) and takes effect after restarting DSH (the bridge inherits it when the plugin spawns it).',
+    // The whole chain already uses the persisted value (launcher env snapshot == registry) → state the fact, drop the restart hint
+    deepseek_env_on_now: 'User environment (HKCU\\Environment) is now set to on.',
+    deepseek_env_off_now: 'User environment (HKCU\\Environment) is now set to off (default, zero cost).',
     // ---- OnlyOffice block (office.rs, P3): status lines are composed backend-side ----
     lbl_office_env: 'OnlyOffice Document Server (docx / xlsx / pptx / pdf editing and AI generation)',
     office_checking: 'Detecting OnlyOffice…',

@@ -2718,6 +2718,13 @@ async function refreshDeepseekStatus() {
       : t('deepseek_key_no', s.cred_path);
     const btn = $('btn-deepseek-toggle');
     if (btn) btn.textContent = s.enabled ? t('btn_deepseek_off') : t('btn_deepseek_on');
+    // 尾注两态：全链已在用注册表里的值（launcher env 快照 == 持久值）→ 陈述现状；
+    // 还没被继承 → 保留「重启 DSH 后生效」。判据由后端算（deepseek_ocr_info.in_effect）。
+    const noteEl = $('deepseek-restart-note');
+    if (noteEl) {
+      if (!s.in_effect) noteEl.textContent = t('deepseek_restart_note');
+      else noteEl.textContent = s.enabled ? t('deepseek_env_on_now') : t('deepseek_env_off_now');
+    }
   } catch (e) {
     deepseekState.loading = false;
     el.textContent = t('deepseek_status_fail', e);

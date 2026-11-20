@@ -386,7 +386,10 @@ fn kb_status_blocking(app: &AppHandle) -> KbStatus {
 // ---------- pending 标记（单键读写；值是「还差注册的包名」逗号列表） ----------
 
 /// 读 pending 列表。空串 / 缺键 / 全空白 → 空列表（清除标记写的是空串，不是删键）。
-fn pending_list(app: &AppHandle) -> Vec<String> {
+///
+/// `pub(crate)`：`process::register_pending_kb_before_start` 要在 spawn DSH **之前**
+/// 先看一眼有没有待注册的包（空列表 = 常态，零开销直接返回）。
+pub(crate) fn pending_list(app: &AppHandle) -> Vec<String> {
     config::load(app)
         .kb_pending
         .split(',')

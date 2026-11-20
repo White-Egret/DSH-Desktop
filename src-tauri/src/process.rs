@@ -1937,6 +1937,78 @@ fn register_pending_office_before_start(app: &AppHandle) {
     }
 }
 
+/// kb pre-boot 注册的结果。抽成枚举是为了让三条判据（常态零开销 / 真跑了一次 /
+/// panic 被拦住）能在没有 Tauri 运行时的单测里逐条钉住 —— `AppHandle` 在 `cargo test`
+/// 里造不出来，而 office 那版没有这个缝隙，所以它至今没有测试。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PrebootOutcome {
+    /// 没有 pending：常态路径，一次都没调注册（零开销）
+    Skipped,
+    /// 真跑了一次，带 `activate_pending` 的返回（Some = 值得上 UI 的日志行）
+    Ran(Option<String>),
+    /// 注册链路 panic：已捕获，调用方放行启动
+    Panicked,
+}
+
+/// `register_pending_kb_before_start` 的执行体：**空列表就直接返回**（不调注册、
+/// 不动状态行），非空则 panic 兜底地跑一次。与 `AppHandle` 解耦，好让单测喂合成闭包
+/// —— `AppHandle` 在 `cargo test` 里造不出来，而这个判断又在启动链上，值得被钉住。
+///
+/// `register` 里包含「显示进度」+「真去注册」两件事，所以它只在有 pending 时被调用：
+/// 常态启动连状态行都不会动（这正是验收 2 要的零开销）。
+fn preboot_kb<F>(pending: &[String], register: F) -> PrebootOutcome
+where
+    F: FnOnce() -> Option<String>,
+{
+    if pending.is_empty() {
+        // 常态：日常启动 99% 走到这里，除了读一次 config 什么开销都不该有
+        return PrebootOutcome::Skipped;
+    }
+    // 注册链路会跑 pnpm / npm 子进程，正常不 panic；但这条路径在启动链上，
+    // panic 绝不能把启动一起带走 —— 捕获、落日志、放行（与 office wrapper 同一纪律）。
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(register)) {
+        Ok(line) => PrebootOutcome::Ran(line),
+        Err(_) => PrebootOutcome::Panicked,
+    }
+}
+
+/// 启动前把「记忆，技能与知识库」两个插件的 pending 注册做掉（start_internal 里的
+/// 调用点有完整注释）。结构逐段镜像 `register_pending_office_before_start`：
+/// 判标记 → 显示进度 → panic 兜底跑注册 → 成功补一条 UI 日志、失败只落盘。
+///
+/// 与 office 版的两处差别（都只因为 kb 的数据形状不同，不是另立设计）：
+///   ① office 用 `read_config_flag` 判「有没有 pending」；kb 的 pending 是包名列表
+///      （部分失败只留没装上的那个），所以读 `pending_list` —— 判空即等价于判假。
+///   ② office 把「显示进度」写在 wrapper 里、wrapper 自己判标记；这里把两件事都放进
+///      `preboot_kb` 的闭包，于是**「有 pending」这个判断只有一处**，不存在
+///      「wrapper 判了一次、执行体又判一次」的双重守卫与不可达分支。
+fn register_pending_kb_before_start(app: &AppHandle) {
+    // 读一次列表交给 preboot_kb 裁决：空 → Skipped，连状态行都不碰。
+    let pending = crate::kb::pending_list(app);
+    let outcome = preboot_kb(&pending, || {
+        // 只有真有活时才走到这里：先让状态行说实话，再真去注册
+        set_status(
+            app,
+            "starting",
+            Some(i18n::t("status_kb_registering").to_string()),
+        );
+        crate::kb::activate_pending(app)
+    });
+    match outcome {
+        // activate_pending 的成功/失败行它自己已写进 desktop.log；这里补一条 UI 日志
+        PrebootOutcome::Ran(Some(line)) => emit_log(app, "launcher", line),
+        PrebootOutcome::Ran(None) => {} // 安静路径（或它已按原因写过日志）
+        PrebootOutcome::Panicked => {
+            logger::append_line(
+                &logger::desktop_log_path(app),
+                "[kb] 启动前注册 panic（不阻断启动，下次启动重试）",
+            );
+        }
+        // 无 pending（常态）：什么都没发生，也不需要日志
+        PrebootOutcome::Skipped => {}
+    }
+}
+
 pub(crate) fn start_internal(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let st = current_status(app);
@@ -2043,6 +2115,13 @@ pub(crate) fn start_internal(app: &AppHandle) -> Result<(), String> {
     // 是唯一能「一次重启生效」的窗口。注册耗时几秒（npm pack + pnpm add），期间状态
     // 行显示进度；失败只记日志，绝不阻断启动（下次启动再试）。
     register_pending_office_before_start(app);
+
+    // ---- 记忆，技能与知识库（dsh-kb + dsh-memory2skill）：同一窗口、同一理由 ----
+    // kb 之前没跟上这一步，所以它一直要重启两次才激活（2026-11-20 用户回报）。
+    // 两个 wrapper 各自读自己的 pending、各自 catch_unwind：一个失败/panic 不影响
+    // 另一个，也不影响启动。running 钩子里的那次调用原样保留 —— pre-boot 是加速，
+    // 不是替代兜底。
+    register_pending_kb_before_start(app);
 
     // 本轮启动前清空上一次解析到的实际地址与端点闩锁。
     // 端点必须在这里清（而不是 spawn_log_reader 里）：那个读取器被安全模式实例复用，
@@ -9644,5 +9723,57 @@ mod tests {
         assert_eq!(music_mime("flac"), "audio/flac");
         assert_eq!(music_mime(""), "application/octet-stream");
         assert_eq!(music_mime("wma"), "application/octet-stream");
+    }
+
+    // ---------- kb pre-boot 注册（register_pending_kb_before_start） ----------
+    //
+    // 这三条钉的是「一次重启生效」那条链的可测部分。真机那条（装完重启一次工具就
+    // 能调用）cargo 测不到 —— 它依赖 DSH 真实 boot 顺序，只能人工验；这里守的是
+    // 逻辑前提：常态不花钱、有事真去办、办砸了不拖累启动。
+
+    /// 验收 2：无 pending → 一次注册都不调（日常启动 99% 的路径）。
+    /// 用计数器证明「零开销」是真的没调，而不是调了但被忽略。
+    #[test]
+    fn preboot_kb_skips_without_pending() {
+        let mut calls = 0;
+        let outcome = preboot_kb(&[], || {
+            calls += 1;
+            Some("不该跑".to_string())
+        });
+        assert_eq!(outcome, PrebootOutcome::Skipped, "空列表必须走 Skipped");
+        assert_eq!(calls, 0, "空列表时注册闭包一次都不该被调用（零开销）");
+    }
+
+    /// 验收 3：有 pending → 真的调了一次注册，并把它的日志行原样带出来。
+    /// 两个包都欠着（部分失败的完整形状）也要只跑一次 —— 一次
+    /// `activate_pending` 内部就包含逐包补注册，不该按包名循环调用。
+    #[test]
+    fn preboot_kb_runs_once_and_returns_its_line() {
+        for pending in [
+            vec!["dsh-kb".to_string()],
+            vec!["dsh-memory2skill".to_string()],
+            vec!["dsh-kb".to_string(), "dsh-memory2skill".to_string()],
+        ] {
+            let mut calls = 0;
+            let outcome = preboot_kb(&pending, || {
+                calls += 1;
+                Some("已补注册".to_string())
+            });
+            assert_eq!(calls, 1, "{pending:?} 只该调一次 activate_pending");
+            assert_eq!(outcome, PrebootOutcome::Ran(Some("已补注册".to_string())));
+        }
+    }
+
+    /// 验收 4：注册链路 panic → 被捕获成 Panicked，调用方据此只记日志、放行启动。
+    /// 这条在 `panic = abort` 的 profile 下会真中止进程 —— 本项目用默认 unwind，
+    /// 所以它是有效的（`cargo test` 也会因此只在 unwind 配置下有意义）。
+    #[test]
+    fn preboot_kb_contains_panic_instead_of_blocking_startup() {
+        let payload = std::panic::catch_unwind(|| {
+            preboot_kb(&["dsh-kb".to_string()], || panic!("模拟注册链路 panic"))
+        });
+        // preboot_kb 自己把 panic 吃了，所以外层 catch_unwind 应当拿到 Ok
+        let outcome = payload.expect("preboot_kb 必须内部捕获 panic，不能让它冒到调用方");
+        assert_eq!(outcome, PrebootOutcome::Panicked, "panic 必须变成 Panicked 而不是传播");
     }
 }

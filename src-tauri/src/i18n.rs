@@ -581,6 +581,9 @@ pub fn t(key: &str) -> &'static str {
         "office_elevate_no_result" => if en { "The elevated script finished without writing back a result — it may not have run at all. Check whether the change actually took effect (e.g. is the folder gone?), then retry or clean up manually." } else { "提权脚本执行完毕但没有写回结果（可能根本没运行）。请先核实改动是否实际生效（例如目标目录是否已被移除），再重试或手动清理。" },
         // 启动前置注册（start_internal → register_pending_office_before_start）的状态行
         "status_office_registering" => if en { "Registering the OnlyOffice plugin before DSH starts (a few seconds)…" } else { "启动 DSH 前先注册 OnlyOffice 插件（几秒钟）…" },
+        // 记忆/知识库插件的启动前置注册（register_pending_kb_before_start）。
+        // 与 office 那条同一时刻、同一理由：在 spawn 之前注册才能「一次重启生效」。
+        "status_kb_registering" => if en { "Registering the memory & knowledge-base plugins before DSH starts (a few seconds)…" } else { "启动 DSH 前先注册记忆与知识库插件（几秒钟）…" },
         "office_install_fail" => if en { "The OnlyOffice installer exited with code {0}." } else { "OnlyOffice 安装器退出码 {0}。" },
         "office_install_verify_fail" => if en { "The installer finished, but no OnlyOffice installation was detected afterwards." } else { "安装器已退出，但没有检测到 OnlyOffice 安装。" },
         "office_step_config" => if en { "Merging Document Server config (JWT + private-IP allowlist) and restarting services... a second UAC prompt will appear - click Yes." } else { "正在合并 Document Server 配置（JWT + 私网放行）并重启服务…（会再弹一次 UAC 授权，要点「是」）" },

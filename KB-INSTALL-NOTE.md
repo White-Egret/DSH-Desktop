@@ -216,3 +216,69 @@ tgz 是 `include_bytes!` 在构建期嵌进二进制的，文件名带版本号 
 3. `resources/kb-bundle/` 的新 tgz 必须入库（`.gitignore` 例外已放行）；`dsh-memory2skill-0.4.9.tgz` 已删，别加回来。
 4. 装上新构建后，profile 里那条 `file:…\kb-bundle\dsh-memory2skill-0.4.9.tgz` 依赖会被重装改写为 0.5.1；
    在此之前它指向的是第三轮手工补回的那份字节，别手动删。
+
+---
+
+## 2026-11-20 第五轮：kb 补 pre-boot 注册（两次重启 → 一次）
+
+**现象**（用户真机）：运行中点「安装记忆与知识库」→ 重启 **一次** → 工具仍然调不出来，必须**再重启一次**。
+office 插件没这个毛病，因为它在 2026-11-06 就加了 pre-boot 注册，**kb 当时没跟上**。
+
+**机理**：DSH 的 boot graph 在启动扫完插件后就组装死了。`set_status("running")` 钩子触发时 DSH
+**已经 boot 完**，此时再 `dsh plugin add`，新包进不了**本次**清单 —— 必须再重启。而
+`start_internal` 里 spawn **之前**那一刻 DSH 还没起、profile 无人占用，是「一次重启生效」的唯一窗口。
+
+**改法**（照搬 `register_pending_office_before_start`，`process.rs`）：
+
+| 位置 | 内容 |
+|---|---|
+| `process.rs:1940` | 新增 `enum PrebootOutcome { Skipped, Ran(Option<String>), Panicked }` + `fn preboot_kb(pending, register)` |
+| `process.rs:1971` | 新增 `fn register_pending_kb_before_start(app)` —— 逐段镜像 office：判 pending → 显示进度 → panic 兜底跑注册 → 成功补 UI 日志、失败只落盘 |
+| `process.rs:2117/2124` | `register_pending_office_before_start(app)` 之后加 `register_pending_kb_before_start(app)`，两者都在 spawn（:2194）之前 |
+| `kb.rs:389` | `pending_list` 由私有改 `pub(crate)`（pre-boot 要先看一眼有没有活） |
+| `i18n.rs:586` | 新增 `status_kb_registering`（zh/en 同一条） |
+
+与 office 范本的两处差异，都只因 kb 的数据形状不同：
+
+1. office 用 `read_config_flag` 判有无 pending；kb 的 pending 是**包名列表**（部分失败只留没装上的那个），
+   所以读 `pending_list` 判空 —— 等价。
+2. office 把「显示进度」写在 wrapper 里、wrapper 自己判标记；kb 版把「显示进度 + 真去注册」都放进
+   `preboot_kb` 的闭包，于是**「有 pending」这个判断只有一处**，不存在双重守卫与不可达分支。
+
+**为什么需要那个 `preboot_kb` 缝隙**：`AppHandle` 在 `cargo test` 里造不出来，所以 office 那版至今
+**没有任何测试**（三条判据全靠人工）。抽出一个只吃 `&[String]` + 闭包的执行体后，三条都能钉住：
+
+- `preboot_kb_skips_without_pending`：空列表 → `Skipped`，且用计数器证明注册闭包**一次都没被调用**
+  （零开销是真的没调，不是调了被忽略）；
+- `preboot_kb_runs_once_and_returns_its_line`：三种 pending 形状（单 kb / 单 memory / 两个都在）
+  都只调**一次** `activate_pending` —— 部分失败时不该按包名循环调用；
+- `preboot_kb_contains_panic_instead_of_blocking_startup`：注册链 panic → 变成 `Panicked`，
+  冒不到调用方（启动照常）。
+
+**running 钩子原样保留**（`process.rs:505-519`，含它自己那层 `catch_unwind`）：pre-boot 是**加速**，
+不是替代兜底 —— pre-boot 失败/漏掉时，下次进门仍会补注册（退回两次重启，可接受）。
+
+**验收 8 为什么自然成立**（本轮最值得记的一条）：`kb_status` 的 `effective`（状态行说「可调用」还是
+「还要重启」）判的是 `dsh_started_at >= kb_registered_at`，两个时刻分别写在 `process.rs:2220`
+（spawn 之后）与 `kb.rs:555`（注册成功时）：
+
+- **改前**：先 spawn（`started_at` = T0）→ DSH boot 完 → running 钩子注册（`registered_at` = T1 > T0）
+  → `T0 >= T1` 为假 → 状态行说「重启 DSH 后生效」—— 用户确实得再重启一次。
+- **改后**：pre-boot 先注册（`registered_at` = T0′）→ 才 spawn（`started_at` = T1′ > T0′）
+  → `T1′ >= T0′` 为真 → 状态行直接说可调用，且本次启动 DSH 就加载了新包。
+
+`kb_status` 一行代码都不用改 —— 顺序一变，判据自然变对。
+
+**验证**：`cargo test --lib` **287 passed / 0 failed**（284 + 新增 3 条）；四护栏全绿
+（`check:i18n-args` / `check:spawn-recursion` 扫 560 个函数无环 / `check:versions` 1.8.6 六处一致 /
+`verify:include-str`）。cargo 环境这次把 **TMP / TEMP / USERPROFILE 都指到工作区**
+（`D:\DSH\Workspace\.test-env\{tmp,profile}`）—— 上一轮那 53 个红正是临时目录权限造成的假失败。
+
+**真机验证步骤**（cargo 测不到真实 boot 顺序）：
+
+1. 装 1.8.6 构建，启动 DSH（此时没有 pending，启动应当**完全无感**）。
+2. 在 DSH 运行中点「安装记忆与知识库」→ 状态行说「已写入，进入 DSH 后生效」。
+3. **重启一次**（不要两次）→ 启动时应看到状态行短暂显示「启动 DSH 前先注册记忆与知识库插件（几秒钟）…」。
+4. DSH 起来后：`kb_status` / `memory2skill_status` 直接可调用，面板状态行说可调用而不是「重启后生效」。
+5. 反面检查：`desktop.log` 里应有 `[kb] activate_pending：…` 一行（pre-boot 真跑了）；之后再启动
+   （pending 已清）应当**没有**这一行、也不闪进度。

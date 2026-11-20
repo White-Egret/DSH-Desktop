@@ -3,7 +3,7 @@
 本次给「安装/卸载」弹窗（`manage-modal`）加了一个块，一颗按钮、一行合并状态，一次装齐两个 DSH 插件：
 
 - **dsh-kb 0.4.2**（知识层：`kb_scan/extract/write/status/search` + 词典 `dict_lookup/dict_search` + 页面图谱；0.4.2 = inject 修复 + vault 默认 `D:/KB-Vault`）
-- **dsh-memory2skill 0.4.9**（记忆/技能层：逐字记录纠正 → 雷达 → 起草 SKILL.md → 门禁 → 人工 commit；0.4.9 = inject 修复发布版，另含 0.4.7/0.4.8 以来新增的 `memory2skill_recall`）
+- **dsh-memory2skill 0.5.1**（记忆/技能层：逐字记录纠正 → 雷达 → 起草 SKILL.md → 门禁 → 人工 commit；0.5.1 = 情景捕获的事件形状修复，详见文末第四轮）
 
 设计依据是 `D:\DSH\Workspace\plugins\dsh-kb-plan.md` 第八章。**后端模板是 `office.rs`**（`py_bridge` 刻意没有安装命令），前端三件套照 office 那套，事件走 `target="kb"`。
 
@@ -95,7 +95,7 @@ tgz 是 `include_bytes!` 在构建期嵌进二进制的，文件名带版本号 
 **没做（需要你在真机上跑）：**
 
 - 没有实机点过「安装…/卸载…」，所以验收 1–4、6–8 仍是未验证状态：进度滚动、`dsh plugin add file:<tgz>` 在你机器上对这两个包的真实耗时与输出、装完重启 DSH 后 `kb_status` 与 `memory2skill_*` 是否都出现在工具列表、卸载后 pnpm 里两个包是否都干净。
-- 没做 Tauri 全量打包（`cargo build` / `npm run tauri build`），只到 `check` + 测试链接为止；安装包体积会增加约 340 KB（两个 tgz 嵌进二进制）。
+- 没做 Tauri 全量打包（`cargo build` / `npm run tauri build`），只到 `check` + 测试链接为止；安装包体积会增加约 363 KB（两个 tgz 嵌进二进制：`dsh-kb-0.4.2.tgz` 164,404 B + `dsh-memory2skill-0.5.1.tgz` 207,150 B = 371,554 B）。
 - `dsh plugin add file:` 这条路我只按 office 的既有实现照抄（office 在你机器上是跑通过的），差别是少一步 `npm pack`。
 
 **已知边界**：状态判据是文件系统 + pending，问不到运行中的宿主，所以「已就绪」始终意味着「重启 DSH 后生效」；要收窄这个缝隙就上文那条 HTTP 查 `listBundles` 的可选增强。
@@ -114,7 +114,7 @@ tgz 是 `include_bytes!` 在构建期嵌进二进制的，文件名带版本号 
 
 **memory2skill 的 `npm run check` 有一处既有漂移**（与本次无关、未修）：`scripts/host-check.mjs:70` 期望 **8** 个工具，但源码在 0.4.8 打包之后新增了 `memory2skill_recall`（现注册 **9** 个），host-check 因此报「应注册 8 个工具，实际 9」。0.4.8 的成品包里确实只有 8 个 —— 漂移在仓库里早于本轮。本轮按约定跳过该子步骤（typecheck / build / test 145 例 / verify-skills 全绿）；下次动插件仓库时把 host-check 的期望改成 9 即可（`scripts/` 不进 tgz，改它不影响成品）。
 
-**推送提醒**：拷贝 DSH-Desktop 到本地仓库后，`resources/kb-bundle/` 的两个**新** tgz（`dsh-kb-0.4.2.tgz`、`dsh-memory2skill-0.4.9.tgz`）必须入库 —— `.gitignore` 的例外已放行，普通 `git add .` 即可；旧 tgz（0.4.1 / 0.4.6）已删，别再把它们加回来。`src-tauri/.cargo/` 仍被忽略（里面是本机绝对路径的 target-dir 配置，别提交）。
+**推送提醒**：拷贝 DSH-Desktop 到本地仓库后，`resources/kb-bundle/` 的两个 tgz 必须入库（当前为 `dsh-kb-0.4.2.tgz`、`dsh-memory2skill-0.5.1.tgz`，见文末第四轮）—— `.gitignore` 的例外已放行，普通 `git add .` 即可；被替换掉的旧 tgz 已删，别再把它们加回来。`src-tauri/.cargo/` 仍被忽略（里面是本机绝对路径的 target-dir 配置，别提交）。
 
 ---
 
@@ -166,3 +166,53 @@ tgz 是 `include_bytes!` 在构建期嵌进二进制的，文件名带版本号 
 
 **还没做**：重新构建 Desktop 并打包，让上面那条代码修复真正随程序分发。
 在装上新构建之前，**再走一次「卸载 → 装新版」还会复现**（只是这次可以用同样的两个 tgz 手工补回）。
+
+---
+
+## 2026-11-20 第四轮：嵌入包换到 memory2skill 0.5.1（情景捕获的事件形状修复）
+
+**插件侧的缺陷**（不在 Desktop 代码里，但随 Desktop 分发）：`dsh-memory2skill` 的情景监听器把
+`turn` / `reason` 读在事件**顶层**，而 DSH 真实事件把它们嵌在 `data` 里
+（`dsh-session/lib/index.js:1536-1542` 造的是 `{type, seq, time, data}`；
+`dsh-agent-loop/lib/index.js:819` 的 `turn/end` 是 `data: {turn, reason}`；
+`:865` 的 `user/message` 的 data **就是 UserMessage 本身、不含 turn**）。
+后果：buf 永不建立 → `turn_stats` 0 行（P1 守卫无数据定标）、情景记忆空 —— 真机实测双双为空。
+
+**为什么插件的 158 个测试没抓到**：测试替身造假事件时把 `turn`/`reason` 也放在顶层，
+与代码的错误读法自洽。本轮把 5 个测试文件的替身全部改成真实嵌套形状，并新增
+`test/event-shape.test.mjs`（3 个用例）。红→绿证据（用绝对路径重跑，第一次因 PowerShell
+`cd` 不跨进程生效而误判，已复核）：
+
+| 用例 | 旧代码 | 修复后 |
+|---|---|---|
+| user → assistant → turn/end 后 turn_stats 落行 + episode 含 user 正文 | ✖ `turn_stats 应落 1 行，实际 0` | ✔ |
+| user/message 不带 turn 也必须缓冲 | ✖ | ✔ |
+| 顶层 turn 不再被采信（防未来回归） | ✔（旧代码读顶层，碰巧能处理） | ✔ |
+
+插件侧结果：`npm run check` 全链绿（161 测试通过、host-check 的 `inject = [tools, systemPrompt]` 通过），
+0.5.0 → **0.5.1**，产物 `dist/dsh-memory2skill-0.5.1.tgz`（207,150 字节）。守卫的定标 / 触发 / 介入算法零改动
+（`src/loopguard.ts` 的 mtime 停在 11-15，本轮只动 `src/index.ts` 与测试）。
+
+**Desktop 侧改动**（只有嵌入包，安装逻辑一行没动）：
+
+| 位置 | 改动 |
+|---|---|
+| `src-tauri/resources/kb-bundle/` | 删 `dsh-memory2skill-0.4.9.tgz`，放入 `dsh-memory2skill-0.5.1.tgz`（与源包 sha256 一致）；`dsh-kb-0.4.2.tgz` 未动（哈希比对确认） |
+| `src-tauri/src/kb.rs:56` | `MEMORY_TGZ` → `"dsh-memory2skill-0.5.1.tgz"` |
+| `src-tauri/src/kb.rs:64` | `include_bytes!("../resources/kb-bundle/dsh-memory2skill-0.5.1.tgz")` |
+
+`KB_TGZ`（:55）与 kb 的 `include_bytes!`（:61）保持 0.4.2；`KB_PACKAGES`（:70）走常量自动跟随。
+
+**验证**：`npm run verify:include-str` 绿（kb 安装包「声明 2 / 磁盘 2」，正反两向）；
+`cargo test --lib` **284 passed / 0 failed**，其中 `kb::tests::embedded_bundles_match_package_table`
+校验的已是新字节（gzip 魔数 + 非空 + 两张常量表对应）。全仓库已无 `0.4.9` 的代码引用。
+本构建的 Desktop 版本号为 **1.8.5**（`npm run check:versions` 守的 6 处一致）。
+
+**给用户的提醒**：
+
+1. Desktop 需重新构建 / 拷贝推仓库后打包；本机与其他机器通过 Desktop 的「记忆，技能与知识库」
+   **重装**即可拿到 0.5.1，无需单独 `dsh plugin add`。
+2. 上一轮（第三轮）那条 NeedsRelease 的代码修复也在这个新构建里 —— 两者一起分发。
+3. `resources/kb-bundle/` 的新 tgz 必须入库（`.gitignore` 例外已放行）；`dsh-memory2skill-0.4.9.tgz` 已删，别加回来。
+4. 装上新构建后，profile 里那条 `file:…\kb-bundle\dsh-memory2skill-0.4.9.tgz` 依赖会被重装改写为 0.5.1；
+   在此之前它指向的是第三轮手工补回的那份字节，别手动删。

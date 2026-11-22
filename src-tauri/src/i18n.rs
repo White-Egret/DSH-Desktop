@@ -489,6 +489,7 @@ pub fn t(key: &str) -> &'static str {
         "setup_py_skip" => if en { "Python {0} is already installed ({1}); keeping it and skipping the installer." } else { "本机已有 Python {0}（{1}），跳过本体安装。" },
         "setup_py_resolved" => if en { "[setup] Newest stable Python on python.org: {0}" } else { "[setup] python.org 当前最新稳定版 Python：{0}" },
         "setup_py_resolve_fallback" => if en { "[setup] Cannot resolve the newest Python version ({0}); using the pinned {1} instead." } else { "[setup] 未能解析最新 Python 版本（{0}），改用固定版本 {1}。" },
+        "setup_py_version_capped" => if en { "[setup] The newest stable Python {0} is above the supported ceiling (3.14); using {1} instead — markitdown 0.1.x requires <3.15, otherwise pip would silently downgrade it to the unverified 0.0.2 packaging." } else { "[setup] 最新稳定版 Python {0} 超过支持上限（3.14），改用 {1} —— markitdown 0.1.x 要求 <3.15，装在 3.15+ 上 pip 会把它静默解回未经验证的 0.0.2 打包。" },
         "setup_py_no_version_entry" => if en { "no \"Download Python X.Y.Z\" entry found on the download page (page layout may have changed)" } else { "下载页上未找到「Download Python X.Y.Z」（页面可能已改版）" },
         // —— 基本安装：下载与校验（与 Node 那条路同一条纪律：拿不到哈希就不装） ——
         "setup_py_hash_dl_fail" => if en { "Cannot download the official release page to read the SHA-256 ({0}: {1}). Refusing to install an unverified file — check your network and retry." } else { "无法下载官方发布页以获取 SHA-256（{0}：{1}）。为避免安装未经验证的文件已中止 —— 请检查网络后重试。" },
@@ -496,6 +497,11 @@ pub fn t(key: &str) -> &'static str {
         "setup_py_bad_version" => if en { "Refusing to install: the resolved Python version \"{0}\" is not a plain numeric version string." } else { "拒绝安装：解析出的 Python 版本号「{0}」不是合法的纯数字版本串。" },
         "setup_py_hash_mismatch" => if en { "SHA-256 mismatch for {0}! Official page: {1} Downloaded: {2} The file was deleted and installation aborted — the download may have been tampered with (proxy/network interference). Retry, or install manually from python.org." } else { "{0} 的 SHA-256 与官方发布页不一致！官方记录：{1} 实际下载：{2} 已删除该文件并中止安装 —— 下载可能被篡改（代理/网络劫持）。可稍后重试，或到 python.org 手动安装。" },
         "setup_py_dl_start" => if en { "Downloading the official Python v{0} installer: {1}" } else { "开始下载官方 Python v{0} 安装包：{1}" },
+        // —— 安装包跨运行缓存（与 OnlyOffice 同一套根目录，子目录 dsh-python，按版本命名） ——
+        "setup_py_cache_hit" => if en { "Reusing the cached Python v{0} installer ({1}); skipping the download..." } else { "复用已缓存的 Python v{0} 安装包（{1}），跳过下载…" },
+        "setup_py_cache_saved" => if en { "[setup] Cached the Python v{0} installer to {1} for the next install." } else { "[setup] 已把 Python v{0} 安装包缓存到 {1}，下次安装可直接复用。" },
+        "setup_py_cache_invalid" => if en { "[setup] The cached Python v{0} installer at {1} is stale (size/hash mismatch); removed it and downloading again." } else { "[setup] 缓存里的 Python v{0} 安装包（{1}）已失效（体积/哈希不符），已删除并重新下载。" },
+        "setup_py_cache_skip" => if en { "[setup] Cannot write the Python installer cache ({0}); installing from the fresh download, caching disabled for this run." } else { "[setup] 无法写入 Python 安装包缓存（{0}），本次改为照常下载安装、不缓存。" },
         // —— 基本安装：跑官方安装程序 ——
         // 「安装的页面要显示安装进程」→ /passive 画出进度窗口，这条文案要提前说清是谁弹的窗口
         "setup_py_launch" => if en { "Download finished. Launching the official Python installer — its window shows the progress; wait until it completes..." } else { "下载完成，正在启动官方 Python 安装程序 —— 安装窗口会显示进度，请等待其完成…" },
@@ -519,6 +525,12 @@ pub fn t(key: &str) -> &'static str {
         // —— pip uninstall（用户主动清理；只删点名的包，不动依赖） ——
         "setup_py_unpip_start" => if en { "Uninstalling Python packages: {0}" } else { "正在卸载 Python 包：{0}" },
         "setup_py_unpip_ok" => if en { "Python packages uninstalled: {0}" } else { "Python 包卸载完成：{0}" },
+        // 卸载扩展包后的健康检查（走 py-bridge 的 magika 占位路径，不裸 import markitdown）：
+        // 判据是 `import markitdown_tools` 且 `_converter()` 能拿到 MarkItDown。
+        "setup_py_health_ok" => if en { "[setup] Health check passed: the Python bridge can still import and build its markitdown converter." } else { "[setup] 健康检查通过：Python 桥接仍能导入并构造 markitdown 转换器。" },
+        "setup_py_health_fail" => if en { "[setup] Health check failed after uninstalling the data-analysis extras: {0}. numpy is a required dependency of markitdown (via magika → onnxruntime) — re-run \"Install data-analysis extras\" to restore it." } else { "[setup] 卸载数据分析扩展包后健康检查未通过：{0}。numpy 是 markitdown 的必需依赖（经 magika → onnxruntime），可重新点「安装数据分析扩展包」补回。" },
+        "setup_py_health_spawn" => if en { "Could not start the health-check interpreter: {0}" } else { "无法启动健康检查解释器：{0}" },
+        "setup_py_health_timeout" => if en { "The health check timed out after 90 s (the import may be hung); see desktop.log." } else { "健康检查超过 90 秒未完成（导入可能卡住），详见 desktop.log。" },
         "setup_py_uninstall_bridge" => if en { "Removing the Python capability bridge (plugin + released code)…" } else { "正在移除 Python 能力桥接（插件 + 已释放的代码）…" },
         // 安装线程 panic 时的兜底文案：不发这一条，前端的两颗按钮会永远停在「安装中」
         "setup_py_panicked" => if en { "The install task hit an internal error (panic) and was aborted; the busy state has been released so you can retry. Details are in desktop.log." } else { "安装任务内部出错（panic），已中止并释放「安装中」状态，可重试。详情见 desktop.log。" },

@@ -149,11 +149,11 @@
     py_uninstall_body_basic:
       '将卸载本机 Python 里的办公文档读写库，并把 AI 调用能力桥接（convert_file_to_markdown 等 12 个工具）从 DSH 里摘掉。',
     py_uninstall_body_extra:
-      '将卸载本机 Python 里的数据分析库（numpy / pandas 等）。AI 调用能力桥接与 12 个工具**不受影响**，仍然可用。',
+      '将卸载本机 Python 里的数据分析库（pandas / python-dateutil / tzdata）。numpy 是 markitdown 的必需依赖，**不会**被卸载；AI 调用能力桥接与 12 个工具也不受影响，仍然可用。',
     py_uninstall_cmd_basic:
       'dsh plugin --profile web remove @local/dsh-desktop-python-bridge\npython -m pip uninstall -y markitdown pdfminer-six pdfplumber pypdf mammoth olefile python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile firecrawl-anydoc dsh-python-bridge',
     py_uninstall_cmd_extra:
-      'python -m pip uninstall -y numpy pandas python-dateutil tzdata',
+      'python -m pip uninstall -y pandas python-dateutil tzdata',
     py_uninstall_keeps_basic:
       'Python 本体（请用系统的软件管理机制卸载）、你的会话与配置、DSH 本身，以及其它所有 Python 包。',
     py_uninstall_keeps_extra:
@@ -713,11 +713,11 @@
     py_uninstall_body_basic:
       'Removes the office-document libraries from this machine\'s Python and drops the AI capability bridge (convert_file_to_markdown and the other 11 tools) from DSH.',
     py_uninstall_body_extra:
-      'Removes the data-analysis libraries (numpy / pandas …) from this machine\'s Python. The AI capability bridge and its 12 tools are **not** affected and stay usable.',
+      'Removes the data-analysis libraries (pandas / python-dateutil / tzdata) from this machine\'s Python. numpy is a required dependency of markitdown and is **not** removed; the AI capability bridge and its 12 tools are also unaffected and stay usable.',
     py_uninstall_cmd_basic:
       'dsh plugin --profile web remove @local/dsh-desktop-python-bridge\npython -m pip uninstall -y markitdown pdfminer-six pdfplumber pypdf mammoth olefile python-docx python-pptx openpyxl XlsxWriter lxml Pillow et_xmlfile firecrawl-anydoc dsh-python-bridge',
     py_uninstall_cmd_extra:
-      'python -m pip uninstall -y numpy pandas python-dateutil tzdata',
+      'python -m pip uninstall -y pandas python-dateutil tzdata',
     py_uninstall_keeps_basic:
       'The Python interpreter itself (please uninstall it through your system\'s software manager), your sessions and configuration, DSH itself, and every other Python package.',
     py_uninstall_keeps_extra:

@@ -1191,21 +1191,30 @@ fn needs_full_restart(err_text: &str) -> bool {
         || low.contains("byte ranges")
 }
 
-/// 安装包跨运行缓存的位置：跟着 config 的 `npm_cache_dir` 走 —— 用户已经把它放在
-/// D 盘，874 MB 没有理由落到系统盘。子目录 `dsh-office\` 是为了跟 npm 自己的
-/// `_cacache` 区分开；`npm_cache_dir` 没配置时退回 `%LOCALAPPDATA%`。
-/// **不放 %APPDATA%**：那是漫游配置目录，域环境会整份同步，874 MB 进去是事故。
-fn installer_cache_path(app: &AppHandle) -> PathBuf {
+/// 安装包跨运行缓存的**根目录**：跟着 config 的 `npm_cache_dir` 走 —— 用户已经把它放在
+/// D 盘，874 MB 没有理由落到系统盘。**不放 %APPDATA%**：那是漫游配置目录，域环境会整份
+/// 同步，874 MB 进去是事故。
+///
+/// `pub(crate)`：Python 安装包的跨运行缓存共用这一个根（子目录换成 `dsh-python\`），
+/// 抽出来是为了让两处缓存的落点永远同源，不会各算各的。
+pub(crate) fn installer_cache_base(app: &AppHandle) -> PathBuf {
     let cfg = config::load(app);
     let configured = cfg.npm_cache_dir.trim();
-    let base = if configured.is_empty() {
+    if configured.is_empty() {
         app.path()
             .app_local_data_dir()
             .unwrap_or_else(|_| PathBuf::from(".dsh-desktop"))
     } else {
         PathBuf::from(configured)
-    };
-    base.join("dsh-office").join("onlyoffice-documentserver.exe")
+    }
+}
+
+/// OnlyOffice 安装包缓存路径：根目录下 `dsh-office\onlyoffice-documentserver.exe`
+/// （`dsh-office\` 是为了跟 npm 自己的 `_cacache` 区分开）。
+fn installer_cache_path(app: &AppHandle) -> PathBuf {
+    installer_cache_base(app)
+        .join("dsh-office")
+        .join("onlyoffice-documentserver.exe")
 }
 
 /// 缓存命中判据 = 字节数 + SHA-256，与下载后的校验用的是同一对常量：命中即等于「已验过」，
@@ -1220,7 +1229,9 @@ fn installer_cache_hit(path: &Path) -> bool {
 }
 
 /// 把缓存里的安装包搬进本轮临时目录：同卷硬链接（零拷贝、秒完成），跨卷退回复制。
-fn seed_installer_from_cache(src: &Path, dest: &Path) -> Result<(), String> {
+///
+/// `pub(crate)`：Python 安装包缓存命中后复用同一条搬运逻辑。
+pub(crate) fn seed_installer_from_cache(src: &Path, dest: &Path) -> Result<(), String> {
     std::fs::hard_link(src, dest)
         .or_else(|_| std::fs::copy(src, dest).map(|_| ()))
         .map_err(|e| e.to_string())

@@ -449,6 +449,47 @@ pub const PYTHON_MIN_VERSION: &str = "3.10.0";
 /// 与 `NODE_LTS_VERSION` 同一角色 —— 探测失败不该让安装整体卡住。
 pub const PYTHON_FALLBACK_VERSION: &str = "3.14.7";
 
+/// 可安装的 Python **次版本上限**（3.14）。
+///
+/// 为什么要有上限：`markitdown 0.1.x` 的 `Requires-Python` 是 `<3.15,>=3.10`
+/// （与 `PYTHON_MIN_VERSION` 的注释同源）。装在 3.15+ 上时，pip 会因为这条约束
+/// 把 markitdown **解回 0.0.2**（extras 拆分之前的老打包），而它的元数据把
+/// pandas / python-dateutil / tzdata / azure-* / openai / 音频那一套全带进来 ——
+/// 于是「基本安装」被动装上了扩展包，也把整条转换链换成了桌面端从未验证过的旧版本。
+/// 所以解析出的「最新稳定版」越过 3.14 时，一律回退到 `PYTHON_FALLBACK_VERSION`。
+pub const PYTHON_MAX_MINOR: u32 = 14;
+
+/// 解析到的 Python 版本是否越过可安装上限。
+///
+/// 返回 `Unknown` 而不是猜：读不出版本号时不做任何判断，交给后续的
+/// 下载 / 校验环节按它自己的规矩报错，避免把「版本号解析失败」伪装成「版本过高」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PythonVersionCap {
+    /// 在上限内，可以装。
+    Ok,
+    /// 越过上限（如 3.15 / 3.16 / 4.0），调用方应回退 `PYTHON_FALLBACK_VERSION`。
+    Exceeds,
+    /// 版本串解析不出来，不据此回退。
+    Unknown,
+}
+
+/// 纯函数：判断一个解析到的 Python 版本是否**超过**可安装上限。
+///
+/// 3.14 及以下（含补丁版本）为 `Ok`；3.15 / 3.16 / 4.0 这类为 `Exceeds`；
+/// 垃圾输入（空串、`abc`、`3.x`）为 `Unknown`。
+pub fn python_install_version_cap(version: &str) -> PythonVersionCap {
+    let Some(v) = parse_version_numbers(version) else {
+        return PythonVersionCap::Unknown;
+    };
+    let major = v.first().copied().unwrap_or(0);
+    let minor = v.get(1).copied().unwrap_or(0);
+    if major > 3 || (major == 3 && minor > PYTHON_MAX_MINOR) {
+        PythonVersionCap::Exceeds
+    } else {
+        PythonVersionCap::Ok
+    }
+}
+
 /// 官方下载页：既是「最新稳定版」版本号的来源，也是解析失败时的手动安装入口。
 pub const PYTHON_DOWNLOAD_PAGE: &str = "https://www.python.org/downloads/";
 
@@ -1805,6 +1846,50 @@ mod tests {
         assert!(!is_safe_python_version("3..7"));
         assert!(!is_safe_python_version("3.14.7 "));
         assert!(!is_safe_python_version(""));
+    }
+
+    /// 安装版本上限（3.14）：markitdown 0.1.x 的 `Requires-Python` 是 `<3.15,>=3.10`，
+    /// 装到 3.15+ 上时 pip 会把 markitdown 解回未经验证的 0.0.2 —— 所以越过 3.14 的
+    /// 「最新稳定版」必须回退固定版本。这里逐档钉死判据，垃圾输入判「未知」而不是猜。
+    #[test]
+    fn python_install_version_cap_blocks_above_3_14() {
+        // 上限内（含恰好等于上限）：放行
+        for ok in ["3.12.0", "3.12.9", "3.13.5", "3.14.0", "3.14.7"] {
+            assert_eq!(
+                python_install_version_cap(ok),
+                PythonVersionCap::Ok,
+                "{ok} 在上限内，应放行"
+            );
+        }
+        // 越过上限：拦截
+        for bad in ["3.15.0", "3.15.1", "3.16.0", "3.16.2", "4.0.0", "4.1.0"] {
+            assert_eq!(
+                python_install_version_cap(bad),
+                PythonVersionCap::Exceeds,
+                "{bad} 越过上限，应回退"
+            );
+        }
+        // 残缺段按 0 补齐：3.15 == 3.15.0，必须拦
+        assert_eq!(
+            python_install_version_cap("3.15"),
+            PythonVersionCap::Exceeds,
+            "残缺版本段按 0 补齐后仍应判越界"
+        );
+        // 垃圾输入：判「未知」，不据此回退（读不出版本 ≠ 版本过高）
+        for junk in ["", "junk", "python: not found", "3.x.0", "v"] {
+            assert_eq!(
+                python_install_version_cap(junk),
+                PythonVersionCap::Unknown,
+                "{junk:?} 应判未知而非越界"
+            );
+        }
+        // 首尾空白会被 parse_version_numbers 去掉 —— 「3.14.7 」是可解析的，
+        // 不该被当成垃圾输入
+        assert_eq!(
+            python_install_version_cap("3.14.7 "),
+            PythonVersionCap::Ok,
+            "首尾空白应被容忍"
+        );
     }
 
     /// pnpm 的硬下限（用户拍板：**pnpm 必须 ≥ 10，低了就必须更新**），与 Node 下限

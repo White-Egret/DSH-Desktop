@@ -4616,7 +4616,25 @@ const PY_BRIDGE_PKGS: [&str; 1] = ["dsh-python-bridge"];
 ///     语义上是扩展包的一部分（且用户卸载后能靠这颗按钮补回）
 /// 这正是这颗按钮此前"完全空转"问题的解法：退回裸 markitdown 后，点它
 /// 会真的装上东西，而不是只打印 `Requirement already satisfied`。
+///
+/// ⚠ **numpy 在这里只是「恢复」语义**（把它带回来），**不归「卸载」管** ——
+/// 卸载名单见 `PY_EXTRA_UNINSTALL_PKGS`。
 const PY_EXTRA_PKGS: [&str; 4] = ["numpy", "pandas", "python-dateutil", "tzdata"];
+
+/// 「卸载数据分析扩展包」真正会卸的三个包 —— **不含 `numpy`**。
+///
+/// **`numpy` 不能卸**（2026-11-21 实测校正）：裸 `markitdown` 顶层**无条件**
+/// `import magika`，而 `magika → onnxruntime` 硬依赖 `numpy`，所以 numpy 随
+/// 「基本安装」本来就在（见上面 `PY_EXTRA_PKGS` 的说明）。缺 numpy 时
+/// `import onnxruntime` 抛的是干净的 `ImportError`（`import numpy failed`），
+/// `import magika` 随之失败，于是裸 `import markitdown` 直接导入不了；同时
+/// `onnxruntime` 声明的 `numpy>=1.21.6` 落空，`pip check` 报依赖图与实际安装不一致。
+/// 这颗按钮的语义只是「去掉可选的数据分析库」，不是「拆掉 markitdown 的硬依赖」。
+///
+/// 注意：这里**刻意不改变** `PY_EXTRA_PKGS` 本身 —— 安装按钮仍装四项，
+/// numpy 的语义是「恢复」而不是「安装入口」。两边必须同步修改，
+/// 由 `the_extra_uninstall_set_is_extras_minus_numpy` 这条测试钉死。
+const PY_EXTRA_UNINSTALL_PKGS: [&str; 3] = ["pandas", "python-dateutil", "tzdata"];
 
 /// 上面两组包对应的**导入名**（python-docx → docx、python-dateutil → dateutil、
 /// XlsxWriter → xlsxwriter、Pillow → PIL —— 与包名不是一回事）。
@@ -4800,7 +4818,12 @@ pub async fn setup_install_python_extra(app: AppHandle) -> Result<(), String> {
     })
 }
 
-/// 「卸载数据分析扩展包」按钮：只卸扩展包的 4 个包，**不动办公包、不动桥接**。
+/// 「卸载数据分析扩展包」按钮：只卸扩展包的三个包（pandas / python-dateutil / tzdata），
+/// **不动 numpy、不动办公包、不动桥接**。
+///
+/// **numpy 不在卸载名单里**：它是裸 `markitdown` 的硬依赖（`magika → onnxruntime`
+/// 需要它），缺了它 `import onnxruntime` 与裸 `import markitdown` 都会 ImportError，
+/// 依赖图也会与实际安装不一致。详见 `PY_EXTRA_UNINSTALL_PKGS` 的说明。
 ///
 /// 卸完之后 12 个工具**仍在**（它们是桥接插件提供的，与 pandas 无关），
 /// 只是 `execute_python_sandbox` 里跑 pandas 会得到一句「该模块在沙箱白名单内，
@@ -4808,13 +4831,19 @@ pub async fn setup_install_python_extra(app: AppHandle) -> Result<(), String> {
 ///
 /// 桥接插件**不动**是刻意的：数据分析能力正是这条沙箱路径提供的，
 /// 把它一起卸掉等于连同「用沙箱跑 pandas」这条路一起取消。
+///
+/// 卸完会**真跑一次健康检查**（走桥接真实路径，见 [`python_extra_health_check`]）：
+/// 确认 numpy 这条链没被误伤，而不是只看 pip 返回了成功。
 #[tauri::command]
 pub async fn setup_uninstall_python_extra(app: AppHandle) -> Result<(), String> {
     spawn_python_task(app, "python-extra", |a| {
         let py = detect::find_python().ok_or_else(|| i18n::t("setup_py_missing").to_string())?;
-        let list = PY_EXTRA_PKGS.join(" ");
+        let list = PY_EXTRA_UNINSTALL_PKGS.join(" ");
         setup_progress(a, "install", &i18n::fmt("setup_py_unpip_start", &[&list]));
-        pip_uninstall_blocking(a, &py, &PY_EXTRA_PKGS)
+        let pip_msg = pip_uninstall_blocking(a, &py, &PY_EXTRA_UNINSTALL_PKGS)?;
+        // numpy 是硬依赖，卸完必须当场确认「导入链没断」，不能只看 pip 成功。
+        python_extra_health_check(a, &py)?;
+        Ok(pip_msg)
     })
 }
 
@@ -4869,6 +4898,77 @@ fn pip_uninstall_blocking(
     let msg = i18n::fmt("setup_py_unpip_ok", &[&pkgs.join(" ")]);
     setup_progress(app, "install", &msg);
     Ok(msg)
+}
+
+/// 卸载扩展包后的**真跑健康检查**：导入 `markitdown_tools` 并调用它的 `_converter()`。
+///
+/// 判据刻意**不是**裸 `python -c "import markitdown"`：裸导入在部分 Python 3.14 /
+/// Windows 机器上会因 onnxruntime 原生扩展自身的初始化问题直接崩进程（0xC0000005，
+/// try/except 拦不住），拿它当判据会把「环境其实正常」误报成「环境坏了」。
+/// `markitdown_tools` 在 import markitdown **之前**装了 magika 占位
+/// （`_install_magika_stub()`，见 `resources/py-bridge/markitdown_tools.py`），
+/// 这正是桥接每次转换真实走的路径 —— 它导入得通、`_converter()` 能拿到
+/// `MarkItDown`，才说明 `numpy → onnxruntime → magika → markitdown` 这条链没被
+/// 卸载动作拆断。
+///
+/// 做法：把 py-bridge 目录放进 `PYTHONPATH`，跑一段只打印 `__MD_OK__` /
+/// `__MD_FAIL__<原因>` 的脚本，取输出首行标记。超时 90s；**失败不 panic**，
+/// 返回一句带原因的 `Err`，由调用方如实上报（进度区一行 + 错误串）。
+fn python_extra_health_check(app: &AppHandle, py: &detect::PythonExe) -> Result<(), String> {
+    let bridge = crate::py_bridge::bridge_dir(&crate::config::config_dir(app));
+    let code = "import markitdown_tools as m; \
+print('__MD_OK__' if m._converter() is not None else '__MD_FAIL__' + str(m._CONVERTER_ERROR))";
+    let args = py.full_args(&["-c", code]);
+
+    let mut cmd = command_for(py.program.to_string_lossy().as_ref(), &args)?;
+    // 模块查找交给 PYTHONPATH（与桥接 bundle 的 index.js 同一条路径）。
+    cmd.env("PYTHONPATH", &bridge);
+    apply_no_window(&mut cmd);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| {
+        i18n::fmt("setup_py_health_spawn", &[&e.to_string()])
+    })?;
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let started = Instant::now();
+    let (out, err) = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let out = decode_console_output(&drain_pipe(&mut stdout));
+                let err = decode_console_output(&drain_pipe(&mut stderr));
+                break (out, err);
+            }
+            Ok(None) => {
+                if started.elapsed() >= Duration::from_secs(90) {
+                    let _ = child.kill();
+                    let _ = drain_pipe(&mut stdout);
+                    let _ = drain_pipe(&mut stderr);
+                    let _ = child.wait();
+                    break (String::new(), i18n::t("setup_py_health_timeout").to_string());
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => break (String::new(), e.to_string()),
+        }
+    };
+
+    // 找带标记的那一行（脚本只打印它；万一解释器先吐了别的告警也不受影响）
+    let Some(line) = out
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("__MD_OK__") || l.starts_with("__MD_FAIL__"))
+    else {
+        let detail = if out.trim().is_empty() { err.trim() } else { out.trim() };
+        return Err(i18n::fmt("setup_py_health_fail", &[&detail]));
+    };
+
+    if line.starts_with("__MD_OK__") {
+        setup_progress(app, "verify", i18n::t("setup_py_health_ok"));
+        return Ok(());
+    }
+    let reason = line.strip_prefix("__MD_FAIL__").unwrap_or(line).trim();
+    let reason = if reason.is_empty() { err.trim() } else { reason };
+    Err(i18n::fmt("setup_py_health_fail", &[&reason]))
 }
 
 /// 抢 `setup_busy` → 开线程跑安装 → 统一回传 `setup-result` → **无论如何释放 busy**。
@@ -5113,6 +5213,8 @@ fn python_log_line(app: &AppHandle, line: &str) {
 
 /// 「Python 本体」安装：解析最新稳定版 → 官方发布页取 SHA-256 → 下载 → 比对 →
 /// 官方安装程序 → 落点核对。私有临时目录由外层负责删除（成功失败都删）。
+///
+/// 跨运行缓存见 `install_python_verified`：命中只省下载，三道校验照跑。
 fn install_python_official(
     app: &AppHandle,
     install_dir: Option<&str>,
@@ -5123,6 +5225,93 @@ fn install_python_official(
     out
 }
 
+// ---------- Python 安装包的跨运行缓存（照 office.rs 的 OnlyOffice 缓存实现，但按版本区分） ----------
+//
+// 与 OnlyOffice 同一套缓存根目录（`installer_cache_base`），子目录换成 `dsh-python\`，
+// 文件名**带版本号**：`dsh-python\python-<版本>-amd64.exe`。
+// Python 按版本发布，同一文件名在不同版本下是不同安装包，不能用单一固定文件名。
+
+/// 纯函数：由缓存根目录 + 版本号构造 Python 安装包缓存路径。
+///
+/// 抽出来是为了单测能直接断言「版本号进了路径」—— 同一根目录下不同版本互不影响。
+fn python_installer_cache_path_from(base: &Path, version: &str) -> PathBuf {
+    base
+        .join("dsh-python")
+        .join(detect::python_installer_file_name_for(version))
+}
+
+/// Python 安装包缓存路径：与 OnlyOffice 共用缓存根，子目录 `dsh-python\`，文件名带版本号。
+fn python_installer_cache_path(app: &AppHandle, version: &str) -> PathBuf {
+    python_installer_cache_path_from(&crate::office::installer_cache_base(app), version)
+}
+
+/// 缓存命中判据 = **体积区间 + SHA-256 == 本次官方哈希**。
+///
+/// **与 OnlyOffice 的关键差异**：OnlyOffice 的期望哈希是编译期常量，所以命中判据就是
+/// 「字节数 + 固定哈希」；Python 安装包的期望哈希必须**联网从官方发布页取**
+/// （见 `fetch_python_installer_sha256`，取不到直接中止安装）。缓存里放的是上一轮
+/// 下载并通过三道校验的那一份，它是否还能用，只能拿**本轮**的官方哈希比 ——
+/// 所以这里比的是 `expected_sha` 而不是编译期常量。
+///
+/// 任何一步不满足都算不命中：文件不在、体积越界、哈希读不出来或与期望不符。
+fn python_installer_cache_hit(cache: &Path, expected_sha: &str) -> bool {
+    let Ok(meta) = std::fs::metadata(cache) else {
+        return false;
+    };
+    if meta.len() < PY_INSTALLER_MIN_BYTES || meta.len() > PY_INSTALLER_MAX_BYTES {
+        return false;
+    }
+    match sha256_hex_of(cache, PY_INSTALLER_MAX_BYTES) {
+        Ok(actual) => actual == expected_sha,
+        Err(_) => false,
+    }
+}
+
+/// 把通过校验的安装包写入缓存：先写 `.partial` 再原子改名，半份文件不会被下一次
+/// 当成命中（命中另有 SHA-256 判据，这里只是双保险）。
+///
+/// 返回是否写成功。**失败不 panic** —— 缓存是优化不是正确性依赖，调用方只记日志，
+/// 绝不能让安装因此失败（只读盘 / 权限不足时降级为不缓存）。
+fn store_python_installer_cache(cache: &Path, installer: &Path) -> bool {
+    let Some(dir) = cache.parent() else {
+        return false;
+    };
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let tmp = cache.with_extension("partial");
+    let _ = std::fs::remove_file(&tmp);
+    if std::fs::copy(installer, &tmp).is_ok() && std::fs::rename(&tmp, cache).is_ok() {
+        return true;
+    }
+    let _ = std::fs::remove_file(&tmp);
+    false
+}
+
+/// 三道校验都过了之后，把安装包留一份进跨运行缓存，下次安装 0 下载。
+/// **失败只记日志**，不影响本次安装。
+fn cache_python_installer(app: &AppHandle, installer: &Path, version: &str, expected_sha: &str) {
+    let cache = python_installer_cache_path(app, version);
+    if python_installer_cache_hit(&cache, expected_sha) {
+        return; // 已是同一份，无需重复写
+    }
+    if store_python_installer_cache(&cache, installer) {
+        setup_progress(
+            app,
+            "download",
+            &i18n::fmt(
+                "setup_py_cache_saved",
+                &[&version, &cache.display().to_string()],
+            ),
+        );
+    } else {
+        logger::append_line(
+            &logger::desktop_log_path(app),
+            &i18n::fmt("setup_py_cache_skip", &[&cache.display().to_string()]),
+        );
+    }
+}
+
 fn install_python_verified(
     dir: &Path,
     app: &AppHandle,
@@ -5130,7 +5319,7 @@ fn install_python_verified(
 ) -> Result<String, String> {
     // ① 最新稳定版：python.org 下载页上那句 `Download Python X.Y.Z`
     let mut probe_err = String::new();
-    let version = match resolve_latest_python_version(dir, &mut probe_err) {
+    let mut version = match resolve_latest_python_version(dir, &mut probe_err) {
         Some(v) => {
             setup_progress(app, "download", &i18n::fmt("setup_py_resolved", &[&v]));
             v
@@ -5148,6 +5337,22 @@ fn install_python_verified(
         }
     };
 
+    // ①b 安装版本上限：markitdown 0.1.x 的 `Requires-Python` 是 `<3.15,>=3.10`
+    //    （与 detect.rs 的 `PYTHON_MIN_VERSION` 注释同源）。装到 3.15+ 上时 pip 会把
+    //    markitdown 解回未经验证的 0.0.2，连扩展包一起带进来 —— 所以越过 3.14 一律
+    //    回退固定版本，进度区说明原因（见 detect.rs::PYTHON_MAX_MINOR）。
+    if detect::python_install_version_cap(&version) == detect::PythonVersionCap::Exceeds {
+        setup_progress(
+            app,
+            "download",
+            &i18n::fmt(
+                "setup_py_version_capped",
+                &[&version, &detect::PYTHON_FALLBACK_VERSION.to_string()],
+            ),
+        );
+        version = detect::PYTHON_FALLBACK_VERSION.to_string();
+    }
+
     let file_name = detect::python_installer_file_name_for(&version);
     let url = detect::python_installer_url_for(&version);
     let dest = dir.join(&file_name);
@@ -5157,12 +5362,34 @@ fn install_python_verified(
     //    这也是 Node 那条路修过的坑：只看体积就执行 = 执行一个来路不明的 exe）
     let expected = fetch_python_installer_sha256(dir, &version, &file_name)?;
 
-    // ③ 下载：curl 优先（实时进度），PowerShell 兜底
-    setup_progress(app, "download", &i18n::fmt("setup_py_dl_start", &[&version, &url]));
-    let mut last_err = i18n::t("setup_no_dl_tool").to_string();
-    if !try_download_curl(&url, &dest, &mut last_err, Some(app), &page, &[]) {
-        setup_progress(app, "download", &i18n::fmt("setup_curl_fallback", &[&last_err]));
-        try_download_powershell(&url, &dest, &page, &[])?;
+    // ②b 跨运行缓存：命中即复用，**但下面的体积与哈希校验一道都不省**（命中也必须跑完
+    //    原有校验）。与 OnlyOffice 的固定哈希不同，Python 的期望哈希是本轮联网取到的，
+    //    所以命中判据是「缓存文件的 SHA-256 == 本次官方哈希」；不命中（哈希不符 / 体积
+    //    越界）就就地删除坏缓存，再走正常下载。缓存目录不可写时降级为不缓存。
+    let cache = python_installer_cache_path(app, &version);
+    if python_installer_cache_hit(&cache, &expected) {
+        setup_progress(
+            app,
+            "download",
+            &i18n::fmt("setup_py_cache_hit", &[&version, &cache.display().to_string()]),
+        );
+        crate::office::seed_installer_from_cache(&cache, &dest)?;
+    } else {
+        if cache.exists() {
+            let _ = std::fs::remove_file(&cache);
+            setup_progress(
+                app,
+                "download",
+                &i18n::fmt("setup_py_cache_invalid", &[&version, &cache.display().to_string()]),
+            );
+        }
+        // ③ 下载：curl 优先（实时进度），PowerShell 兜底
+        setup_progress(app, "download", &i18n::fmt("setup_py_dl_start", &[&version, &url]));
+        let mut last_err = i18n::t("setup_no_dl_tool").to_string();
+        if !try_download_curl(&url, &dest, &mut last_err, Some(app), &page, &[]) {
+            setup_progress(app, "download", &i18n::fmt("setup_curl_fallback", &[&last_err]));
+            try_download_powershell(&url, &dest, &page, &[])?;
+        }
     }
 
     // 体积粗筛（防截断、防把 HTML 错误页当安装包），真正的判断是接下来的哈希比对
@@ -5187,6 +5414,10 @@ fn install_python_verified(
         ));
     }
     setup_progress(app, "download", &i18n::fmt("setup_hash_ok", &[&version, &actual]));
+
+    // ④b 三道校验都过了，把这份安装包留进跨运行缓存（先 `.partial` 再改名；
+    //    入缓存失败只记日志，**不影响本次安装**）。
+    cache_python_installer(app, &dest, &version, &expected);
 
     // ⑤ 启动官方安装程序。**安装页面要显示安装进程**（用户原话）→ `/passive`
     //    画出进度窗口但不需要逐页点击；这里再报一次我们正在做什么，免得窗口弹出时
@@ -8268,12 +8499,12 @@ mod tests {
         }
     }
 
-    /// 「卸载数据分析扩展包」要卸的正好是那 4 个，且**一个都不多**。
+    /// 「数据分析扩展包」**安装**清单：正好那 4 个，且**一个都不多**。
     ///
     /// 多一个就会误伤：比如把 `magika` 放进来 —— 它是裸 markitdown 的**硬依赖**，
     /// 删了它 markitdown 直接坏掉，用户的文档转换能力会无声地消失。
     #[test]
-    fn the_extra_uninstall_set_is_exactly_the_four_extras() {
+    fn the_extra_install_set_is_exactly_the_four_extras() {
         assert_eq!(PY_EXTRA_PKGS.len(), 4);
         for p in ["numpy", "pandas", "python-dateutil", "tzdata"] {
             assert!(PY_EXTRA_PKGS.contains(&p), "扩展包清单缺 {p}");
@@ -8282,9 +8513,181 @@ mod tests {
         for p in ["markitdown", "mammoth", "pdfplumber", "dsh-python-bridge"] {
             assert!(
                 !PY_EXTRA_PKGS.contains(&p),
+                "「安装扩展包」不该动办公包：{p}"
+            );
+        }
+    }
+
+    /// 「卸载数据分析扩展包」要卸的正好是 `PY_EXTRA_PKGS` **去掉 numpy** 的那三个。
+    ///
+    /// **numpy 绝不能进卸载名单**：它是裸 markitdown 的硬依赖（`magika → onnxruntime`
+    /// 需要它），缺了它 `import onnxruntime` 抛 ImportError、裸 `import markitdown` 跟着
+    /// 导入失败，`pip check` 也报 `onnxruntime requires numpy`。
+    ///
+    /// 这条测试同时钉住两边的**同步关系**：将来只改 `PY_EXTRA_PKGS` 而忘了改
+    /// `PY_EXTRA_UNINSTALL_PKGS`（或反过来），这里立刻失败。
+    #[test]
+    fn the_extra_uninstall_set_is_extras_minus_numpy() {
+        assert!(
+            !PY_EXTRA_UNINSTALL_PKGS.contains(&"numpy"),
+            "numpy 是 markitdown 的必需依赖，绝不能被「卸载扩展包」带走"
+        );
+        assert_eq!(PY_EXTRA_UNINSTALL_PKGS.len(), 3);
+
+        let expected: Vec<&str> =
+            PY_EXTRA_PKGS.iter().copied().filter(|p| *p != "numpy").collect();
+        assert_eq!(
+            PY_EXTRA_UNINSTALL_PKGS.to_vec(),
+            expected,
+            "卸载名单必须恰好等于安装名单去掉 numpy"
+        );
+
+        for p in ["pandas", "python-dateutil", "tzdata"] {
+            assert!(
+                PY_EXTRA_UNINSTALL_PKGS.contains(&p),
+                "扩展包卸载清单缺 {p}"
+            );
+        }
+        // 办公库一个都不该在这里
+        for p in ["markitdown", "mammoth", "pdfplumber", "dsh-python-bridge"] {
+            assert!(
+                !PY_EXTRA_UNINSTALL_PKGS.contains(&p),
                 "「卸载扩展包」不该动办公包：{p}"
             );
         }
+    }
+
+    /// 缓存路径：版本号必须进路径（按版本区分），同一根目录下不同版本互不影响。
+    ///
+    /// Python 安装包按版本发布，同一文件名在不同版本下是不同安装包 —— 不能用单一
+    /// 固定文件名，否则「3.13 的缓存」会被当成「3.14 的缓存」复用。
+    /// 文件名后缀随机器架构变（amd64 / arm64 / 无后缀），所以这里断言的是
+    /// 「版本号进了文件名」与「不同版本落在不同文件上」，不把架构写死。
+    #[test]
+    fn python_installer_cache_path_is_version_scoped() {
+        let base = Path::new(r"D:\dsh-cache");
+        let p313 = python_installer_cache_path_from(base, "3.13.9");
+        let p314 = python_installer_cache_path_from(base, "3.14.7");
+
+        assert_eq!(
+            p313,
+            base
+                .join("dsh-python")
+                .join(detect::python_installer_file_name_for("3.13.9")),
+            "缓存必须落在 dsh-python\\ 子目录，文件名带版本号"
+        );
+        assert_ne!(p313, p314, "不同版本必须落在不同缓存文件上");
+        assert!(p313.starts_with(base), "缓存必须与 OnlyOffice 共用同一根目录");
+        // 版本号确实进了文件名（而不是只靠目录区分）
+        let name = p313.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        assert!(name.contains("3.13.9"), "文件名里应含版本号，实际：{name}");
+    }
+
+    /// 缓存命中判据：哈希一致 = 命中；哈希不符 / 体积越界 / 期望哈希缺失 = 不命中。
+    ///
+    /// 用真实文件跑（纯文件系统，不联网、不装包），覆盖任务要求的每一个分支。
+    #[test]
+    fn python_installer_cache_hit_matches_hash_and_size() {
+        let dir = std::env::temp_dir().join(format!(
+            "dsh-pycache-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let cache = dir.join("python-3.14.7-amd64.exe");
+
+        // 写一份**体积小于下限**的文件：体积越界 → 不命中
+        let small = vec![0u8; 1024];
+        std::fs::write(&cache, &small).unwrap();
+        assert!(
+            !python_installer_cache_hit(&cache, &"deadbeef".repeat(8)),
+            "体积越界必须判不命中"
+        );
+
+        // 写一份恰好在区间内的文件，用它的真实哈希判命中
+        let payload = vec![7u8; (PY_INSTALLER_MIN_BYTES as usize)];
+        std::fs::write(&cache, &payload).unwrap();
+        let real = sha256_hex_of(&cache, PY_INSTALLER_MAX_BYTES).unwrap();
+
+        assert!(
+            python_installer_cache_hit(&cache, &real),
+            "哈希一致必须判命中"
+        );
+        assert!(
+            !python_installer_cache_hit(&cache, &"0".repeat(64)),
+            "哈希不符必须判不命中"
+        );
+        assert!(
+            !python_installer_cache_hit(&cache, ""),
+            "期望哈希缺失必须判不命中"
+        );
+
+        // 文件不存在 → 不命中
+        let missing = dir.join("nope.exe");
+        assert!(
+            !python_installer_cache_hit(&missing, &real),
+            "缓存不存在必须判不命中"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 入缓存往返：`store_python_installer_cache` 写出的文件哈希与源一致，
+    /// 且 `.partial` 不残留。
+    #[test]
+    fn python_installer_cache_roundtrip_keeps_hash_and_leaves_no_partial() {
+        let dir = std::env::temp_dir().join(format!(
+            "dsh-pycache-roundtrip-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let src = dir.join("python-3.14.7-amd64.exe");
+        let cache = dir.join("dsh-python").join("python-3.14.7-amd64.exe");
+
+        let payload = vec![3u8; (PY_INSTALLER_MIN_BYTES as usize)];
+        std::fs::write(&src, &payload).unwrap();
+        let src_hash = sha256_hex_of(&src, PY_INSTALLER_MAX_BYTES).unwrap();
+
+        assert!(store_python_installer_cache(&cache, &src), "入缓存应当成功");
+        assert!(cache.is_file(), "缓存文件应当存在");
+        assert_eq!(
+            sha256_hex_of(&cache, PY_INSTALLER_MAX_BYTES).unwrap(),
+            src_hash,
+            "缓存文件的哈希必须与源一致"
+        );
+        assert!(
+            !cache.with_extension("partial").exists(),
+            ".partial 临时文件不能残留"
+        );
+        // 再写一次到同一个缓存路径：已存在则覆盖，仍不留 .partial
+        assert!(store_python_installer_cache(&cache, &src));
+        assert!(!cache.with_extension("partial").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 缓存不可写时降级：`store_python_installer_cache` 返回 false 且不 panic，
+    /// 源文件与安装流程都不受影响（缓存是优化，不是正确性依赖）。
+    #[test]
+    fn python_installer_cache_unwritable_degrades_without_panicking() {
+        let dir = std::env::temp_dir().join(format!(
+            "dsh-pycache-readonly-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        // 缓存父目录指向一个**文件**，`create_dir_all` 必然失败
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"not a dir").unwrap();
+        let cache = blocker.join("python-3.14.7-amd64.exe");
+        let src = dir.join("src.exe");
+        std::fs::write(&src, b"payload").unwrap();
+
+        assert!(
+            !store_python_installer_cache(&cache, &src),
+            "缓存目录不可写时必须返回 false（降级为不缓存）"
+        );
+        assert!(src.is_file(), "降级不得影响源文件");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

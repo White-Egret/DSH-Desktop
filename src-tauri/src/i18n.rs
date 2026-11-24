@@ -540,6 +540,7 @@ pub fn t(key: &str) -> &'static str {
         // 设置页进度区才会从 pip 那一步继续往下走。
         "py_bridge_released" => if en { "[setup] Released the Python capability bridge code to {0}" } else { "[setup] 已把 Python 能力桥接代码释放到 {0}" },
         "py_bridge_bundle_released" => if en { "[setup] Released the registration bundle to {0}" } else { "[setup] 已把注册用插件包释放到 {0}" },
+        "py_magika_stub_linked" => if en { "[setup] Linked the magika stub into the interpreter's site-packages ({0}) — your own scripts can now `import magika_stub` before importing markitdown." } else { "[setup] 已把 magika 占位链接进解释器的 site-packages（{0}）—— 你自己的脚本现在可以先 `import magika_stub` 再 import markitdown。" },
         "py_bridge_registered" => if en { "Python capability bridge registered into profile \"{0}\". Restart DSH to load the new tools (they appear as convert_file_to_markdown and friends)." } else { "Python 能力桥接已注册进 profile「{0}」。重启 DSH 后新工具才会生效（会出现 convert_file_to_markdown 等工具）。" },
         "py_bridge_deferred" => if en { "DSH is currently running, so the bridge was not registered yet — it will be activated automatically after you restart DSH. (interpreter: {0})" } else { "DSH 正在运行，桥接暂未注册 —— 将在重启后进入 DSH 时自动激活。（解释器：{0}）" },
         "py_bridge_activate_no_python" => if en { "Bridge code awaits activation but no Python interpreter was found (pending flag: {0})." } else { "桥接待激活，但找不到 Python 解释器（pending 标记：{0}）。" },

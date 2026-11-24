@@ -9,6 +9,7 @@
 //!        └─ py_bridge::deploy_after_install
 //!             ├─ 释放 Python 侧代码 → <config>\py-bridge\
 //!             ├─ 释放 Node 侧 bundle → <config>\py-bridge-bundle\
+//!             ├─ 往解释器的 site-packages 写 magika-stub.pth（用户脚本也能 import magika_stub）
 //!             ├─ 就地注册（DSH 没在跑）或写 pending 标记（DSH 在跑 / profile 未初始化）
 //!             └─ 清标记 + 提示
 //! ```
@@ -109,6 +110,14 @@ const BRIDGE_FILES: &[(&str, &str)] = &[
     (
         "deepseek_ocr_client.py",
         include_str!("../resources/py-bridge/deepseek_ocr_client.py"),
+    ),
+    // 用户脚本用的 magika 占位（2026-11-22）：桥接自己走 `_install_magika_stub()`，
+    // 但用户手写的脚本不该被迫复制那二十行。这个模块随其余文件一起释放，再配一个
+    // 指向本目录的 `magika-stub.pth`，`import magika_stub` 就在任意脚本里可用。
+    // 见 [`ensure_magika_stub_pth`]。
+    (
+        "magika_stub.py",
+        include_str!("../resources/py-bridge/magika_stub.py"),
     ),
 ];
 
@@ -310,6 +319,61 @@ fn bridge_phase_message(phase: BridgePhase, pending: bool, profile: Option<&str>
 
 // ---------- 部署主体（pip 装完之后调） ----------
 
+/// 写 `.pth` 的那一小段 Python（见 [`ensure_magika_stub_pth`]）。
+///
+/// `.pth` 的规矩：一行一个路径，`site` 启动时把每行加进 `sys.path`；只有以
+/// `import` 开头的行才会被执行 —— 这里只写路径，不执行任何代码。
+const MAGIKA_STUB_PTH_CODE: &str = "\
+import sys, pathlib, sysconfig
+p = pathlib.Path(sysconfig.get_paths()['purelib']) / 'magika-stub.pth'
+p.write_text(sys.argv[1], encoding='utf-8')
+print(p)
+";
+
+/// 把 `magika-stub.pth` 写进解释器自己的 site-packages，指向 py-bridge 目录。
+///
+/// **为什么需要它**：`magika_stub.py` 释放进 `py-bridge\` 之后，只有桥接进程
+/// （PYTHONPATH 里挂着这个目录）能 import 到它。用户自己的脚本要能
+/// `import magika_stub`，就得让这个目录出现在解释器的 `sys.path` 上 ——
+/// `.pth` 正是 Python 启动时自动处理的那个入口。
+///
+/// **为什么问 Python 而不是从 Rust 拼路径**：基础安装是 `<root>\Lib\site-packages`，
+/// 虚拟环境是 `<venv>\Lib\site-packages`（而 `python.exe` 在 `<venv>\Scripts\`），
+/// 两种布局差一层；`py.exe -3` 启动器更是根本看不出根目录。`sysconfig` 是唯一
+/// 不猜的答案。路径用 `sys.argv[1]` 传进去，省掉 Windows 反斜杠嵌进 Python
+/// 字面量时的转义问题。
+///
+/// 失败**不 panic**：写不进去（Program Files 装法、目录只读）只意味着
+/// 「用户脚本用不了这个占位」；桥接自己走 `sys.modules`，不依赖 `.pth`。
+fn ensure_magika_stub_pth(app: &AppHandle, py: &detect::PythonExe) -> Result<String, String> {
+    let bd = bridge_dir(&config::config_dir(app));
+    if !bd.join("magika_stub.py").is_file() {
+        return Err("magika_stub.py 尚未释放".to_string());
+    }
+    let bd_str = bd.to_string_lossy().to_string();
+    let args = py.full_args(&["-c", MAGIKA_STUB_PTH_CODE, bd_str.as_str()]);
+    let (ok, out) = crate::process::run_cmd_capture(
+        &py.program.to_string_lossy(),
+        &args,
+        "",
+        Duration::from_secs(60),
+    )?;
+    if !ok {
+        return Err(out.trim().to_string());
+    }
+    Ok(out.trim().to_string())
+}
+
+/// 重新释放代码之后顺手补 `.pth`：失败只落 desktop.log，不打断激活流程。
+fn repair_magika_stub_pth(app: &AppHandle, py: &detect::PythonExe) {
+    if let Err(e) = ensure_magika_stub_pth(app, py) {
+        logger::append_line(
+            &logger::desktop_log_path(app),
+            &format!("[py-bridge] magika-stub.pth repair failed: {e}"),
+        );
+    }
+}
+
 /// 释放 + 注册。返回给用户看的说明文字。
 ///
 /// **失败绝不 panic、不抛到安装流程**：这一步失败不该把「库已经装好了」变成
@@ -323,6 +387,20 @@ pub fn deploy_after_install(app: &AppHandle, py: &detect::PythonExe) -> Result<S
     let (rel_b, rel_u) = release_sources(&bd, &bun)?;
     crate::process::setup_progress(app, "install", &i18n::fmt("py_bridge_released", &[&rel_b]));
     crate::process::setup_progress(app, "install", &i18n::fmt("py_bridge_bundle_released", &[&rel_u]));
+
+    // 让用户自己的脚本也能 `import magika_stub`：往解释器的 site-packages 挂一个
+    // `.pth`。失败只落日志 —— 桥接本身走 sys.modules，不依赖这一步。
+    match ensure_magika_stub_pth(app, py) {
+        Ok(p) => crate::process::setup_progress(
+            app,
+            "install",
+            &i18n::fmt("py_magika_stub_linked", &[&p]),
+        ),
+        Err(e) => logger::append_line(
+            &logger::desktop_log_path(app),
+            &format!("[py-bridge] magika-stub.pth failed: {e}"),
+        ),
+    }
 
     let python_path = py.program.to_string_lossy().to_string();
     write_bundle_config(&bun, &python_path, &bd)?;
@@ -598,6 +676,8 @@ pub fn activate_pending(app: &AppHandle) -> Option<String> {
             );
             return None;
         }
+        // 代码刚被重新释放：`.pth` 也可能缺（用户清过 site-packages、换过 Python）。
+        repair_magika_stub_pth(app, &py);
     }
     // 复用进门判定时已经算好的 profile（避免重复跑 dsh --dump-config）
     let profile = profile_hint.unwrap_or_else(|| {
@@ -634,6 +714,8 @@ pub fn activate_pending(app: &AppHandle) -> Option<String> {
                 logger::append_line(&logger::desktop_log_path(app), &line);
                 return Some(line);
             }
+            // 同上：代码重新落地了，`.pth` 一并补回。
+            repair_magika_stub_pth(app, &py);
         }
         let python_path = py.program.to_string_lossy().to_string();
         if let Err(e) = write_bundle_config(&bun, &python_path, &bd) {
@@ -1250,7 +1332,7 @@ mod tests {
     #[test]
     fn every_generated_file_is_compiled_in_and_non_empty() {
         // 少写一个 include_str 都不会编译不过，但内容空/名错会让 Python 侧 ModuleNotFoundError
-        assert_eq!(BRIDGE_FILES.len(), 11, "py-bridge 下应有 11 个文件");
+        assert_eq!(BRIDGE_FILES.len(), 12, "py-bridge 下应有 12 个文件");
         for (name, body) in BRIDGE_FILES.iter().chain(BUNDLE_FILES.iter()) {
             assert!(!body.trim().is_empty(), "{name} 内容为空");
             assert!(body.len() > 200, "{name}  suspiciously short");
@@ -1264,6 +1346,8 @@ mod tests {
         // 第三路（页面图给 Agent 自己看）不需要额外模块 —— 它由 doc_route 自己渲染。
         assert!(names.contains(&"doc_route.py"));
         assert!(names.contains(&"oxr_client.py"));
+        // 用户脚本的 magika 占位：缺了它 `.pth` 就指向一个空目录，脚本 import 不到。
+        assert!(names.contains(&"magika_stub.py"));
     }
 
     #[test]
